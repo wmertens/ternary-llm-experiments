@@ -60,3 +60,20 @@ def set_levels(model: nn.Module, levels: int) -> int:
             m.levels = int(levels)
             n += 1
     return n
+
+
+@torch.no_grad()
+def clamp_qlinear_weights(model: nn.Module, lo: float = -1.0, hi: float = 1.0) -> int:
+    """Project every QLinear latent weight back into [lo, hi].
+
+    The quantizer clamps to [-1,1] anyway, so anything outside that range is
+    dead capacity (the rounded value can't change until the latent re-enters
+    the box). Lion's sign-based update has no implicit norm control, so this
+    projection is needed every step.
+    """
+    n = 0
+    for m in model.modules():
+        if isinstance(m, QLinear):
+            m.weight.data.clamp_(lo, hi)
+            n += 1
+    return n

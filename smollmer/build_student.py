@@ -2,18 +2,19 @@
 attention/MLP projection with a QLinear, initialized so the student's
 forward at levels=257 closely matches the teacher.
 
-Init strategy (Bonsai paper-style, not Bonsai-code-style):
-  s_i = ||W_i||_2 / sqrt(in_features)   # per-output-row scale
-  W'   = W / s.unsqueeze(1)             # rescaled latent weight
-The /sqrt(in) factor keeps the typical |W'| around 1 so the curriculum's
-clamp to [-1,1] doesn't immediately wipe the row out at low levels.
+Init strategy:
+  s_i = max(|W_i|)            # per-output-row scale = row's max abs
+  W'   = W / s.unsqueeze(1)   # rescaled latent weight, all in [-1, 1]
+At L=257 this gives q(W') * s ≈ W (the quantizer error is tiny because
+W' is already in the box).  At L=3 only the largest few elements per row
+survive as ±1, others round to 0 -- a sparse-ternary starting point that
+the curriculum walks the student toward.
 embed_tokens, lm_head, RMSNorms and biases are left untouched.
 """
 from __future__ import annotations
 
 from typing import Iterable
 
-import math
 import torch
 from torch import nn
 
@@ -51,10 +52,8 @@ def quantize_in_place(model: nn.Module, levels: int = 257,
             ql.to(device=child.weight.device, dtype=child.weight.dtype)
 
             w = child.weight.detach().to(torch.float32)
-            row_norm = w.norm(dim=1)
-            scale = row_norm / math.sqrt(child.in_features)
-            scale = scale.clamp_min(1e-8)
-            w_scaled = w / scale.unsqueeze(1)
+            scale = w.abs().amax(dim=1).clamp_min(1e-8)        # per-row max|w|
+            w_scaled = w / scale.unsqueeze(1)                   # in [-1, 1]
 
             ql.weight.data.copy_(w_scaled.to(child.weight.dtype))
             ql.scales.data.copy_(scale.to(torch.float32))

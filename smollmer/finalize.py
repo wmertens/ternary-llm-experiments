@@ -17,7 +17,7 @@ from tqdm import tqdm
 from .build_student import load_student
 from .distill import ShardedDataset, kl_with_rest, lr_at
 from .pack import pack_ternary
-from .qlinear import QLinear, quantize_levels, set_levels
+from .qlinear import QLinear, clamp_qlinear_weights, quantize_levels, set_levels
 
 
 def freeze_for_finalize(model: torch.nn.Module, freeze_embed: bool,
@@ -170,6 +170,7 @@ def main() -> None:
                 [p for p in model.parameters() if p.requires_grad],
                 args.max_grad_norm)
         opt.step()
+        clamp_qlinear_weights(model)
         opt.zero_grad(set_to_none=True)
         if (step + 1) % args.log_every == 0:
             pbar.set_postfix(loss=f"{running / max(1, running_n):.4f}",

@@ -10,16 +10,18 @@ dependencies = [
     "lion-pytorch>=0.2",
     "tqdm>=4.66",
     "numpy>=1.26",
+    "tensorboard>=2.16",
 ]
 
 [project.optional-dependencies]
 train = ["accelerate>=0.34"]
 
 [project.scripts]
-smollmer-cache  = "smollmer.cache_teacher:main"
-smollmer-distill = "smollmer.distill:main"
+smollmer-cache    = "smollmer.cache_teacher:main"
+smollmer-distill  = "smollmer.distill:main"
 smollmer-finalize = "smollmer.finalize:main"
-smollmer-chat   = "smollmer.chat:main"
+smollmer-chat     = "smollmer.chat:main"
+smollmer-fix-ckpt = "smollmer.fix_checkpoint:main"
 
 [build-system]
 requires = ["hatchling"]

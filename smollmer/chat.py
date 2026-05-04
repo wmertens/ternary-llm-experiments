@@ -45,9 +45,20 @@ def _load_packed(model: torch.nn.Module, sd: dict[str, torch.Tensor]) -> None:
     model.load_state_dict(rest, strict=False)
 
 
+def _strip_compile_prefix(sd: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """torch.compile wraps the model in OptimizedModule and prefixes every key
+    with `_orig_mod.`; strip it so the checkpoint is portable."""
+    prefix = "_orig_mod."
+    if any(k.startswith(prefix) for k in sd):
+        return {(k[len(prefix):] if k.startswith(prefix) else k): v for k, v in sd.items()}
+    return sd
+
+
 def load_model(model_id: str, ckpt_path: Path,
                device: str, dtype: torch.dtype):
     model = AutoModelForCausalLM.from_pretrained(model_id, dtype=dtype)
+    if hasattr(model, "config"):
+        model.config.use_cache = True  # ok for chat (single-thread inference)
     quantize_in_place(model, levels=3)
 
     with safe_open(str(ckpt_path), framework="pt") as f:
@@ -59,8 +70,25 @@ def load_model(model_id: str, ckpt_path: Path,
         _load_packed(model, sd)
         set_levels(model, 3)
     else:
-        model.load_state_dict(sd, strict=False)
+        sd = _strip_compile_prefix(sd)
+        missing, unexpected = model.load_state_dict(sd, strict=False)
+        if missing:
+            print(f"[load] WARNING: {len(missing)} missing keys (model has them, ckpt does not). "
+                  f"First 5: {missing[:5]}")
+        if unexpected:
+            print(f"[load] WARNING: {len(unexpected)} unexpected keys (ckpt has them, model does not). "
+                  f"First 5: {unexpected[:5]}")
+        if not missing and not unexpected:
+            print(f"[load] all {len(sd)} keys matched")
         set_levels(model, int(meta.get("levels", 3)))
+
+    # Sanity check: at least one QLinear should have non-trivial weight values.
+    for name, m in model.named_modules():
+        if isinstance(m, QLinear):
+            w = m.weight.detach().float()
+            print(f"[sanity] {name}: weight |max|={w.abs().max().item():.3f} "
+                  f"mean|w|={w.abs().mean().item():.3f} scales|max|={m.scales.abs().max().item():.3f}")
+            break
 
     return model.to(device).eval(), meta, is_packed
 
@@ -107,7 +135,13 @@ def main() -> None:
             break
         if not prompt.strip():
             continue
-        enc = tok(prompt, return_tensors="pt").to(args.device)
+        # Cached training sequences begin with BOS (`<|endoftext|>`); the
+        # SmolLM2 tokenizer does NOT prepend it by default (`add_bos_token=False`),
+        # so without this the student sees an out-of-distribution prefix and
+        # collapses into degenerate loops. Prepend explicitly.
+        if tok.bos_token and not prompt.startswith(tok.bos_token):
+            prompt = tok.bos_token + prompt
+        enc = tok(prompt, return_tensors="pt", add_special_tokens=False).to(args.device)
         streamer = TextStreamer(tok, skip_prompt=True, skip_special_tokens=True)
         with torch.no_grad():
             model.generate(
