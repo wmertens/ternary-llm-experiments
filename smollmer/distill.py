@@ -28,7 +28,8 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from .build_student import load_student
-from .qlinear import QLinear, clamp_qlinear_weights, quantize_levels, set_levels
+from .qlinear import (QLinear, clamp_qlinear_weights, quantize_levels,
+                      set_levels, set_sherry)
 
 
 _INTERRUPT = {"flag": False}
@@ -354,12 +355,14 @@ def lr_at(step: int, total: int, base_lr: float, warmup: int) -> float:
     return base_lr * (0.1 + 0.9 * 0.5 * (1.0 + math.cos(math.pi * progress)))
 
 
-def save_checkpoint(model, path: Path, levels: int, stage: int, model_id: str) -> None:
+def save_checkpoint(model, path: Path, levels: int, stage: int, model_id: str,
+                    sherry: bool) -> None:
     sd = {k: v.detach().cpu().contiguous() for k, v in model.state_dict().items()}
     save_file(sd, str(path), metadata={
         "levels": str(levels),
         "stage": str(stage),
         "model_id": model_id,
+        "sherry": "1" if sherry else "0",
     })
 
 
@@ -425,6 +428,31 @@ def main() -> None:
     ap.add_argument("--run-name", type=str, default=None,
                     help="Subdirectory under --tb-dir for this run. "
                          "Default: timestamped. Resumed runs reuse the saved name.")
+    ap.add_argument("--sherry", action=argparse.BooleanOptionalAction, default=False,
+                    help="Apply the Sherry-encoding constraint to every QLinear: "
+                         "in each contiguous block of 4 weights along in_features, "
+                         "force the smallest-|w| slot to 0. Active at every L "
+                         "(not just L=3) so weight magnitudes redistribute "
+                         "gradually rather than being snapped at the end. Pass "
+                         "consistently across resumes; saved in ckpt metadata.")
+    ap.add_argument("--permute-for-sherry", action=argparse.BooleanOptionalAction,
+                    default=False,
+                    help="Apply free-dim math-preserving permutations once at "
+                         "init: down_proj cols + up_proj/gate_proj rows on the "
+                         "MLP intermediate dim, and v_proj rows + o_proj cols on "
+                         "per-KV-head head_dim slices. Goal: align low-magnitude "
+                         "columns with sherry-block position 0. Skipped on "
+                         "--resume / interrupted snapshot. Implied (and "
+                         "redundant) when --permute-each-stage is set.")
+    ap.add_argument("--permute-each-stage", action=argparse.BooleanOptionalAction,
+                    default=False,
+                    help="Re-apply the free-dim permutation at the start of "
+                         "every curriculum stage, scoring against the current "
+                         "trained weights and syncing optimizer state alongside. "
+                         "Only fires when entering a stage cleanly (skipped if "
+                         "we're resuming inside an in-progress stage from an "
+                         "interrupt — the on-disk weights are already post-"
+                         "permute for that stage).")
     args = ap.parse_args()
 
     args.out.mkdir(parents=True, exist_ok=True)
@@ -434,6 +462,9 @@ def main() -> None:
     print(f"[build] loading {args.model} and quantizing projections")
     model, _tok, n_replaced = load_student(args.model, dtype=torch.float32, levels=257)
     print(f"[build] {n_replaced} QLinear modules")
+    n_sherry = set_sherry(model, args.sherry)
+    if args.sherry:
+        print(f"[build] sherry constraint enabled on {n_sherry} layers")
     model = model.to(args.device)
     if hasattr(model, "config"):
         model.config.use_cache = False  # never needed for training fwd/bwd
@@ -454,12 +485,29 @@ def main() -> None:
             print(f"[resume] missing keys: {len(missing)} (showing 5): {missing[:5]}")
         if unexpected:
             print(f"[resume] unexpected keys: {len(unexpected)} (showing 5): {unexpected[:5]}")
+        ckpt_sherry = resume_meta.get("sherry") == "1"
+        if ckpt_sherry != args.sherry:
+            print(f"[resume] WARNING: --sherry={args.sherry} but ckpt has "
+                  f"sherry={ckpt_sherry}; using --sherry value")
     elif interrupted_path.exists():
         print(f"[resume] found interrupted snapshot at {interrupted_path}")
         interrupted_state = torch.load(str(interrupted_path),
                                        map_location=args.device,
                                        weights_only=False)
         model.load_state_dict(interrupted_state["model"])
+
+    fresh_start = args.resume is None and interrupted_state is None
+    # --permute-each-stage handles stage 0's permute itself; only fire the
+    # init-time permute when running with --permute-for-sherry alone.
+    if args.permute_for_sherry and not args.permute_each_stage:
+        if fresh_start:
+            from .permute import permute_for_sherry
+            n_perm = permute_for_sherry(model, block=4)
+            print(f"[build] permute-for-sherry applied to {n_perm} matrices "
+                  "(MLP intermediate + per-KV-head V/O)")
+        else:
+            print("[build] WARNING: --permute-for-sherry ignored on resume "
+                  "(loaded weights already encode any prior permutation)")
 
     if args.compile:
         model = torch.compile(model)
@@ -543,6 +591,21 @@ def main() -> None:
         if levels in lr_overrides:
             print(f"[stage {stage_idx}] lr override: {stage_lr} (vs default {args.lr})")
         step_offset = start_step if stage_idx == start_stage else 0
+        if args.permute_each_stage:
+            # Skip if we're resuming inside this stage from an interrupt — the
+            # restored model + opt-state are already post-permute for this
+            # stage. (Subsequent stages' interrupted_state is None, so they
+            # always permute when entered.)
+            is_interrupted_resume = (interrupted_state is not None
+                                     and stage_idx == interrupted_state["stage_idx"])
+            if not is_interrupted_resume:
+                from .permute import permute_for_sherry
+                n_perm = permute_for_sherry(model, block=4, optimizer=opt)
+                print(f"[stage {stage_idx}] permuted {n_perm} matrices "
+                      "(--permute-each-stage; opt state synced)")
+            else:
+                print(f"[stage {stage_idx}] skipping permute (resuming "
+                      "in-progress stage from interrupt)")
         ctrl = PlateauController(max_steps=max_steps,
                                  patience=args.patience,
                                  min_steps=max(args.min_stage_steps, step_offset + 1),
@@ -671,7 +734,7 @@ def main() -> None:
         start_step = 0
         interrupted_state = None
         ckpt_path = args.out / f"stage_{stage_idx:02d}_L{levels}.safetensors"
-        save_checkpoint(model, ckpt_path, levels, stage_idx, args.model)
+        save_checkpoint(model, ckpt_path, levels, stage_idx, args.model, args.sherry)
         print(f"[stage {stage_idx}] saved {ckpt_path}")
 
     if interrupted_path.exists():

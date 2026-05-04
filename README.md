@@ -64,7 +64,10 @@ smollmer-finalize --cache-dir cache/ \
                   --out ckpts/ --steps 1000 --lr 5e-5
 ```
 
-Writes `ckpts/final_packed.safetensors` with 2-bit packed ternary weights + fp32 per-row scales + bf16 embed/lm_head/norms.
+Writes `ckpts/final_packed.safetensors` with tightly-packed ternary weights + fp32 per-row scales + bf16 embed/lm_head/norms. Packing format is chosen automatically:
+
+- plain ternary → **1.6 bpw** base-3 (5 trits per uint8)
+- sherry-constrained ternary → **1.25 bpw** (5 bits per 4-trit block)
 
 ### 4. Inspect any stage
 
@@ -99,7 +102,8 @@ If you OOM, add `--grad-checkpointing` and/or shrink `--batch-size`.
 | file | purpose |
 |------|---------|
 | `smollmer/qlinear.py` | `QLinear` with mutable `levels`, generalized quantizer, STE |
-| `smollmer/pack.py` | 2-bit ternary packing (4 weights/byte) |
+| `smollmer/pack.py` | 1.6 bpw base-3 packing + 1.25 bpw sherry packing (legacy 2 bpw kept for old ckpts) |
+| `smollmer/permute.py` | math-preserving free-dim permutations to align weak weights with sherry block boundaries |
 | `smollmer/build_student.py` | swap projections in any HF causal LM |
 | `smollmer/cache_teacher.py` | self-text generation + top-K logit cache |
 | `smollmer/distill.py` | curriculum loop, Lion, KL+rest-bucket loss |
@@ -112,3 +116,19 @@ If you OOM, add `--grad-checkpointing` and/or shrink `--batch-size`.
 - Bonsai trains from scratch on ~3.8B tokens. We distill from the FP base — much cheaper at 135M scale.
 - KL loss includes an explicit "rest mass" bucket so the student is penalized for putting probability outside the teacher's top-K (without it, ternary outliers can drift unchecked).
 - Curriculum over odd L is novel to this repo (Bonsai is L=3 from step 0). The closest analog in the literature is Quant-Noise (FAIR, 2004.07320).
+
+## Sherry mode (1.25 bpw)
+
+Plain ternary uses 3 states per weight, so the information-theoretic floor is `log2(3) ≈ 1.585` bpw (we pack at 1.6). The **sherry constraint** forces every block of 4 weights to contain *exactly one* zero — that gives `4 zero-positions × 2³ sign choices = 32 = 2⁵` states per block, i.e. **1.25 bpw**, a ~21% size win over plain ternary at the cost of a small accuracy hit.
+
+The constraint is folded into training so it costs ~nothing at the end:
+
+```bash
+smollmer-distill ... --sherry --permute-each-stage
+smollmer-finalize ... --resume ckpts/stage_07_L3.safetensors --out ckpts/
+```
+
+- `--sherry` enables `quantize_sherry` in the QLinear forward at every L of the curriculum (not just L=3): the smallest-|w| slot in each block is forced to 0 and any other slot that would round to 0 is bumped to ±`1/half`. Gradient flows via STE as usual.
+- `--permute-each-stage` permutes the *free* dimensions before each curriculum stage so the weakest columns line up with sherry block position 0. "Free" = MLP intermediate dim and per-KV-head V/O dim — these can be permuted with paired adjustments to neighbouring matrices so the forward pass is unchanged. The residual stream and RoPE-rotated Q/K dims are not free and are skipped. See `smollmer/permute.py` for the math.
+
+Stage checkpoints record `sherry=1` in metadata so `finalize` and `chat` re-enable the constraint automatically. `finalize` then writes the 1.25 bpw packed format.

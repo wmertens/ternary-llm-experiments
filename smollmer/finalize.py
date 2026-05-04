@@ -16,8 +16,9 @@ from tqdm import tqdm
 
 from .build_student import load_student
 from .distill import ShardedDataset, kl_with_rest, lr_at
-from .pack import pack_ternary
-from .qlinear import QLinear, clamp_qlinear_weights, quantize_levels, set_levels
+from .pack import pack_sherry, pack_ternary_158
+from .qlinear import (QLinear, clamp_qlinear_weights, quantize_levels,
+                      quantize_sherry, set_levels, set_sherry)
 
 
 def freeze_for_finalize(model: torch.nn.Module, freeze_embed: bool,
@@ -50,8 +51,15 @@ def freeze_for_finalize(model: torch.nn.Module, freeze_embed: bool,
 @torch.no_grad()
 def to_packed_state_dict(model: torch.nn.Module,
                          dtype: torch.dtype = torch.bfloat16) -> dict[str, torch.Tensor]:
-    """Build a state_dict with QLinear weights replaced by 2-bit packed
-    ternary tensors. Other params are cast to `dtype` for storage."""
+    """Build a state_dict with QLinear weights replaced by tightly-packed
+    ternary tensors. Other params are cast to `dtype` for storage.
+
+    Per-module `sherry` flag picks both the projection and the packer:
+      sherry=True  -> quantize_sherry + pack_sherry (1.25 bpw)
+      sherry=False -> quantize_levels + pack_ternary_158 (1.6 bpw)
+
+    Sherry packing requires `in_features % 32 == 0`; we fall back to the
+    1.6 bpw packer for any oddly-shaped sherry layer rather than failing."""
     qlinear_skip: set[str] = set()
     out: dict[str, torch.Tensor] = {}
     for name, m in model.named_modules():
@@ -60,8 +68,12 @@ def to_packed_state_dict(model: torch.nn.Module,
         qlinear_skip.update({f"{name}.weight", f"{name}.scales"})
         if m.bias is not None:
             qlinear_skip.add(f"{name}.bias")
-        T = quantize_levels(m.weight.detach(), 3).to(torch.int8).cpu()
-        out[f"{name}.T_packed"] = pack_ternary(T)
+        quant = quantize_sherry if m.sherry else quantize_levels
+        T = quant(m.weight.detach(), 3).to(torch.int8).cpu()
+        if m.sherry and m.in_features % 32 == 0:
+            out[f"{name}.T_packed"] = pack_sherry(T)
+        else:
+            out[f"{name}.T_packed"] = pack_ternary_158(T)
         out[f"{name}.scales"] = m.scales.detach().cpu().to(torch.float32).contiguous()
         if m.bias is not None:
             out[f"{name}.bias"] = m.bias.detach().cpu().to(dtype).contiguous()
@@ -121,6 +133,10 @@ def main() -> None:
         print(f"[resume] unexpected: {len(unexpected)}")
 
     set_levels(model, 3)
+    sherry = meta.get("sherry") == "1"
+    if sherry:
+        n_sherry = set_sherry(model, True)
+        print(f"[finalize] sherry constraint active on {n_sherry} layers (from ckpt metadata)")
     n_train, n_frozen = freeze_for_finalize(model, args.freeze_embed, args.freeze_lm_head)
     print(f"[freeze] trainable={n_train:,} frozen={n_frozen:,}")
 
@@ -179,10 +195,12 @@ def main() -> None:
 
     packed_sd = to_packed_state_dict(model, dtype=store_dtype)
     out_path = args.out / "final_packed.safetensors"
+    fmt = "smollmer-packed-sherry-v1" if sherry else "smollmer-packed-158-v1"
     save_file(packed_sd, str(out_path), metadata={
-        "format": "smollmer-packed-v1",
+        "format": fmt,
         "model_id": args.model,
         "store_dtype": args.store_dtype,
+        "sherry": "1" if sherry else "0",
     })
     print(f"[done] wrote {out_path} ({sum(v.numel() * v.element_size() for v in packed_sd.values()) / 1e6:.1f} MB)")
 

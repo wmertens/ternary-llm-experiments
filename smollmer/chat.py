@@ -16,16 +16,29 @@ from safetensors.torch import load_file
 from transformers import AutoModelForCausalLM, AutoTokenizer, TextStreamer
 
 from .build_student import quantize_in_place
-from .pack import unpack_ternary
-from .qlinear import QLinear, set_levels
+from .pack import unpack_sherry, unpack_ternary, unpack_ternary_158
+from .qlinear import QLinear, set_levels, set_sherry
 
 
 def _detect_packed(sd_keys) -> bool:
     return any(k.endswith(".T_packed") for k in sd_keys)
 
 
+def _unpacker_for(fmt: str):
+    """Pick an unpack function from the saved-checkpoint format string."""
+    if fmt == "smollmer-packed-sherry-v1":
+        return unpack_sherry
+    if fmt == "smollmer-packed-158-v1":
+        return unpack_ternary_158
+    if fmt in ("smollmer-packed-v1", ""):
+        return unpack_ternary  # legacy 2-bpw
+    raise ValueError(f"unknown packed format: {fmt!r}")
+
+
 @torch.no_grad()
-def _load_packed(model: torch.nn.Module, sd: dict[str, torch.Tensor]) -> None:
+def _load_packed(model: torch.nn.Module, sd: dict[str, torch.Tensor],
+                 fmt: str) -> None:
+    unpack = _unpacker_for(fmt)
     consumed: set[str] = set()
     for name, m in model.named_modules():
         if not isinstance(m, QLinear):
@@ -34,7 +47,12 @@ def _load_packed(model: torch.nn.Module, sd: dict[str, torch.Tensor]) -> None:
         s_key = f"{name}.scales"
         if T_key not in sd or s_key not in sd:
             raise KeyError(f"packed checkpoint missing keys for {name}")
-        T = unpack_ternary(sd[T_key], in_features=m.in_features, dtype=m.weight.dtype)
+        # Sherry layers with in_features % 32 != 0 are written via the 1.6
+        # bpw fallback; detect by packed-row width and use the right unpacker.
+        u = unpack
+        if u is unpack_sherry and m.in_features % 32 != 0:
+            u = unpack_ternary_158
+        T = u(sd[T_key], in_features=m.in_features, dtype=m.weight.dtype)
         m.weight.data.copy_(T.to(m.weight.dtype))
         m.scales.data.copy_(sd[s_key].to(torch.float32))
         consumed.update({T_key, s_key})
@@ -67,7 +85,7 @@ def load_model(model_id: str, ckpt_path: Path,
     is_packed = _detect_packed(sd.keys())
 
     if is_packed:
-        _load_packed(model, sd)
+        _load_packed(model, sd, fmt=meta.get("format", ""))
         set_levels(model, 3)
     else:
         sd = _strip_compile_prefix(sd)
@@ -81,6 +99,13 @@ def load_model(model_id: str, ckpt_path: Path,
         if not missing and not unexpected:
             print(f"[load] all {len(sd)} keys matched")
         set_levels(model, int(meta.get("levels", 3)))
+
+    # Sherry-trained ckpts need the constraint active so the QLinear forward
+    # reproduces training-time math (packed ckpts already store the projected
+    # trits, so this is mostly a no-op there, but flip it for symmetry).
+    if meta.get("sherry") == "1":
+        n_sherry = set_sherry(model, True)
+        print(f"[load] sherry constraint active on {n_sherry} layers")
 
     # Sanity check: at least one QLinear should have non-trivial weight values.
     for name, m in model.named_modules():
