@@ -208,3 +208,25 @@ def unpack_ternary(packed: torch.Tensor, in_features: int,
     codes = torch.stack([w0, w1, w2, w3], dim=-1).view(out_f, packed_w * 4)
     codes = codes[:, :in_features]
     return (codes.to(torch.int8) - 1).to(dtype)
+
+
+# ----- int8 row-wise (for embed_tokens / lm_head) ------------------------
+
+@torch.no_grad()
+def quantize_embed_int8(W: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per-row symmetric int8 for [V, H] embedding/lm_head weights.
+
+    Returns (int8 [V, H], fp32 per-row scale [V]). Halves storage vs bf16
+    with negligible perplexity hit on token embeddings."""
+    if W.dim() != 2:
+        raise ValueError(f"expected 2D tensor, got {tuple(W.shape)}")
+    W_f = W.detach().to(torch.float32)
+    scale = W_f.abs().amax(dim=1).clamp_min(1e-8) / 127.0
+    q = (W_f / scale.unsqueeze(1)).round().clamp(-128, 127).to(torch.int8)
+    return q.contiguous(), scale.contiguous()
+
+
+@torch.no_grad()
+def dequantize_embed_int8(q: torch.Tensor, scale: torch.Tensor,
+                          dtype: torch.dtype = torch.float32) -> torch.Tensor:
+    return (q.to(torch.float32) * scale.unsqueeze(1)).to(dtype)

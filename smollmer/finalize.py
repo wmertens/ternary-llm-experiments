@@ -16,7 +16,9 @@ from tqdm import tqdm
 
 from .build_student import load_student
 from .distill import ShardedDataset, kl_with_rest, lr_at
-from .pack import pack_sherry, pack_ternary_158
+from .pack import pack_sherry, pack_ternary_158, quantize_embed_int8
+
+EMBED_INT8_KEYS: tuple[str, ...] = ("model.embed_tokens.weight", "lm_head.weight")
 from .qlinear import (QLinear, clamp_qlinear_weights, quantize_levels,
                       quantize_sherry, set_levels, set_sherry)
 
@@ -50,7 +52,8 @@ def freeze_for_finalize(model: torch.nn.Module, freeze_embed: bool,
 
 @torch.no_grad()
 def to_packed_state_dict(model: torch.nn.Module,
-                         dtype: torch.dtype = torch.bfloat16) -> dict[str, torch.Tensor]:
+                         dtype: torch.dtype = torch.bfloat16,
+                         quant_embed: bool = True) -> dict[str, torch.Tensor]:
     """Build a state_dict with QLinear weights replaced by tightly-packed
     ternary tensors. Other params are cast to `dtype` for storage.
 
@@ -84,6 +87,13 @@ def to_packed_state_dict(model: torch.nn.Module,
         if v.is_floating_point():
             v = v.to(dtype)
         out[k] = v.contiguous()
+    if quant_embed:
+        for k in EMBED_INT8_KEYS:
+            if k in out:
+                q, s = quantize_embed_int8(out[k])
+                del out[k]
+                out[f"{k}_int8"] = q
+                out[f"{k}_scale"] = s
     return out
 
 
@@ -111,6 +121,8 @@ def main() -> None:
                     choices=["bfloat16", "float16", "float32"])
     ap.add_argument("--freeze-embed", action="store_true")
     ap.add_argument("--freeze-lm-head", action="store_true")
+    ap.add_argument("--no-quant-embed", action="store_true",
+                    help="Skip int8 quant of embed_tokens / lm_head; store at --store-dtype.")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
@@ -193,7 +205,8 @@ def main() -> None:
                              lr=f"{cur_lr:.2e}")
             running, running_n = 0.0, 0
 
-    packed_sd = to_packed_state_dict(model, dtype=store_dtype)
+    packed_sd = to_packed_state_dict(model, dtype=store_dtype,
+                                     quant_embed=not args.no_quant_embed)
     out_path = args.out / "final_packed.safetensors"
     fmt = "smollmer-packed-sherry-v1" if sherry else "smollmer-packed-158-v1"
     save_file(packed_sd, str(out_path), metadata={
@@ -201,6 +214,7 @@ def main() -> None:
         "model_id": args.model,
         "store_dtype": args.store_dtype,
         "sherry": "1" if sherry else "0",
+        "embed_int8": "0" if args.no_quant_embed else "1",
     })
     print(f"[done] wrote {out_path} ({sum(v.numel() * v.element_size() for v in packed_sd.values()) / 1e6:.1f} MB)")
 
