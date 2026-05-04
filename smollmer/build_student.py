@@ -33,8 +33,16 @@ def _is_target(name: str, targets: Iterable[str]) -> bool:
 
 @torch.no_grad()
 def quantize_in_place(model: nn.Module, levels: int = 257,
-                      targets: Iterable[str] = PROJ_NAMES) -> int:
+                      targets: Iterable[str] = PROJ_NAMES,
+                      latent_dtype: torch.dtype = torch.float16) -> int:
     """Replace target nn.Linear modules with QLinear, copying weights.
+
+    `latent_dtype` controls the storage dtype of the QLinear latent weight.
+    The latent is mathematically constrained to [-1, 1] (init scales by
+    per-row max, training projects every step via clamp_qlinear_weights),
+    so fp16 is a strict win over bf16: ~8x finer ULP near zero where most
+    latents live, with no risk of overflow. Memory: 270 MB → 135 MB on
+    SmolLM2-135M's projection params.
 
     Returns the number of layers replaced.
     """
@@ -50,12 +58,13 @@ def quantize_in_place(model: nn.Module, levels: int = 257,
             ql = QLinear(child.in_features, child.out_features,
                          bias=child.bias is not None, levels=levels)
             ql.to(device=child.weight.device, dtype=child.weight.dtype)
+            ql.weight.data = ql.weight.data.to(latent_dtype)
 
             w = child.weight.detach().to(torch.float32)
             scale = w.abs().amax(dim=1).clamp_min(1e-8)        # per-row max|w|
             w_scaled = w / scale.unsqueeze(1)                   # in [-1, 1]
 
-            ql.weight.data.copy_(w_scaled.to(child.weight.dtype))
+            ql.weight.data.copy_(w_scaled.to(latent_dtype))
             ql.scales.data.copy_(scale.to(torch.float32))
             if child.bias is not None:
                 ql.bias.data.copy_(child.bias.detach())
@@ -67,10 +76,11 @@ def quantize_in_place(model: nn.Module, levels: int = 257,
 
 def load_student(model_id: str = "HuggingFaceTB/SmolLM2-135M",
                  dtype: torch.dtype = torch.bfloat16,
-                 levels: int = 257):
+                 levels: int = 257,
+                 latent_dtype: torch.dtype = torch.float16):
     """Convenience: load a HF causal LM and quantize its projections."""
     from transformers import AutoModelForCausalLM, AutoTokenizer
     tok = AutoTokenizer.from_pretrained(model_id)
     model = AutoModelForCausalLM.from_pretrained(model_id, dtype=dtype)
-    n = quantize_in_place(model, levels=levels)
+    n = quantize_in_place(model, levels=levels, latent_dtype=latent_dtype)
     return model, tok, n

@@ -150,19 +150,58 @@ class PlateauController:
         return False
 
 
-class CautiousAdamW(torch.optim.Optimizer):
-    """AdamW with the one-line "cautious" modification from
-    Liang et al. 2024 (arXiv:2411.16085). Each step, mask out coordinates
-    where the momentum sign disagrees with the current gradient sign, then
-    rescale the mask by its mean to preserve the effective LR.
+class Lion32(torch.optim.Optimizer):
+    """Lion (Chen et al. 2023, arXiv:2302.06675) with fp32 momentum buffer
+    regardless of parameter dtype.
 
-    This is the optimizer used by Deepgrove's Bonsai (paper §2.1: lr=0.01,
-    cosine + linear warmup) -- the recipe PrismML's Ternary Bonsai is built on.
-    Sample-efficiency gain reported: ~1.47x over plain AdamW.
+    Why fp32 state on fp16 params: sign() is exact, but the EMA
+    `beta * m + (1-beta) * g` accumulates rounding error in fp16 once
+    grads drop below the buffer's ULP. fp32 m, fp16 p costs an extra
+    cast per step but avoids silent stall on small late-stage grads.
+    """
 
-    Usage note: AdamW LRs are much higher than Lion's because the update is
-    divided by sqrt(v_hat). Bonsai used 1e-2; for QAT distillation 1e-3..1e-2
-    is a reasonable sweep range.
+    def __init__(self, params, lr: float = 3e-4,
+                 betas: tuple[float, float] = (0.9, 0.99),
+                 weight_decay: float = 0.0) -> None:
+        defaults = dict(lr=lr, betas=betas, weight_decay=weight_decay)
+        super().__init__(params, defaults)
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+        for group in self.param_groups:
+            lr = group["lr"]
+            beta1, beta2 = group["betas"]
+            wd = group["weight_decay"]
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+                grad = p.grad
+                state = self.state[p]
+                if not state:
+                    state["exp_avg"] = torch.zeros_like(p, dtype=torch.float32)
+                m = state["exp_avg"]
+                if wd != 0:
+                    p.mul_(1 - lr * wd)
+                # Update direction: sign(beta1*m + (1-beta1)*g), in fp32.
+                upd = m.mul(beta1).add_(grad, alpha=1 - beta1).sign_()
+                p.add_(upd.to(p.dtype), alpha=-lr)
+                # EMA update: beta2*m + (1-beta2)*g.
+                m.mul_(beta2).add_(grad, alpha=1 - beta2)
+        return loss
+
+
+class AdamW32(torch.optim.Optimizer):
+    """AdamW with fp32 state regardless of parameter dtype.
+
+    Necessary on fp16 latents: `exp_avg_sq = (1-b2)*g^2` puts the squared
+    grad through a near-1e-3 multiplier, so for grads < ~sqrt(fp16_min) ≈ 8e-3
+    the buffer underflows to 0 and the divisor sqrt(v_hat) collapses to eps —
+    silent stall once the model nears a minimum (where ternary L=3 spends
+    most of its time). fp32 v fixes it.
     """
 
     def __init__(self, params, lr: float = 1e-3,
@@ -189,8 +228,64 @@ class CautiousAdamW(torch.optim.Optimizer):
                 state = self.state[p]
                 if not state:
                     state["step"] = 0
-                    state["exp_avg"] = torch.zeros_like(p)
-                    state["exp_avg_sq"] = torch.zeros_like(p)
+                    state["exp_avg"] = torch.zeros_like(p, dtype=torch.float32)
+                    state["exp_avg_sq"] = torch.zeros_like(p, dtype=torch.float32)
+                state["step"] += 1
+                step = state["step"]
+                m, v = state["exp_avg"], state["exp_avg_sq"]
+                if wd != 0:
+                    p.mul_(1 - lr * wd)
+                m.mul_(beta1).add_(grad, alpha=1 - beta1)
+                v.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+                bc1 = 1 - beta1 ** step
+                bc2 = 1 - beta2 ** step
+                denom = (v / bc2).sqrt().add_(eps)
+                upd = (m / bc1) / denom
+                p.add_(upd.to(p.dtype), alpha=-lr)
+        return loss
+
+
+class CautiousAdamW(torch.optim.Optimizer):
+    """AdamW with the one-line "cautious" modification from
+    Liang et al. 2024 (arXiv:2411.16085). Each step, mask out coordinates
+    where the momentum sign disagrees with the current gradient sign, then
+    rescale the mask by its mean to preserve the effective LR.
+
+    This is the optimizer used by Deepgrove's Bonsai (paper §2.1: lr=0.01,
+    cosine + linear warmup) -- the recipe PrismML's Ternary Bonsai is built on.
+    Sample-efficiency gain reported: ~1.47x over plain AdamW.
+
+    State is allocated in fp32 regardless of param dtype (see AdamW32 docstring
+    for the underflow argument). Usage: AdamW LRs are much higher than Lion's;
+    Bonsai used 1e-2, sweep 1e-3..1e-2 for QAT distillation.
+    """
+
+    def __init__(self, params, lr: float = 1e-3,
+                 betas: tuple[float, float] = (0.9, 0.999),
+                 eps: float = 1e-8, weight_decay: float = 0.01) -> None:
+        defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
+        super().__init__(params, defaults)
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+        for group in self.param_groups:
+            lr = group["lr"]
+            beta1, beta2 = group["betas"]
+            eps = group["eps"]
+            wd = group["weight_decay"]
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+                grad = p.grad
+                state = self.state[p]
+                if not state:
+                    state["step"] = 0
+                    state["exp_avg"] = torch.zeros_like(p, dtype=torch.float32)
+                    state["exp_avg_sq"] = torch.zeros_like(p, dtype=torch.float32)
                 state["step"] += 1
                 step = state["step"]
                 m, v = state["exp_avg"], state["exp_avg_sq"]
@@ -205,7 +300,8 @@ class CautiousAdamW(torch.optim.Optimizer):
                 # Mean-normalize so total update magnitude is preserved (per paper).
                 mask = (m * grad > 0).to(m.dtype)
                 mask.div_(mask.mean().clamp_min(1e-3))
-                p.addcdiv_(m * mask, denom, value=-lr / bc1)
+                upd = (m * mask) / denom / bc1
+                p.add_(upd.to(p.dtype), alpha=-lr)
         return loss
 
 
@@ -460,8 +556,14 @@ def main() -> None:
     _install_sigint_handler()
 
     print(f"[build] loading {args.model} and quantizing projections")
-    model, _tok, n_replaced = load_student(args.model, dtype=torch.float32, levels=257)
-    print(f"[build] {n_replaced} QLinear modules")
+    # Latents stored as fp16: bounded to [-1,1] by init+clamp_qlinear_weights,
+    # so fp16's tapered ULP wins over bf16 by ~8x near zero (where most
+    # latents live at L=3) with no overflow risk. Optimizer state stays fp32
+    # via Lion32/AdamW32 to avoid v underflow on small late-stage grads.
+    model, _tok, n_replaced = load_student(args.model, dtype=torch.float32,
+                                           levels=257,
+                                           latent_dtype=torch.float16)
+    print(f"[build] {n_replaced} QLinear modules (latent dtype: float16)")
     n_sherry = set_sherry(model, args.sherry)
     if args.sherry:
         print(f"[build] sherry constraint enabled on {n_sherry} layers")
@@ -513,15 +615,14 @@ def main() -> None:
         model = torch.compile(model)
 
     if args.optimizer == "lion":
-        from lion_pytorch import Lion
-        opt = Lion(model.parameters(), lr=args.lr, weight_decay=args.wd)
+        opt = Lion32(model.parameters(), lr=args.lr, weight_decay=args.wd)
     elif args.optimizer == "adamw":
-        opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wd)
+        opt = AdamW32(model.parameters(), lr=args.lr, weight_decay=args.wd)
     elif args.optimizer == "cautious-adamw":
         opt = CautiousAdamW(model.parameters(), lr=args.lr, weight_decay=args.wd)
     else:
         raise ValueError(f"unknown optimizer: {args.optimizer}")
-    print(f"[opt] {args.optimizer} lr={args.lr} wd={args.wd}")
+    print(f"[opt] {args.optimizer} lr={args.lr} wd={args.wd} (fp32 state)")
 
     curriculum = parse_curriculum(args.curriculum)
     lr_overrides = parse_lr_overrides(args.lr_overrides)

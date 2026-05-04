@@ -16,7 +16,8 @@ from safetensors.torch import load_file
 from transformers import AutoModelForCausalLM, AutoTokenizer, TextStreamer
 
 from .build_student import quantize_in_place
-from .pack import unpack_sherry, unpack_ternary, unpack_ternary_158
+from .pack import (dequantize_embed_int8, unpack_sherry, unpack_ternary,
+                    unpack_ternary_158)
 from .qlinear import QLinear, set_levels, set_sherry
 
 
@@ -59,6 +60,16 @@ def _load_packed(model: torch.nn.Module, sd: dict[str, torch.Tensor],
         if m.bias is not None and f"{name}.bias" in sd:
             m.bias.data.copy_(sd[f"{name}.bias"].to(m.bias.dtype))
             consumed.add(f"{name}.bias")
+    # Dequantize int8-stored embed_tokens / lm_head if present, writing the
+    # fp tensor back under the original `*.weight` key so load_state_dict
+    # picks it up below.
+    for ki in [k for k in sd if k.endswith(".weight_int8")]:
+        base = ki[: -len("_int8")]
+        ks = f"{base}_scale"
+        if ks not in sd:
+            raise KeyError(f"int8 weight {ki} missing scale {ks}")
+        sd[base] = dequantize_embed_int8(sd[ki], sd[ks])
+        consumed.update({ki, ks})
     rest = {k: v for k, v in sd.items() if k not in consumed}
     model.load_state_dict(rest, strict=False)
 
@@ -77,7 +88,10 @@ def load_model(model_id: str, ckpt_path: Path,
     model = AutoModelForCausalLM.from_pretrained(model_id, dtype=dtype)
     if hasattr(model, "config"):
         model.config.use_cache = True  # ok for chat (single-thread inference)
-    quantize_in_place(model, levels=3)
+    # Match the latent dtype to the user's chosen inference dtype so the
+    # forward path doesn't need an extra cast per linear (and so that
+    # load_state_dict from a fp16-trained ckpt lands in matching storage).
+    quantize_in_place(model, levels=3, latent_dtype=dtype)
 
     with safe_open(str(ckpt_path), framework="pt") as f:
         meta = f.metadata() or {}

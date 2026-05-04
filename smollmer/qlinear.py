@@ -86,8 +86,11 @@ class QLinear(nn.Linear):
         return self.weight + (q - self.weight).detach()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Latents may be stored in fp16 while activations flow as fp32 / bf16
+        # (autocast may or may not be active). Cast so F.linear gets matching
+        # dtypes; values are bounded [-1,1] so the down/up cast is safe.
         w = self.quantized_weight()
-        y = F.linear(x, w)
+        y = F.linear(x, w.to(x.dtype))
         y = y * self.scales.to(y.dtype)
         if self.bias is not None:
             y = y + self.bias
