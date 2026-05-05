@@ -96,20 +96,34 @@ class PlateauController:
     value (the first step's loss, taken at LR warmup minimum) doesn't lock
     in a forever-best that later, properly-trained losses can't beat. EMA
     still updates during warmup; only the best is frozen until step >= warmup.
+
+    `flip_threshold` (>0) gates patience-based advance on the codebook
+    actually being frozen, not just the loss being flat. Patience-fire is
+    honored only when the mean `weights/flip_rate` over the patience window
+    is below `flip_threshold` (e.g. 1e-4 = 0.01% of trits flipping per
+    log-interval, on average). Loss EMA can plateau while the codebook is
+    still reorganizing (esp. L=5 → L=3 collapse) — flip_rate goes to zero
+    only when there's nothing left to extract at this quantization level.
+    Set to 0 to disable. Samples fed via `record_flip(step, flip_rate)`.
     """
 
     def __init__(self, max_steps: int, patience: int, min_steps: int,
                  ema_alpha: float = 0.05, rel_threshold: float = 1e-3,
-                 ema_warmup: int = 0) -> None:
+                 ema_warmup: int = 0,
+                 flip_threshold: float = 0.0) -> None:
         self.max_steps = max_steps
         self.patience = patience
         self.min_steps = min_steps
         self.ema_alpha = ema_alpha
         self.rel_threshold = rel_threshold
         self.ema_warmup = ema_warmup
+        self.flip_threshold = flip_threshold
         self.ema: float | None = None
         self.best_ema: float = float("inf")
         self.best_step: int = 0
+        # (step, flip_rate) samples; trimmed to the patience window in
+        # record_flip to keep memory at O(patience/log_every).
+        self.flip_history: list[tuple[int, float]] = []
 
     def update(self, step: int, loss: float) -> bool:
         """Update EMA. Returns True iff this step set a new best."""
@@ -123,17 +137,48 @@ class PlateauController:
             return True
         return False
 
+    def record_flip(self, step: int, flip_rate: float) -> None:
+        self.flip_history.append((step, float(flip_rate)))
+        if self.patience > 0:
+            cutoff = step - self.patience
+            self.flip_history = [
+                (s, f) for s, f in self.flip_history if s >= cutoff]
+
+    def _flip_gate(self, step: int) -> tuple[bool, str]:
+        """Return (gate_open, reason). gate_open=True means flip_rate has
+        dropped enough that patience-fire is allowed."""
+        if self.flip_threshold <= 0:
+            return True, "gate disabled"
+        if not self.flip_history:
+            return True, "no flip data"
+        rates = [f for _, f in self.flip_history]
+        mean_rate = sum(rates) / len(rates)
+        if mean_rate < self.flip_threshold:
+            return True, f"flip plateaued (mean={mean_rate:.2e})"
+        return False, f"flip still active (mean={mean_rate:.2e})"
+
     def should_advance(self, step: int) -> tuple[bool, str]:
         if step + 1 >= self.max_steps:
             return True, "max_steps"
         if step + 1 < self.min_steps:
             return False, ""
         if self.patience > 0 and (step - self.best_step) >= self.patience:
-            return True, f"plateau (best ema {self.best_ema:.4f} at step {self.best_step})"
+            gate_open, gate_reason = self._flip_gate(step)
+            if gate_open:
+                return True, (f"plateau (best ema {self.best_ema:.4f} at step "
+                              f"{self.best_step}; {gate_reason})")
+            # Patience expired but codebook still flipping — keep training so
+            # the trits can finish settling.
+            return False, ""
         return False, ""
 
     def state_dict(self) -> dict:
-        return {"ema": self.ema, "best_ema": self.best_ema, "best_step": self.best_step}
+        return {
+            "ema": self.ema,
+            "best_ema": self.best_ema,
+            "best_step": self.best_step,
+            "flip_history": list(self.flip_history),
+        }
 
     def load_state_dict(self, state: dict) -> bool:
         """Restore EMA tracking. Returns True if a stale (within-warmup) best
@@ -144,10 +189,13 @@ class PlateauController:
         if bs < self.ema_warmup:
             self.best_ema = float("inf")
             self.best_step = 0
-            return True
-        self.best_ema = state.get("best_ema", float("inf"))
-        self.best_step = bs
-        return False
+            stale = True
+        else:
+            self.best_ema = state.get("best_ema", float("inf"))
+            self.best_step = bs
+            stale = False
+        self.flip_history = list(state.get("flip_history", []))
+        return stale
 
 
 class Lion32(torch.optim.Optimizer):
@@ -516,6 +564,18 @@ def main() -> None:
                     help="Always run at least this many steps in each stage.")
     ap.add_argument("--plateau-threshold", type=float, default=1e-3,
                     help="Minimum relative EMA drop counted as 'improvement'.")
+    ap.add_argument("--flip-plateau-threshold", type=float, default=1e-4,
+                    help="Gate patience-based stage advance on weights/flip_rate "
+                         "(fraction of trits that changed since the previous "
+                         "log-interval). Patience-fire is honored only when the "
+                         "MEAN flip_rate over the last `patience` steps is below "
+                         "this threshold. Default 1e-4 = 0.01%% of trits "
+                         "flipping per interval on average. Loss EMA can flatten "
+                         "while the codebook is still reorganizing "
+                         "(esp. L=5→L=3 collapse) — flip_rate going to zero is "
+                         "the direct signal that there's nothing left to extract "
+                         "at this level. Set 0 to disable. Does not gate "
+                         "max_steps advance.")
     ap.add_argument("--ema-warmup", type=int, default=500,
                     help="Skip best-EMA tracking for the first N steps of each "
                          "stage. The Lion-LR-warmup loss is often U-shaped past "
@@ -690,12 +750,10 @@ def main() -> None:
         run_name = args.run_name
     else:
         run_name = datetime.now().strftime("run_%Y%m%d_%H%M%S")
-    tb_dir = tb_root / run_name
-    tb_dir.mkdir(parents=True, exist_ok=True)
-    writer = SummaryWriter(log_dir=str(tb_dir))
-    print(f"[tb] logging to {tb_dir} (view: tensorboard --logdir {tb_root})")
-    embed = model.get_input_embeddings()
-    embed_init = embed.weight.detach().clone() if embed is not None else None
+    run_dir = tb_root / run_name
+    run_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[tb] run_dir={run_dir} (view: tensorboard --logdir {tb_root}); "
+          "each stage writes to a separate sub-run.")
     _, prev_codes = collect_qlinear_metrics(model, {})
 
     ds = ShardedDataset(args.cache_dir, seed=args.seed)
@@ -743,7 +801,8 @@ def main() -> None:
                                  patience=args.patience,
                                  min_steps=max(args.min_stage_steps, step_offset + 1),
                                  rel_threshold=args.plateau_threshold,
-                                 ema_warmup=args.ema_warmup)
+                                 ema_warmup=args.ema_warmup,
+                                 flip_threshold=args.flip_plateau_threshold)
         # Remember the best-so-far model in CPU RAM. Lion can thrash around
         # near a minimum; restoring the best snapshot at stage end avoids
         # carrying regression damage into the next stage.
@@ -762,9 +821,19 @@ def main() -> None:
                              else interrupted_state["best_snapshot"])
         else:
             best_snapshot = snapshot_to_cpu(model)
+        # Per-stage TB writer. Each stage gets its own sub-run so curves are
+        # directly comparable across stages (TB's compare-runs view overlays
+        # them at matching in-stage step). On mid-stage resume, purge_step
+        # drops any events from this run that are at >= step_offset so we
+        # don't double-write across the interrupt boundary.
+        stage_tb_dir = run_dir / f"stage_{stage_idx:02d}_L{levels}"
+        stage_tb_dir.mkdir(parents=True, exist_ok=True)
+        writer = SummaryWriter(log_dir=str(stage_tb_dir),
+                               purge_step=step_offset if step_offset else None)
         writer.add_text("stage", f"stage {stage_idx} levels={levels} "
-                                  f"max_steps={max_steps} step_offset={step_offset}",
-                        global_step)
+                                  f"max_steps={max_steps} step_offset={step_offset} "
+                                  f"global_step={global_step}",
+                        step_offset)
         # Re-snapshot the quantized codes so flip-rate measures change *within
         # this stage's level setting*, not across the level transition.
         _, prev_codes = collect_qlinear_metrics(model, {})
@@ -820,19 +889,30 @@ def main() -> None:
                                  ema=f"{ctrl.ema:.4f}",
                                  best=f"{ctrl.best_ema:.4f}@{ctrl.best_step}",
                                  lr=f"{cur_lr:.2e}")
-                writer.add_scalar("loss/step", step_loss, global_step)
+                # Per-stage runs use in-stage step on the x-axis so curves
+                # from different stages overlay cleanly in TB's compare view.
+                tb_step = step + 1
+                writer.add_scalar("loss/step", step_loss, tb_step)
                 if ctrl.ema is not None:
-                    writer.add_scalar("loss/ema", ctrl.ema, global_step)
-                writer.add_scalar("lr", cur_lr, global_step)
-                writer.add_scalar("levels", float(levels), global_step)
+                    writer.add_scalar("loss/ema", ctrl.ema, tb_step)
+                writer.add_scalar("lr", cur_lr, tb_step)
+                writer.add_scalar("levels", float(levels), tb_step)
+                writer.add_scalar("global_step", float(global_step), tb_step)
                 if grad_norm is not None:
-                    writer.add_scalar("grad_norm", grad_norm, global_step)
+                    writer.add_scalar("grad_norm", grad_norm, tb_step)
                 qm, prev_codes = collect_qlinear_metrics(model, prev_codes)
                 for k, v in qm.items():
-                    writer.add_scalar(k, v, global_step)
-                drift = embed_drift_l2(model, embed_init)
+                    writer.add_scalar(k, v, tb_step)
+                fr = qm.get("weights/flip_rate")
+                if fr is not None:
+                    ctrl.record_flip(step, fr)
+                drift, drift_stage = embed_drift_l2(model, embed_init,
+                                                    embed_stage_init)
                 if drift is not None:
-                    writer.add_scalar("embed/drift_l2", drift, global_step)
+                    writer.add_scalar("embed/drift_l2", drift, tb_step)
+                if drift_stage is not None:
+                    writer.add_scalar("embed/drift_l2_stage", drift_stage,
+                                      tb_step)
                 running = 0.0
                 running_n = 0
             if _INTERRUPT["flag"]:
@@ -856,7 +936,9 @@ def main() -> None:
                         f"stage {stage_idx} levels={levels} steps={last_step + 1} "
                         f"reason={advance_reason} ema={ctrl.ema:.4f} "
                         f"best={ctrl.best_ema:.4f}@{ctrl.best_step} regressed={regressed}",
-                        global_step)
+                        last_step + 1)
+        writer.flush()
+        writer.close()
         if regressed:
             print(f"[stage {stage_idx}] restoring best snapshot from step {ctrl.best_step} "
                   f"(EMA regressed {ctrl.ema:.4f} > best {ctrl.best_ema:.4f})")
@@ -873,8 +955,6 @@ def main() -> None:
     if interrupted_path.exists():
         interrupted_path.unlink()
         print(f"[done] removed {interrupted_path}")
-    writer.flush()
-    writer.close()
     print("[done] curriculum complete.")
 
 
