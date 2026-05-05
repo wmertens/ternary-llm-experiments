@@ -70,7 +70,15 @@ def quantize_sherry(w: torch.Tensor, levels: int, block: int = 4) -> torch.Tenso
 
 
 class QLinear(nn.Linear):
-    """Linear with per-output-row fp32 scale and STE-quantized weight."""
+    """Linear with per-output-row fp32 scale and STE-quantized weight.
+
+    Caches the quantized output `q` across the grad_accum window. Latents
+    don't change between opt.step calls, so q is identical for all
+    grad_accum × 2 (fwd+bwd) calls within an opt.step — no point recomputing
+    quantize_sherry / quantize_levels each time. Cache is invalidated by
+    clamp_qlinear_weights, set_levels, set_sherry — anything that mutates
+    weight or codebook.
+    """
 
     def __init__(self, in_features: int, out_features: int, bias: bool = True,
                  levels: int = 3, sherry: bool = False, **kwargs) -> None:
@@ -78,12 +86,19 @@ class QLinear(nn.Linear):
         self.scales = nn.Parameter(torch.ones(out_features))
         self.levels = int(levels)
         self.sherry = bool(sherry)
+        self._q_cache: torch.Tensor | None = None
+
+    def invalidate_q_cache(self) -> None:
+        self._q_cache = None
 
     def quantized_weight(self) -> torch.Tensor:
-        q = (quantize_sherry(self.weight, self.levels) if self.sherry
-             else quantize_levels(self.weight, self.levels))
+        if self._q_cache is None:
+            with torch.no_grad():
+                q = (quantize_sherry(self.weight, self.levels) if self.sherry
+                     else quantize_levels(self.weight, self.levels))
+            self._q_cache = q
         # STE: forward uses q, backward routes gradient to self.weight as identity.
-        return self.weight + (q - self.weight).detach()
+        return self.weight + (self._q_cache - self.weight).detach()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Latents may be stored in fp16 while activations flow as fp32 / bf16
@@ -108,6 +123,7 @@ def set_levels(model: nn.Module, levels: int) -> int:
     for m in model.modules():
         if isinstance(m, QLinear):
             m.levels = int(levels)
+            m.invalidate_q_cache()
             n += 1
     return n
 
@@ -118,6 +134,7 @@ def set_sherry(model: nn.Module, on: bool) -> int:
     for m in model.modules():
         if isinstance(m, QLinear):
             m.sherry = bool(on)
+            m.invalidate_q_cache()
             n += 1
     return n
 
@@ -130,10 +147,26 @@ def clamp_qlinear_weights(model: nn.Module, lo: float = -1.0, hi: float = 1.0) -
     dead capacity (the rounded value can't change until the latent re-enters
     the box). Lion's sign-based update has no implicit norm control, so this
     projection is needed every step.
+
+    Also invalidates the per-module quantized-output cache, since the latent
+    just changed.
     """
     n = 0
     for m in model.modules():
         if isinstance(m, QLinear):
             m.weight.data.clamp_(lo, hi)
+            m.invalidate_q_cache()
+            n += 1
+    return n
+
+
+def invalidate_q_cache(model: nn.Module) -> int:
+    """Invalidate every QLinear's quantized-output cache. Use after any
+    out-of-band weight mutation (load_state_dict, permute, etc.) that
+    bypassed clamp_qlinear_weights / set_levels / set_sherry."""
+    n = 0
+    for m in model.modules():
+        if isinstance(m, QLinear):
+            m.invalidate_q_cache()
             n += 1
     return n
