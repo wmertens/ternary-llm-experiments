@@ -101,11 +101,12 @@ class QLinear(nn.Linear):
         return self.weight + (self._q_cache - self.weight).detach()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Latents may be stored in fp16 while activations flow as fp32 / bf16
-        # (autocast may or may not be active). Cast so F.linear gets matching
-        # dtypes; values are bounded [-1,1] so the down/up cast is safe.
+        # No explicit cast: autocast handles fp16-latent / fp32-activation
+        # mismatch inside F.linear (the in-kernel cast in cuBLAS is free).
+        # Without autocast, callers should set latent dtype to match
+        # activation dtype (build_student / chat do this).
         w = self.quantized_weight()
-        y = F.linear(x, w.to(x.dtype))
+        y = F.linear(x, w)
         y = y * self.scales.to(y.dtype)
         if self.bias is not None:
             y = y + self.bias

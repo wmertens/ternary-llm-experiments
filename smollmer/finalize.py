@@ -130,8 +130,12 @@ def main() -> None:
     torch.manual_seed(args.seed)
 
     print(f"[build] loading {args.model}")
-    model, _tok, n_replaced = load_student(args.model, dtype=torch.float32, levels=3)
-    print(f"[build] {n_replaced} QLinear modules")
+    # See distill.py for the latent_dtype rationale; same fp16/fp32 fallback
+    # rule applies (autocast handles the cast in-kernel).
+    latent_dtype = torch.float32 if args.autocast_dtype == "none" else torch.float16
+    model, _tok, n_replaced = load_student(args.model, dtype=torch.float32, levels=3,
+                                           latent_dtype=latent_dtype)
+    print(f"[build] {n_replaced} QLinear modules (latent dtype: {latent_dtype})")
     model = model.to(args.device)
 
     with safe_open(str(args.resume), framework="pt") as f:

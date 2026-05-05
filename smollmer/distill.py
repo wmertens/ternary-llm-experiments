@@ -556,14 +556,17 @@ def main() -> None:
     _install_sigint_handler()
 
     print(f"[build] loading {args.model} and quantizing projections")
-    # Latents stored as fp16: bounded to [-1,1] by init+clamp_qlinear_weights,
-    # so fp16's tapered ULP wins over bf16 by ~8x near zero (where most
-    # latents live at L=3) with no overflow risk. Optimizer state stays fp32
-    # via Lion32/AdamW32 to avoid v underflow on small late-stage grads.
+    # Latents stored as fp16 when autocast handles activation/weight dtype
+    # mismatch in F.linear (cuBLAS does the cast in-kernel, no alloc); falls
+    # back to fp32 when --autocast-dtype none, otherwise F.linear would
+    # error on x_fp32 @ w_fp16. Bounded to [-1,1] by init+clamp_qlinear_weights,
+    # so fp16's tapered ULP wins over bf16 by ~8x near zero. Optimizer state
+    # stays fp32 via Lion32/AdamW32 to avoid v underflow on small late-stage grads.
+    latent_dtype = torch.float32 if args.autocast_dtype == "none" else torch.float16
     model, _tok, n_replaced = load_student(args.model, dtype=torch.float32,
                                            levels=257,
-                                           latent_dtype=torch.float16)
-    print(f"[build] {n_replaced} QLinear modules (latent dtype: float16)")
+                                           latent_dtype=latent_dtype)
+    print(f"[build] {n_replaced} QLinear modules (latent dtype: {latent_dtype})")
     n_sherry = set_sherry(model, args.sherry)
     if args.sherry:
         print(f"[build] sherry constraint enabled on {n_sherry} layers")
