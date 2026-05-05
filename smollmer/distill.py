@@ -359,16 +359,30 @@ def collect_qlinear_metrics(
 
 @torch.no_grad()
 def embed_drift_l2(model: torch.nn.Module,
-                   embed_init: torch.Tensor | None) -> float | None:
-    """L2 distance of the input-embedding from its FP-teacher init.
-    Embeddings aren't quantized or clamped, so Lion can drift them unboundedly;
-    a runaway here is a likely culprit when ternary distillation diverges."""
-    if embed_init is None:
-        return None
+                   embed_init: torch.Tensor | None,
+                   embed_stage_init: torch.Tensor | None = None,
+                   ) -> tuple[float | None, float | None]:
+    """L2 distance of the input-embedding from two reference points:
+
+    * `embed_init` — the FP teacher's initial embedding (cumulative drift).
+      A runaway here is a likely culprit when ternary distillation diverges,
+      since embeddings aren't quantized or clamped.
+    * `embed_stage_init` — the embedding at the start of the current stage
+      (per-stage drift). Useful for attributing drift to a particular
+      curriculum stage. May be the current weights right after a mid-stage
+      resume, in which case the per-stage value will underreport for that
+      stage; subsequent clean stage entries are accurate.
+
+    Returns (cumulative, stage). Either entry can be None if its reference
+    is unset.
+    """
     embed = model.get_input_embeddings()
     if embed is None:
-        return None
-    return (embed.weight.detach() - embed_init).norm().item()
+        return None, None
+    w = embed.weight.detach()
+    cum = (w - embed_init).norm().item() if embed_init is not None else None
+    stg = (w - embed_stage_init).norm().item() if embed_stage_init is not None else None
+    return cum, stg
 
 
 class ShardedDataset(IterableDataset):
@@ -576,6 +590,14 @@ def main() -> None:
     if args.grad_checkpointing and hasattr(model, "gradient_checkpointing_enable"):
         model.gradient_checkpointing_enable()
         print("[build] gradient checkpointing enabled")
+    # Snapshot the teacher embed BEFORE any resume/interrupted state_dict load
+    # overwrites it; that's the reference for cumulative embed/drift_l2.
+    # On the device already so the per-step subtraction in embed_drift_l2
+    # doesn't trip a device mismatch. The teacher is deterministic from
+    # args.model so a fresh load gives the same tensor on every resume —
+    # no need to persist this snapshot.
+    _embed = model.get_input_embeddings()
+    embed_init = _embed.weight.detach().clone() if _embed is not None else None
 
     interrupted_path = args.out / "interrupted.pt"
     interrupted_state = None
@@ -691,6 +713,13 @@ def main() -> None:
         if stage_idx < start_stage:
             continue
         n_set = set_levels(model, levels)
+        # Per-stage embed reference. On a mid-stage resume this captures the
+        # current (already-drifted) embed rather than the true stage-start
+        # value — accept the underreporting for that partial stage; every
+        # clean stage entry is accurate.
+        _embed = model.get_input_embeddings()
+        embed_stage_init = (_embed.weight.detach().clone()
+                            if _embed is not None else None)
         stage_lr = lr_overrides.get(levels, args.lr)
         if levels in lr_overrides:
             print(f"[stage {stage_idx}] lr override: {stage_lr} (vs default {args.lr})")
