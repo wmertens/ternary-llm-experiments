@@ -89,11 +89,23 @@ def load_student(model_id: str = "HuggingFaceTB/SmolLM2-135M",
                  dtype: torch.dtype = torch.bfloat16,
                  levels: int = 257,
                  latent_dtype: torch.dtype = torch.float16,
-                 group_size: int = 128):
-    """Convenience: load a HF causal LM and quantize its projections."""
+                 group_size: int = 128,
+                 permute: bool = False):
+    """Convenience: load a HF causal LM and quantize its projections.
+
+    `permute=True` runs `permute_for_scale_groups` between loading the
+    teacher and quantize_in_place — sorts each free input dim by column
+    magnitude so the per-(row, group) scales fit each group tightly.
+    Math-preserving, so finalize/chat can leave it False (the saved
+    checkpoint already contains the permuted weights).
+    """
     from transformers import AutoModelForCausalLM, AutoTokenizer
     tok = AutoTokenizer.from_pretrained(model_id)
     model = AutoModelForCausalLM.from_pretrained(model_id, dtype=dtype)
+    if permute:
+        from .permute import permute_for_scale_groups
+        n_perm = permute_for_scale_groups(model)
+        print(f"[build] permuted {n_perm} matrices for scale-group alignment")
     n = quantize_in_place(model, levels=levels, latent_dtype=latent_dtype,
                           group_size=group_size)
     return model, tok, n

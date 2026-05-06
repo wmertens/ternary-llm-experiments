@@ -571,6 +571,16 @@ def main() -> None:
                          "shares one fp32 scale. Bonsai uses 128. Must "
                          "divide every projection's in_features (SmolLM2-135M "
                          "needs 32 or 64; Qwen3 supports 128).")
+    ap.add_argument("--permute", action=argparse.BooleanOptionalAction, default=True,
+                    help="Permute each transformer block's free input dims "
+                         "(MLP intermediate, per-KV-head head_dim) so columns "
+                         "are sorted by descending magnitude before "
+                         "quantize_in_place. Math-preserving init-time "
+                         "transformation that aligns column magnitude with "
+                         "scale-group boundaries — each group's max-abs "
+                         "scale fits its members tightly, so fewer columns "
+                         "waste capacity rounding to 0. Skipped on --resume "
+                         "(the saved ckpt already encodes the permutation).")
     ap.add_argument("--wd", type=float, default=0.05)
     ap.add_argument("--warmup-steps", type=int, default=30)
     ap.add_argument("--max-grad-norm", type=float, default=1.0)
@@ -629,12 +639,20 @@ def main() -> None:
     # so fp16's tapered ULP wins over bf16 by ~8x near zero. Optimizer state
     # stays fp32 via Lion32/AdamW32 to avoid v underflow on small late-stage grads.
     latent_dtype = torch.float32 if args.autocast_dtype == "none" else torch.float16
+    # Permute is fresh-start only — it operates on the FP teacher, BEFORE
+    # quantize_in_place. On --resume the saved ckpt already contains the
+    # permuted weights, so re-permuting the teacher is harmless (load_state_dict
+    # will overwrite anyway) but redundant; skip to save the work.
+    fresh_start = args.resume is None and not (args.out / "interrupted.pt").exists()
+    do_permute = args.permute and fresh_start
     model, _tok, n_replaced = load_student(args.model, dtype=torch.float32,
                                            levels=257,
                                            latent_dtype=latent_dtype,
-                                           group_size=args.scale_group_size)
+                                           group_size=args.scale_group_size,
+                                           permute=do_permute)
     print(f"[build] {n_replaced} QLinear modules "
-          f"(latent dtype: {latent_dtype}, group_size: {args.scale_group_size})")
+          f"(latent dtype: {latent_dtype}, group_size: {args.scale_group_size}, "
+          f"permute: {do_permute})")
     model = model.to(args.device)
     if hasattr(model, "config"):
         model.config.use_cache = False  # never needed for training fwd/bwd

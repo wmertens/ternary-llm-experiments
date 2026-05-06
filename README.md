@@ -55,6 +55,8 @@ smollmer-distill --cache-dir cache/ --out ckpts/ \
 
 `--scale-group-size` must divide every projection's `in_features`. Defaults to **128** (Bonsai/Qwen3). For SmolLM2-135M (hidden=576, intermediate=1536) use 32 or 64.
 
+`--permute` (default on, math-preserving) sorts each transformer block's free input dims (MLP intermediate + per-KV-head head_dim) by descending column magnitude *before* `quantize_in_place` — within-group magnitudes become coherent, so each per-(row, group) scale fits its members tightly. Forward output is byte-identical pre/post permute; only the column ordering inside the free dims changes. Permutation runs once at fresh-start (skipped on `--resume`); the saved checkpoint contains the permuted weights so finalize/chat don't need to re-permute. See `smollmer/permute.py`.
+
 Default curriculum (longer at low L where the codebook actually settles):
 `(257,5000) (129,2000) (65,2000) (33,3000) (17,4000) (9,5000) (5,8000) (3,15000)`.
 
@@ -115,6 +117,7 @@ If you OOM, add `--grad-checkpointing` (default on) and/or shrink `--batch-size`
 | `smollmer/qlinear.py` | `QLinear` with per-(row, group) scales, mutable `levels`, STE, q-cache |
 | `smollmer/pack.py` | 1.58 bpw base-3 ternary packing + int8 embed helpers |
 | `smollmer/build_student.py` | swap projections in any HF causal LM, init per-(row, group) scales |
+| `smollmer/permute.py` | math-preserving init-time permutation of free input dims (MLP intermediate + per-KV-head head_dim) so columns are sorted by magnitude — tightens per-(row, group) scale fit |
 | `smollmer/cache_teacher.py` | self-text generation + top-K logit cache |
 | `smollmer/distill.py` | curriculum loop, Lion32 / AdamW32 / CautiousAdamW (all with fp32 state), KL+rest-bucket loss, plateau controller (loss EMA + flip_rate gate) |
 | `smollmer/finalize.py` | stage-2 freeze T + train scales/norms, write packed ckpt |
