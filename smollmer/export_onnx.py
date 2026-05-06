@@ -1,15 +1,14 @@
 """Materialize a packed smollmer checkpoint as a standard HF directory.
 
-Reverses `finalize.to_packed_state_dict`: ternary `T_packed` + per-row `scales`
-become a dense fp16 weight, int8 embed/lm_head are dequantized to fp16, and
-everything else is cast to fp16. The output is a vanilla `LlamaForCausalLM`
-directory that `optimum-cli export onnx` can consume directly — and that the
+Reverses `finalize.to_packed_state_dict`: ternary `T_packed` + per-(row, group)
+`scales` become a dense fp16 weight, int8 embed/lm_head are dequantized to fp16,
+and everything else is cast to fp16. The output is a vanilla HF model directory
+that `optimum-cli export onnx` can consume directly — and that the
 transformers.js `quantize.py` script can then re-quantize as q2 / q4f16.
 """
 from __future__ import annotations
 
 import argparse
-import shutil
 from pathlib import Path
 
 import torch
@@ -17,28 +16,19 @@ from safetensors import safe_open
 from safetensors.torch import load_file
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from .pack import (dequantize_embed_int8, unpack_sherry, unpack_ternary,
-                   unpack_ternary_158)
-
-
-def _unpacker_for(fmt: str):
-    if fmt == "smollmer-packed-sherry-v1":
-        return unpack_sherry
-    if fmt == "smollmer-packed-158-v1":
-        return unpack_ternary_158
-    if fmt in ("smollmer-packed-v1", ""):
-        return unpack_ternary
-    raise ValueError(f"unknown packed format: {fmt!r}")
+from .pack import dequantize_embed_int8, unpack_ternary_158
 
 
 @torch.no_grad()
 def materialize(model: torch.nn.Module, sd: dict[str, torch.Tensor],
                 fmt: str, dtype: torch.dtype) -> None:
-    unpack = _unpacker_for(fmt)
+    if fmt and fmt != "smollmer-packed-bonsai-v1":
+        raise ValueError(f"unsupported packed format: {fmt!r} (expected "
+                         "'smollmer-packed-bonsai-v1')")
     consumed: set[str] = set()
     fp_state = dict(model.state_dict())
 
-    # Ternary projections: W = (T as fp) * scale_per_row.
+    # Ternary projections: W[r, c] = T[r, c] * scale[r, c // group_size].
     for name, mod in model.named_modules():
         weight_key = f"{name}.weight"
         T_key = f"{name}.T_packed"
@@ -46,13 +36,17 @@ def materialize(model: torch.nn.Module, sd: dict[str, torch.Tensor],
         if T_key not in sd or s_key not in sd:
             continue
         W = fp_state[weight_key]
-        u = unpack
-        if u is unpack_sherry and mod.in_features % 32 != 0:
-            u = unpack_ternary_158
-        T = u(sd[T_key], in_features=mod.in_features,
-              dtype=torch.float32)
-        scale = sd[s_key].to(torch.float32)
-        W_dense = (T * scale.unsqueeze(1)).to(dtype)
+        T = unpack_ternary_158(sd[T_key], in_features=mod.in_features,
+                               dtype=torch.float32)              # [out, in]
+        scale = sd[s_key].to(torch.float32)                       # [out, n_groups]
+        out_f, in_f = T.shape
+        n_groups = scale.shape[1]
+        if in_f % n_groups != 0:
+            raise ValueError(f"in_features={in_f} not divisible by "
+                             f"n_groups={n_groups} for {weight_key}")
+        group_size = in_f // n_groups
+        T_blocks = T.view(out_f, n_groups, group_size)
+        W_dense = (T_blocks * scale.unsqueeze(-1)).view(out_f, in_f).to(dtype)
         if W_dense.shape != W.shape:
             raise ValueError(f"shape mismatch for {weight_key}: "
                              f"unpacked {tuple(W_dense.shape)} vs model {tuple(W.shape)}")
@@ -115,14 +109,15 @@ def main() -> None:
     tok = AutoTokenizer.from_pretrained(model_id)
     tok.save_pretrained(str(args.out))
 
-    # Sanity: any materialized ternary projection has rows with at most
-    # 3 unique values (one per row scale; row = scale * {-1,0,+1}).
+    # Sanity: a materialized projection now has up to 3 unique values per
+    # (row, group) — i.e. {-s, 0, +s} per group. With multiple groups per
+    # row we expect ~3 × n_groups unique values per row.
     for name, mod in model.named_modules():
         if (name + ".T_packed") in sd:
             row = mod.weight.detach()[0].float()
             uniq = torch.unique(row)
-            print(f"[sanity] {name}.weight row 0: {len(uniq)} unique values "
-                  f"(expect <=3), |max|={row.abs().max().item():.4f}")
+            print(f"[sanity] {name}.weight row 0: {len(uniq)} unique values, "
+                  f"|max|={row.abs().max().item():.4f}")
             break
 
     print(f"[done] wrote HF checkpoint to {args.out}")

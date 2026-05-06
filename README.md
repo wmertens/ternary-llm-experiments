@@ -1,6 +1,6 @@
 # smollmer
 
-Ternarize SmolLM2-135M into the **Bonsai weight format** (per-output-row scale + ternary T) by **distilling** from the FP base model with a **curriculum of decreasing odd quantization levels** (so 0 is always representable):
+Ternarize HF causal LMs into the **Bonsai weight format** (per-(row × column-group) scales + ternary T) by **distilling** from the FP base model with a **curriculum of decreasing odd quantization levels** (so 0 is always representable):
 
 ```
 257 → 129 → 65 → 33 → 17 → 9 → 5 → 3
@@ -9,10 +9,13 @@ Ternarize SmolLM2-135M into the **Bonsai weight format** (per-output-row scale +
 Bonsai inference math, per `Linear`:
 
 ```
-y = (x @ T.T) * s + bias       T ∈ {-1,0,+1}^{out×in}, s ∈ ℝ^out
+y[r, c] = sum_k T[r, k] * S[r, k // G] * x[c, k] + bias[r]
+   T ∈ {-1, 0, +1}^{out × in},   S ∈ ℝ^{out × n_groups},   G = group_size
 ```
 
-Quantized layers per transformer block: `q/k/v/o_proj`, `gate/up/down_proj`. `embed_tokens` and `lm_head` stay full precision.
+Each (row, column-group) of `G=128` consecutive input columns has its own scale. This finer scaling is the key fidelity lever: trained Bonsai-1.7B has ~62% nonzero density vs ~15% with plain per-row scales — the model can use most of its weights instead of forcing them to 0.
+
+Quantized layers per transformer block: `q/k/v/o_proj`, `gate/up/down_proj`. `embed_tokens` and `lm_head` stay full precision (and may be int8-quantized at finalize for storage).
 
 ## Install
 
@@ -46,11 +49,14 @@ Disk: ~33 MB per shard of 128 sequences × 1024 tokens. 100M tokens ≈ 25 GB.
 ```bash
 smollmer-distill --cache-dir cache/ --out ckpts/ \
                  --batch-size 4 --grad-accum 4 \
-                 --lr 2e-4 --autocast-dtype bfloat16
+                 --lr 2e-4 --autocast-dtype bfloat16 \
+                 --scale-group-size 128
 ```
 
-Default curriculum (shrunk early, longer at low L):
-`(257,300) (129,300) (65,400) (33,600) (17,1000) (9,1500) (5,2500) (3,5000)`.
+`--scale-group-size` must divide every projection's `in_features`. Defaults to **128** (Bonsai/Qwen3). For SmolLM2-135M (hidden=576, intermediate=1536) use 32 or 64.
+
+Default curriculum (longer at low L where the codebook actually settles):
+`(257,5000) (129,2000) (65,2000) (33,3000) (17,4000) (9,5000) (5,8000) (3,15000)`.
 
 Override with `--curriculum 33:200,17:200,9:300,5:500,3:1000`.
 
@@ -64,10 +70,13 @@ smollmer-finalize --cache-dir cache/ \
                   --out ckpts/ --steps 1000 --lr 5e-5
 ```
 
-Writes `ckpts/final_packed.safetensors` with tightly-packed ternary weights + fp32 per-row scales + bf16 embed/lm_head/norms. Packing format is chosen automatically:
+Writes `ckpts/final_packed.safetensors` (`format=smollmer-packed-bonsai-v1`):
+- ternary trits at **1.58 bpw** (base-3, 5 trits per uint8 byte)
+- per-(row, group) scales as fp16 `[out_features, n_groups]`
+- norms / biases at `--store-dtype` (default bf16)
+- embed_tokens / lm_head as int8 with per-row fp16 scale (disable with `--no-quant-embed`)
 
-- plain ternary → **1.6 bpw** base-3 (5 trits per uint8)
-- sherry-constrained ternary → **1.25 bpw** (5 bits per 4-trit block)
+Total: ~1.7 bpw on the projections (1.58 trit + ~0.13 scale). Matches Bonsai's deployment overhead.
 
 ### 4. Inspect any stage
 
@@ -84,51 +93,38 @@ smollmer-chat --ckpt ckpts/stage_00_L257.safetensors --levels 5
 
 ## Memory budget on RTX 4050 (6 GB)
 
-With Lion + bf16 autocast, fp32 latent weights:
+With Lion32 + bf16 autocast, fp16 latents, fp32 optimizer state:
 
-| component             | size |
+| component             | size (135M, default settings) |
 |----------------------|------|
-| latent weights (fp32) | 540 MB |
-| grads (bf16)          | 270 MB |
-| Lion state (fp32)     | 540 MB |
+| latent weights (fp16) | 270 MB |
+| per-(row, group) scales (fp32) | ~6 MB |
+| grads (fp16)          | 270 MB |
+| Lion32 state (fp32)   | 540 MB |
+| q-cache (fp16, persistent across grad_accum) | 270 MB |
 | frozen teacher        | (none — cached) |
 | **subtotal**          | **~1.4 GB** |
 | activations + KV      | rest |
 
-If you OOM, add `--grad-checkpointing` and/or shrink `--batch-size`.
+If you OOM, add `--grad-checkpointing` (default on) and/or shrink `--batch-size`.
 
 ## Files
 
 | file | purpose |
 |------|---------|
-| `smollmer/qlinear.py` | `QLinear` with mutable `levels`, generalized quantizer, STE |
-| `smollmer/pack.py` | 1.6 bpw base-3 packing + 1.25 bpw sherry packing (legacy 2 bpw kept for old ckpts) |
-| `smollmer/permute.py` | math-preserving free-dim permutations to align weak weights with sherry block boundaries |
-| `smollmer/build_student.py` | swap projections in any HF causal LM |
+| `smollmer/qlinear.py` | `QLinear` with per-(row, group) scales, mutable `levels`, STE, q-cache |
+| `smollmer/pack.py` | 1.58 bpw base-3 ternary packing + int8 embed helpers |
+| `smollmer/build_student.py` | swap projections in any HF causal LM, init per-(row, group) scales |
 | `smollmer/cache_teacher.py` | self-text generation + top-K logit cache |
-| `smollmer/distill.py` | curriculum loop, Lion, KL+rest-bucket loss |
+| `smollmer/distill.py` | curriculum loop, Lion32 / AdamW32 / CautiousAdamW (all with fp32 state), KL+rest-bucket loss, plateau controller (loss EMA + flip_rate gate) |
 | `smollmer/finalize.py` | stage-2 freeze T + train scales/norms, write packed ckpt |
 | `smollmer/chat.py` | interactive generation, auto-detects ckpt format |
+| `smollmer/export_onnx.py` | materialize packed ckpt as a dense HF directory for ONNX export |
 
 ## Notes / divergences from upstream Bonsai
 
-- Bonsai's `qlinear.py` initializes `scales=ones`; the paper text describes `scales=row_L2_norm`. We follow the paper (with a `/sqrt(in_features)` normalization to keep latent weights near unit magnitude at init).
-- Bonsai trains from scratch on ~3.8B tokens. We distill from the FP base — much cheaper at 135M scale.
+- Bonsai trains from scratch on ~3.8B tokens. We distill from the FP base — much cheaper at small scale, and the per-(row, group) scaling means we recover Bonsai's deployment fidelity without retraining from zero.
+- Curriculum over odd L is novel to this repo (Bonsai is L=3 from step 0). The closest analog in the literature is Quant-Noise (FAIR, 2004.07320). Empirically the curriculum lets the model find a good ternary configuration smoothly rather than slamming into L=3 from random init.
 - KL loss includes an explicit "rest mass" bucket so the student is penalized for putting probability outside the teacher's top-K (without it, ternary outliers can drift unchecked).
-- Curriculum over odd L is novel to this repo (Bonsai is L=3 from step 0). The closest analog in the literature is Quant-Noise (FAIR, 2004.07320).
-
-## Sherry mode (1.25 bpw)
-
-Plain ternary uses 3 states per weight, so the information-theoretic floor is `log2(3) ≈ 1.585` bpw (we pack at 1.6). The **sherry constraint** forces every block of 4 weights to contain *exactly one* zero — that gives `4 zero-positions × 2³ sign choices = 32 = 2⁵` states per block, i.e. **1.25 bpw**, a ~21% size win over plain ternary at the cost of a small accuracy hit.
-
-The constraint is folded into training so it costs ~nothing at the end:
-
-```bash
-smollmer-distill ... --sherry --permute-each-stage
-smollmer-finalize ... --resume ckpts/stage_07_L3.safetensors --out ckpts/
-```
-
-- `--sherry` enables `quantize_sherry` in the QLinear forward at every L of the curriculum (not just L=3): the smallest-|w| slot in each block is forced to 0 and any other slot that would round to 0 is bumped to ±`1/half`. Gradient flows via STE as usual.
-- `--permute-each-stage` permutes the *free* dimensions before each curriculum stage so the weakest columns line up with sherry block position 0. "Free" = MLP intermediate dim and per-KV-head V/O dim — these can be permuted with paired adjustments to neighbouring matrices so the forward pass is unchanged. The residual stream and RoPE-rotated Q/K dims are not free and are skipped. See `smollmer/permute.py` for the math.
-
-Stage checkpoints record `sherry=1` in metadata so `finalize` and `chat` re-enable the constraint automatically. `finalize` then writes the 1.25 bpw packed format.
+- Lion's sign-momentum has no implicit norm control on the latent weights, so we project them back into `[-1, 1]` per element after every opt step (`clamp_qlinear_weights`). The q-cache is invalidated each clamp, so the next forward sees the current latent.
+- We use Lion32 / AdamW32 / CautiousAdamW (fp32 momentum, fp16 latents). fp16 latents save ~270 MB on a 135M model and have ~8× finer ULP than bf16 in the latents' actual `[-1, 1]` range, with no overflow risk by construction.

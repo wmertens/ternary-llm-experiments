@@ -16,32 +16,22 @@ from safetensors.torch import load_file
 from transformers import AutoModelForCausalLM, AutoTokenizer, TextStreamer
 
 from .build_student import quantize_in_place
-from .pack import (dequantize_embed_int8, unpack_sherry, unpack_ternary,
-                    unpack_ternary_158, unpack_top1)
-from .qlinear import QLinear, set_levels, set_sherry, set_top1
+from .pack import dequantize_embed_int8, unpack_ternary_158
+from .qlinear import QLinear, set_levels
 
 
 def _detect_packed(sd_keys) -> bool:
     return any(k.endswith(".T_packed") for k in sd_keys)
 
 
-def _unpacker_for(fmt: str):
-    """Pick an unpack function from the saved-checkpoint format string."""
-    if fmt == "smollmer-packed-sherry-v1":
-        return unpack_sherry
-    if fmt == "smollmer-packed-top1-v1":
-        return unpack_top1
-    if fmt == "smollmer-packed-158-v1":
-        return unpack_ternary_158
-    if fmt in ("smollmer-packed-v1", ""):
-        return unpack_ternary  # legacy 2-bpw
-    raise ValueError(f"unknown packed format: {fmt!r}")
-
-
 @torch.no_grad()
 def _load_packed(model: torch.nn.Module, sd: dict[str, torch.Tensor],
                  fmt: str) -> None:
-    unpack = _unpacker_for(fmt)
+    """Load a packed checkpoint (smollmer-packed-bonsai-v1): 1.58 bpw trits +
+    fp16 [out, n_groups] scales per QLinear, plus optional int8 embed/lm_head."""
+    if fmt and fmt != "smollmer-packed-bonsai-v1":
+        raise ValueError(f"unsupported packed format: {fmt!r} (expected "
+                         "'smollmer-packed-bonsai-v1')")
     consumed: set[str] = set()
     for name, m in model.named_modules():
         if not isinstance(m, QLinear):
@@ -50,15 +40,8 @@ def _load_packed(model: torch.nn.Module, sd: dict[str, torch.Tensor],
         s_key = f"{name}.scales"
         if T_key not in sd or s_key not in sd:
             raise KeyError(f"packed checkpoint missing keys for {name}")
-        # Sherry layers with in_features % 32 != 0 (or top1 layers with
-        # in_features % 8 != 0) are written via the 1.6 bpw fallback; detect
-        # by packed-row width and use the right unpacker.
-        u = unpack
-        if u is unpack_sherry and m.in_features % 32 != 0:
-            u = unpack_ternary_158
-        elif u is unpack_top1 and m.in_features % 8 != 0:
-            u = unpack_ternary_158
-        T = u(sd[T_key], in_features=m.in_features, dtype=m.weight.dtype)
+        T = unpack_ternary_158(sd[T_key], in_features=m.in_features,
+                               dtype=m.weight.dtype)
         m.weight.data.copy_(T.to(m.weight.dtype))
         m.scales.data.copy_(sd[s_key].to(torch.float32))
         consumed.update({T_key, s_key})
@@ -88,15 +71,15 @@ def _strip_compile_prefix(sd: dict[str, torch.Tensor]) -> dict[str, torch.Tensor
     return sd
 
 
-def load_model(model_id: str, ckpt_path: Path,
-               device: str, dtype: torch.dtype):
+def load_model(model_id: str, ckpt_path: Path, device: str, dtype: torch.dtype,
+               group_size: int):
     model = AutoModelForCausalLM.from_pretrained(model_id, dtype=dtype)
     if hasattr(model, "config"):
         model.config.use_cache = True  # ok for chat (single-thread inference)
     # Match the latent dtype to the user's chosen inference dtype so the
     # forward path doesn't need an extra cast per linear (and so that
     # load_state_dict from a fp16-trained ckpt lands in matching storage).
-    quantize_in_place(model, levels=3, latent_dtype=dtype)
+    quantize_in_place(model, levels=3, latent_dtype=dtype, group_size=group_size)
 
     with safe_open(str(ckpt_path), framework="pt") as f:
         meta = f.metadata() or {}
@@ -119,17 +102,6 @@ def load_model(model_id: str, ckpt_path: Path,
             print(f"[load] all {len(sd)} keys matched")
         set_levels(model, int(meta.get("levels", 3)))
 
-    # Constraint-trained ckpts need the constraint active so the QLinear
-    # forward reproduces training-time math (packed ckpts already store the
-    # projected trits, so this is mostly a no-op there, but flip it for
-    # symmetry).
-    if meta.get("top1") == "1":
-        n_top1 = set_top1(model, True)
-        print(f"[load] top1 constraint active on {n_top1} layers")
-    elif meta.get("sherry") == "1":
-        n_sherry = set_sherry(model, True)
-        print(f"[load] sherry constraint active on {n_sherry} layers")
-
     # Sanity check: at least one QLinear should have non-trivial weight values.
     for name, m in model.named_modules():
         if isinstance(m, QLinear):
@@ -150,6 +122,9 @@ def main() -> None:
                     help="cpu / cuda / hip — keep cpu on the AMD 780M box.")
     ap.add_argument("--dtype", default="float32",
                     choices=["float32", "bfloat16", "float16"])
+    ap.add_argument("--scale-group-size", type=int, default=None,
+                    help="Per-(row, col-group) scale granularity. Defaults to "
+                         "the value recorded in the ckpt metadata.")
     ap.add_argument("--max-new-tokens", type=int, default=200)
     ap.add_argument("--temperature", type=float, default=0.8)
     ap.add_argument("--top-p", type=float, default=0.9)
@@ -164,8 +139,17 @@ def main() -> None:
 
     dtype = {"float32": torch.float32, "bfloat16": torch.bfloat16,
              "float16": torch.float16}[args.dtype]
-    print(f"[load] {args.ckpt} on {args.device}/{args.dtype}")
-    model, meta, is_packed = load_model(args.model, args.ckpt, args.device, dtype)
+
+    # Peek at metadata first so we can pick the right group_size.
+    with safe_open(str(args.ckpt), framework="pt") as f:
+        peek_meta = f.metadata() or {}
+    group_size = (args.scale_group_size if args.scale_group_size is not None
+                  else int(peek_meta.get("group_size", 128)))
+
+    print(f"[load] {args.ckpt} on {args.device}/{args.dtype} "
+          f"(group_size={group_size})")
+    model, meta, is_packed = load_model(args.model, args.ckpt, args.device, dtype,
+                                        group_size)
 
     if args.levels is not None:
         set_levels(model, args.levels)

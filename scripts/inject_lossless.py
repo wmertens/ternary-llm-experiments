@@ -28,18 +28,14 @@ from onnx import TensorProto, helper, numpy_helper
 from safetensors import safe_open
 from safetensors.torch import load_file
 
-from smollmer.pack import (unpack_sherry, unpack_ternary,
-                            unpack_ternary_158)
+from smollmer.pack import unpack_ternary_158
 
 
 def _unpacker_for(fmt: str):
-    if fmt == "smollmer-packed-sherry-v1":
-        return unpack_sherry
-    if fmt == "smollmer-packed-158-v1":
-        return unpack_ternary_158
-    if fmt in ("smollmer-packed-v1", ""):
-        return unpack_ternary
-    raise ValueError(f"unknown packed format: {fmt!r}")
+    if fmt and fmt != "smollmer-packed-bonsai-v1":
+        raise ValueError(f"unsupported packed format: {fmt!r} (expected "
+                         "'smollmer-packed-bonsai-v1')")
+    return unpack_ternary_158
 
 
 def _onnx_node_to_qlinear(node_name: str) -> str | None:
@@ -75,13 +71,19 @@ def _pack_b(T: torch.Tensor, block_size: int, bits: int) -> np.ndarray:
     return out.contiguous().numpy()
 
 
-def _expand_scales(s_per_row: torch.Tensor, n_blocks: int) -> np.ndarray:
-    """Replicate per-row scale across blocks. Shape [N*n_blocks] fp32 to
-    match what ORT's MatMulNBitsQuantizer emits — mixing fp16 scales with
-    fp16 activations trips ORT's T1 type-binding validator."""
-    return (s_per_row.unsqueeze(1)
-            .expand(-1, n_blocks).reshape(-1)
-            .to(torch.float32).contiguous().numpy())
+def _expand_scales(scales: torch.Tensor, n_blocks: int) -> np.ndarray:
+    """Flatten per-(row, group) scales [N, n_groups] into the [N*n_blocks]
+    fp32 layout that ORT's MatMulNBitsQuantizer emits. Requires
+    n_groups == n_blocks (ORT's block_size must match our scale_group_size).
+    fp32 is mandatory: mixing fp16 scales with fp16 activations trips ORT's
+    T1 type-binding validator."""
+    if scales.dim() != 2:
+        raise ValueError(f"expected scales [N, n_groups], got {tuple(scales.shape)}")
+    if scales.shape[1] != n_blocks:
+        raise ValueError(f"scales has {scales.shape[1]} groups but ORT block layout "
+                         f"expects {n_blocks}; ensure ORT block_size matches "
+                         "smollmer's scale_group_size at finalize time")
+    return scales.reshape(-1).to(torch.float32).contiguous().numpy()
 
 
 def inject_ternary(model: onnx.ModelProto, sd: dict[str, torch.Tensor],
@@ -106,10 +108,7 @@ def inject_ternary(model: onnx.ModelProto, sd: dict[str, torch.Tensor],
         if bits != 2:
             raise ValueError(f"{node.name}: expected bits=2, got {bits}")
 
-        u = unpack
-        if u is unpack_sherry and K % 32 != 0:
-            u = unpack_ternary_158
-        T = u(sd[f"{ql}.T_packed"], in_features=K, dtype=torch.int8)
+        T = unpack(sd[f"{ql}.T_packed"], in_features=K, dtype=torch.int8)
         scale = sd[f"{ql}.scales"]
         n_blocks = K // bs
 

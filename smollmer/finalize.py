@@ -1,7 +1,10 @@
-"""Stage-2 finalize: freeze ternary T, train per-row scales + RMSNorm weights.
+"""Stage-2 finalize: freeze ternary T, train per-(row, group) scales +
+RMSNorm weights + biases. Then pack the ternary trits to 1.58 bpw and
+write a deployment checkpoint suitable for `smollmer-chat`.
 
-After training, packs the ternary weights to 2 bits and writes a deployment
-checkpoint suitable for `smollmer-chat`.
+Layout (matches Bonsai's deployment format):
+  T_packed: uint8 packed trits, 5 trits per byte.
+  scales:   fp16 [out_features, n_groups], one per (row, column-group).
 """
 from __future__ import annotations
 
@@ -15,14 +18,12 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from .build_student import load_student
-from .distill import ShardedDataset, kl_with_rest, lr_at
-from .pack import (pack_sherry, pack_ternary_158, pack_top1,
-                   quantize_embed_int8)
+from .distill import Lion32, ShardedDataset, kl_with_rest, lr_at
+from .pack import pack_ternary_158, quantize_embed_int8
+from .qlinear import (QLinear, clamp_qlinear_weights, quantize_levels,
+                      set_levels)
 
 EMBED_INT8_KEYS: tuple[str, ...] = ("model.embed_tokens.weight", "lm_head.weight")
-from .qlinear import (QLinear, clamp_qlinear_weights, quantize_levels,
-                      quantize_sherry, quantize_top1,
-                      set_levels, set_sherry, set_top1)
 
 
 def freeze_for_finalize(model: torch.nn.Module, freeze_embed: bool,
@@ -56,17 +57,14 @@ def freeze_for_finalize(model: torch.nn.Module, freeze_embed: bool,
 def to_packed_state_dict(model: torch.nn.Module,
                          dtype: torch.dtype = torch.bfloat16,
                          quant_embed: bool = True) -> dict[str, torch.Tensor]:
-    """Build a state_dict with QLinear weights replaced by tightly-packed
-    ternary tensors. Other params are cast to `dtype` for storage.
+    """Build a state_dict with QLinear weights replaced by packed ternary
+    tensors + per-(row, group) scales. Other params are cast to `dtype`
+    for storage.
 
-    Per-module `sherry` / `top1` flag picks both the projection and the packer:
-      top1=True   -> quantize_top1 + pack_top1 (1.0 bpw, 0-or-1 nonzero per block)
-      sherry=True -> quantize_sherry + pack_sherry (1.25 bpw, exactly 1 zero per block)
-      neither     -> quantize_levels + pack_ternary_158 (1.6 bpw, plain ternary)
-
-    Each constrained packer has shape requirements; we fall back to the
-    1.6 bpw plain packer for any oddly-shaped layer rather than failing
-    (top1 needs in_features % 8 == 0, sherry needs % 32 == 0)."""
+    Per layer:
+      `<name>.T_packed`: uint8, packed trits at 1.58 bpw.
+      `<name>.scales`:   fp16 [out_features, n_groups], per-(row, group).
+    """
     qlinear_skip: set[str] = set()
     out: dict[str, torch.Tensor] = {}
     for name, m in model.named_modules():
@@ -75,22 +73,9 @@ def to_packed_state_dict(model: torch.nn.Module,
         qlinear_skip.update({f"{name}.weight", f"{name}.scales"})
         if m.bias is not None:
             qlinear_skip.add(f"{name}.bias")
-        if m.top1:
-            T = quantize_top1(m.weight.detach(), 3).to(torch.int8).cpu()
-            if m.in_features % 8 == 0:
-                out[f"{name}.T_packed"] = pack_top1(T)
-            else:
-                out[f"{name}.T_packed"] = pack_ternary_158(T)
-        elif m.sherry:
-            T = quantize_sherry(m.weight.detach(), 3).to(torch.int8).cpu()
-            if m.in_features % 32 == 0:
-                out[f"{name}.T_packed"] = pack_sherry(T)
-            else:
-                out[f"{name}.T_packed"] = pack_ternary_158(T)
-        else:
-            T = quantize_levels(m.weight.detach(), 3).to(torch.int8).cpu()
-            out[f"{name}.T_packed"] = pack_ternary_158(T)
-        out[f"{name}.scales"] = m.scales.detach().cpu().to(torch.float32).contiguous()
+        T = quantize_levels(m.weight.detach(), 3).to(torch.int8).cpu()
+        out[f"{name}.T_packed"] = pack_ternary_158(T)
+        out[f"{name}.scales"] = m.scales.detach().cpu().to(torch.float16).contiguous()
         if m.bias is not None:
             out[f"{name}.bias"] = m.bias.detach().cpu().to(dtype).contiguous()
     for k, v in model.state_dict().items():
@@ -132,6 +117,9 @@ def main() -> None:
                     choices=["bfloat16", "float16", "none"])
     ap.add_argument("--store-dtype", default="bfloat16",
                     choices=["bfloat16", "float16", "float32"])
+    ap.add_argument("--scale-group-size", type=int, default=128,
+                    help="Must match the value used during distill (recorded "
+                         "in ckpt metadata). Default 128.")
     ap.add_argument("--freeze-embed", action="store_true")
     ap.add_argument("--freeze-lm-head", action="store_true")
     ap.add_argument("--no-quant-embed", action="store_true",
@@ -143,16 +131,24 @@ def main() -> None:
     torch.manual_seed(args.seed)
 
     print(f"[build] loading {args.model}")
-    # See distill.py for the latent_dtype rationale; same fp16/fp32 fallback
-    # rule applies (autocast handles the cast in-kernel).
     latent_dtype = torch.float32 if args.autocast_dtype == "none" else torch.float16
-    model, _tok, n_replaced = load_student(args.model, dtype=torch.float32, levels=3,
-                                           latent_dtype=latent_dtype)
-    print(f"[build] {n_replaced} QLinear modules (latent dtype: {latent_dtype})")
-    model = model.to(args.device)
 
+    # Read ckpt metadata first so we can match the group_size used at training.
     with safe_open(str(args.resume), framework="pt") as f:
         meta = f.metadata() or {}
+    ckpt_group = int(meta.get("group_size", args.scale_group_size))
+    if ckpt_group != args.scale_group_size:
+        print(f"[finalize] using group_size={ckpt_group} from ckpt metadata "
+              f"(--scale-group-size={args.scale_group_size} ignored)")
+    group_size = ckpt_group
+
+    model, _tok, n_replaced = load_student(args.model, dtype=torch.float32, levels=3,
+                                           latent_dtype=latent_dtype,
+                                           group_size=group_size)
+    print(f"[build] {n_replaced} QLinear modules "
+          f"(latent dtype: {latent_dtype}, group_size: {group_size})")
+    model = model.to(args.device)
+
     sd = load_file(str(args.resume))
     missing, unexpected = model.load_state_dict(sd, strict=False)
     print(f"[resume] {args.resume.name} (meta={meta})")
@@ -162,22 +158,11 @@ def main() -> None:
         print(f"[resume] unexpected: {len(unexpected)}")
 
     set_levels(model, 3)
-    sherry = meta.get("sherry") == "1"
-    top1 = meta.get("top1") == "1"
-    if sherry and top1:
-        raise RuntimeError("ckpt metadata has both sherry=1 and top1=1 (mutually exclusive)")
-    if top1:
-        n_top1 = set_top1(model, True)
-        print(f"[finalize] top1 constraint active on {n_top1} layers (from ckpt metadata)")
-    elif sherry:
-        n_sherry = set_sherry(model, True)
-        print(f"[finalize] sherry constraint active on {n_sherry} layers (from ckpt metadata)")
     n_train, n_frozen = freeze_for_finalize(model, args.freeze_embed, args.freeze_lm_head)
     print(f"[freeze] trainable={n_train:,} frozen={n_frozen:,}")
 
-    from lion_pytorch import Lion
-    opt = Lion([p for p in model.parameters() if p.requires_grad],
-               lr=args.lr, weight_decay=args.wd)
+    opt = Lion32([p for p in model.parameters() if p.requires_grad],
+                 lr=args.lr, weight_decay=args.wd)
 
     ds = ShardedDataset(args.cache_dir, seed=args.seed)
     dl = DataLoader(ds, batch_size=args.batch_size,
@@ -231,18 +216,11 @@ def main() -> None:
     packed_sd = to_packed_state_dict(model, dtype=store_dtype,
                                      quant_embed=not args.no_quant_embed)
     out_path = args.out / "final_packed.safetensors"
-    if top1:
-        fmt = "smollmer-packed-top1-v1"
-    elif sherry:
-        fmt = "smollmer-packed-sherry-v1"
-    else:
-        fmt = "smollmer-packed-158-v1"
     save_file(packed_sd, str(out_path), metadata={
-        "format": fmt,
+        "format": "smollmer-packed-bonsai-v1",
         "model_id": args.model,
         "store_dtype": args.store_dtype,
-        "sherry": "1" if sherry else "0",
-        "top1": "1" if top1 else "0",
+        "group_size": str(group_size),
         "embed_int8": "0" if args.no_quant_embed else "1",
     })
     print(f"[done] wrote {out_path} ({sum(v.numel() * v.element_size() for v in packed_sd.values()) / 1e6:.1f} MB)")
