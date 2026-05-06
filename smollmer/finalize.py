@@ -16,11 +16,13 @@ from tqdm import tqdm
 
 from .build_student import load_student
 from .distill import ShardedDataset, kl_with_rest, lr_at
-from .pack import pack_sherry, pack_ternary_158, quantize_embed_int8
+from .pack import (pack_sherry, pack_ternary_158, pack_top1,
+                   quantize_embed_int8)
 
 EMBED_INT8_KEYS: tuple[str, ...] = ("model.embed_tokens.weight", "lm_head.weight")
 from .qlinear import (QLinear, clamp_qlinear_weights, quantize_levels,
-                      quantize_sherry, set_levels, set_sherry)
+                      quantize_sherry, quantize_top1,
+                      set_levels, set_sherry, set_top1)
 
 
 def freeze_for_finalize(model: torch.nn.Module, freeze_embed: bool,
@@ -57,12 +59,14 @@ def to_packed_state_dict(model: torch.nn.Module,
     """Build a state_dict with QLinear weights replaced by tightly-packed
     ternary tensors. Other params are cast to `dtype` for storage.
 
-    Per-module `sherry` flag picks both the projection and the packer:
-      sherry=True  -> quantize_sherry + pack_sherry (1.25 bpw)
-      sherry=False -> quantize_levels + pack_ternary_158 (1.6 bpw)
+    Per-module `sherry` / `top1` flag picks both the projection and the packer:
+      top1=True   -> quantize_top1 + pack_top1 (1.0 bpw, 0-or-1 nonzero per block)
+      sherry=True -> quantize_sherry + pack_sherry (1.25 bpw, exactly 1 zero per block)
+      neither     -> quantize_levels + pack_ternary_158 (1.6 bpw, plain ternary)
 
-    Sherry packing requires `in_features % 32 == 0`; we fall back to the
-    1.6 bpw packer for any oddly-shaped sherry layer rather than failing."""
+    Each constrained packer has shape requirements; we fall back to the
+    1.6 bpw plain packer for any oddly-shaped layer rather than failing
+    (top1 needs in_features % 8 == 0, sherry needs % 32 == 0)."""
     qlinear_skip: set[str] = set()
     out: dict[str, torch.Tensor] = {}
     for name, m in model.named_modules():
@@ -71,11 +75,20 @@ def to_packed_state_dict(model: torch.nn.Module,
         qlinear_skip.update({f"{name}.weight", f"{name}.scales"})
         if m.bias is not None:
             qlinear_skip.add(f"{name}.bias")
-        quant = quantize_sherry if m.sherry else quantize_levels
-        T = quant(m.weight.detach(), 3).to(torch.int8).cpu()
-        if m.sherry and m.in_features % 32 == 0:
-            out[f"{name}.T_packed"] = pack_sherry(T)
+        if m.top1:
+            T = quantize_top1(m.weight.detach(), 3).to(torch.int8).cpu()
+            if m.in_features % 8 == 0:
+                out[f"{name}.T_packed"] = pack_top1(T)
+            else:
+                out[f"{name}.T_packed"] = pack_ternary_158(T)
+        elif m.sherry:
+            T = quantize_sherry(m.weight.detach(), 3).to(torch.int8).cpu()
+            if m.in_features % 32 == 0:
+                out[f"{name}.T_packed"] = pack_sherry(T)
+            else:
+                out[f"{name}.T_packed"] = pack_ternary_158(T)
         else:
+            T = quantize_levels(m.weight.detach(), 3).to(torch.int8).cpu()
             out[f"{name}.T_packed"] = pack_ternary_158(T)
         out[f"{name}.scales"] = m.scales.detach().cpu().to(torch.float32).contiguous()
         if m.bias is not None:
@@ -150,7 +163,13 @@ def main() -> None:
 
     set_levels(model, 3)
     sherry = meta.get("sherry") == "1"
-    if sherry:
+    top1 = meta.get("top1") == "1"
+    if sherry and top1:
+        raise RuntimeError("ckpt metadata has both sherry=1 and top1=1 (mutually exclusive)")
+    if top1:
+        n_top1 = set_top1(model, True)
+        print(f"[finalize] top1 constraint active on {n_top1} layers (from ckpt metadata)")
+    elif sherry:
         n_sherry = set_sherry(model, True)
         print(f"[finalize] sherry constraint active on {n_sherry} layers (from ckpt metadata)")
     n_train, n_frozen = freeze_for_finalize(model, args.freeze_embed, args.freeze_lm_head)
@@ -212,12 +231,18 @@ def main() -> None:
     packed_sd = to_packed_state_dict(model, dtype=store_dtype,
                                      quant_embed=not args.no_quant_embed)
     out_path = args.out / "final_packed.safetensors"
-    fmt = "smollmer-packed-sherry-v1" if sherry else "smollmer-packed-158-v1"
+    if top1:
+        fmt = "smollmer-packed-top1-v1"
+    elif sherry:
+        fmt = "smollmer-packed-sherry-v1"
+    else:
+        fmt = "smollmer-packed-158-v1"
     save_file(packed_sd, str(out_path), metadata={
         "format": fmt,
         "model_id": args.model,
         "store_dtype": args.store_dtype,
         "sherry": "1" if sherry else "0",
+        "top1": "1" if top1 else "0",
         "embed_int8": "0" if args.no_quant_embed else "1",
     })
     print(f"[done] wrote {out_path} ({sum(v.numel() * v.element_size() for v in packed_sd.values()) / 1e6:.1f} MB)")

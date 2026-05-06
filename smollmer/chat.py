@@ -17,8 +17,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, TextStreamer
 
 from .build_student import quantize_in_place
 from .pack import (dequantize_embed_int8, unpack_sherry, unpack_ternary,
-                    unpack_ternary_158)
-from .qlinear import QLinear, set_levels, set_sherry
+                    unpack_ternary_158, unpack_top1)
+from .qlinear import QLinear, set_levels, set_sherry, set_top1
 
 
 def _detect_packed(sd_keys) -> bool:
@@ -29,6 +29,8 @@ def _unpacker_for(fmt: str):
     """Pick an unpack function from the saved-checkpoint format string."""
     if fmt == "smollmer-packed-sherry-v1":
         return unpack_sherry
+    if fmt == "smollmer-packed-top1-v1":
+        return unpack_top1
     if fmt == "smollmer-packed-158-v1":
         return unpack_ternary_158
     if fmt in ("smollmer-packed-v1", ""):
@@ -48,10 +50,13 @@ def _load_packed(model: torch.nn.Module, sd: dict[str, torch.Tensor],
         s_key = f"{name}.scales"
         if T_key not in sd or s_key not in sd:
             raise KeyError(f"packed checkpoint missing keys for {name}")
-        # Sherry layers with in_features % 32 != 0 are written via the 1.6
-        # bpw fallback; detect by packed-row width and use the right unpacker.
+        # Sherry layers with in_features % 32 != 0 (or top1 layers with
+        # in_features % 8 != 0) are written via the 1.6 bpw fallback; detect
+        # by packed-row width and use the right unpacker.
         u = unpack
         if u is unpack_sherry and m.in_features % 32 != 0:
+            u = unpack_ternary_158
+        elif u is unpack_top1 and m.in_features % 8 != 0:
             u = unpack_ternary_158
         T = u(sd[T_key], in_features=m.in_features, dtype=m.weight.dtype)
         m.weight.data.copy_(T.to(m.weight.dtype))
@@ -114,10 +119,14 @@ def load_model(model_id: str, ckpt_path: Path,
             print(f"[load] all {len(sd)} keys matched")
         set_levels(model, int(meta.get("levels", 3)))
 
-    # Sherry-trained ckpts need the constraint active so the QLinear forward
-    # reproduces training-time math (packed ckpts already store the projected
-    # trits, so this is mostly a no-op there, but flip it for symmetry).
-    if meta.get("sherry") == "1":
+    # Constraint-trained ckpts need the constraint active so the QLinear
+    # forward reproduces training-time math (packed ckpts already store the
+    # projected trits, so this is mostly a no-op there, but flip it for
+    # symmetry).
+    if meta.get("top1") == "1":
+        n_top1 = set_top1(model, True)
+        print(f"[load] top1 constraint active on {n_top1} layers")
+    elif meta.get("sherry") == "1":
         n_sherry = set_sherry(model, True)
         print(f"[load] sherry constraint active on {n_sherry} layers")
 

@@ -1,6 +1,6 @@
 """Tight packings for ternary weights.
 
-Three formats live here:
+Four formats live here:
 
 * `pack_ternary_158` / `unpack_ternary_158`: 5 trits per uint8 byte,
   base-3 encoding (1.6 bpw, vs theoretical log2(3) = 1.585). Use this
@@ -10,6 +10,13 @@ Three formats live here:
   Each block must contain exactly one zero and three ±1 values; the
   code is `zero_pos << 3 | sign_bits`. 8 blocks (40 bits) are LE-packed
   into 5 uint8 bytes, so `in_features` must be a multiple of 32.
+
+* `pack_top1` / `unpack_top1`: 4 bits per 4-trit block (1.0 bpw). Each
+  block has *at most one* nonzero (sign + position) — natural sparsity
+  of trained ternary models is ~85% zero, so most blocks are all-zero.
+  Codes: 0 = all-zero, 1-4 = +1 at position 0..3, 5-8 = -1 at
+  position 0..3, 9-15 unused. Two blocks (8 bits) per byte;
+  `in_features` must be a multiple of 8.
 
 * `pack_ternary` / `unpack_ternary`: legacy 2-bpw format kept only so
   `chat.py` can still load the first generation of packed checkpoints.
@@ -165,6 +172,89 @@ def unpack_sherry(packed: torch.Tensor, in_features: int, block: int = 4,
     blocks_out = torch.zeros(out_f, n_blocks_row, block,
                              dtype=torch.int8, device=packed.device)
     blocks_out.scatter_(-1, nz_idx, nz_vals)
+    return blocks_out.view(out_f, n_blocks_row * block).to(dtype)
+
+
+# ----- 1.0 bpw: top1 blocks (0 or 1 nonzero per 4 trits) ----------------
+
+@torch.no_grad()
+def pack_top1(t: torch.Tensor, block: int = 4) -> torch.Tensor:
+    """Pack a top1-constrained ternary [out, in] tensor at 1.0 bpw.
+
+    Each 4-trit block must have AT MOST one nonzero. Per-block code
+    (4 bits, 9 valid values):
+
+        0:        all-zero block
+        1-4:      +1 at position (code - 1) ∈ [0, 3]
+        5-8:      -1 at position (code - 5) ∈ [0, 3]
+
+    Two blocks pack into one byte (high nibble = even block, low nibble =
+    odd block), so `in_features` must be a multiple of `2 * block` = 8.
+    Output shape: [out, in / 8].
+    """
+    if t.dim() != 2:
+        raise ValueError(f"expected 2D tensor, got {tuple(t.shape)}")
+    if block != 4:
+        raise NotImplementedError(f"block={block} (only 4 supported)")
+    out_f, in_f = t.shape
+    if in_f % (2 * block) != 0:
+        raise ValueError(f"in_features {in_f} not divisible by {2 * block}")
+
+    n_blocks_row = in_f // block
+    blocks = t.to(torch.int8).contiguous().view(out_f, n_blocks_row, block)
+    nonzero_mask = (blocks != 0)
+    nz_per_block = nonzero_mask.sum(dim=-1)
+    if (nz_per_block > 1).any():
+        bad = (nz_per_block > 1).sum().item()
+        raise ValueError(f"{bad} blocks violate top1 constraint "
+                         f"(must have at most 1 nonzero per block of {block})")
+
+    has_nonzero = nonzero_mask.any(dim=-1)                              # [out, n_blocks]
+    # argmax of the abs over a block: for all-zero blocks it returns 0
+    # (which gets masked out below by has_nonzero); for nonzero blocks
+    # it points at the (unique) nonzero slot.
+    pos = blocks.abs().argmax(dim=-1)                                   # [out, n_blocks]
+    sign_at_pos = torch.gather(blocks, -1, pos.unsqueeze(-1)).squeeze(-1)
+    # Code: 0 (all-zero) or 1+pos (positive nonzero) or 5+pos (negative).
+    code = torch.where(sign_at_pos > 0, pos + 1, pos + 5).to(torch.int64)
+    code = torch.where(has_nonzero, code, torch.zeros_like(code))       # [out, n_blocks]
+
+    # Pack two consecutive blocks per byte.
+    n_groups = n_blocks_row // 2
+    code = code.view(out_f, n_groups, 2)
+    bytes_out = ((code[..., 0] << 4) | code[..., 1]).to(torch.uint8)
+    return bytes_out.contiguous()
+
+
+@torch.no_grad()
+def unpack_top1(packed: torch.Tensor, in_features: int, block: int = 4,
+                dtype: torch.dtype = torch.bfloat16) -> torch.Tensor:
+    if packed.dim() != 2:
+        raise ValueError(f"expected 2D packed tensor, got {tuple(packed.shape)}")
+    if block != 4:
+        raise NotImplementedError(f"block={block} (only 4 supported)")
+    if in_features % (2 * block) != 0:
+        raise ValueError(f"in_features {in_features} not divisible by {2 * block}")
+    out_f, packed_w = packed.shape
+    n_groups = in_features // (2 * block)
+    if packed_w != n_groups:
+        raise ValueError(f"packed width {packed_w} != {n_groups}")
+
+    p = packed.to(torch.int64)
+    code_hi = (p >> 4) & 0xF
+    code_lo = p & 0xF
+    codes = torch.stack([code_hi, code_lo], dim=-1).view(out_f, n_groups * 2)
+    n_blocks_row = codes.shape[1]
+
+    has_nonzero = codes != 0
+    is_neg = codes >= 5
+    pos = torch.where(is_neg, codes - 5, codes - 1).clamp_min(0)
+    sign = torch.where(is_neg, -torch.ones_like(codes), torch.ones_like(codes))
+
+    blocks_out = torch.zeros(out_f, n_blocks_row, block,
+                             dtype=torch.int8, device=packed.device)
+    src = (sign * has_nonzero.to(torch.int64)).to(torch.int8).unsqueeze(-1)
+    blocks_out.scatter_(-1, pos.unsqueeze(-1), src)
     return blocks_out.view(out_f, n_blocks_row * block).to(dtype)
 
 

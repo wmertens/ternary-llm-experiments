@@ -38,26 +38,94 @@ from .qlinear import QLinear
 
 
 @torch.no_grad()
-def _build_perm(scores: torch.Tensor, block: int = 4) -> torch.Tensor:
-    """Permutation that places the lowest-score n/block elements at block
-    position 0 (the "designated zero" slot under Sherry) and distributes
-    the rest across positions 1..block-1.
+def _build_perm_top1(scores: torch.Tensor, block: int = 4) -> torch.Tensor:
+    """Permutation for top1 encoding: each block has the i-th strongest
+    column at slot 0 (the designated nonzero "anchor"), and the (block-1)
+    weakest available columns in slots 1..block-1.
 
-    Greedy heuristic: column j's score = sum of |w| over all rows that
-    use column j. Low score => good zero candidate. Pair the lowest n/4
-    columns with the top 3n/4 to give every block one weak + three strong.
+    Pairing: block 0 gets the *globally strongest* column at slot 0
+    paired with the (block-1) *globally weakest* columns. Block N-1 gets
+    the weakest column from the top quartile (anchor) paired with the
+    strongest of the bottom 3 quartiles. Maximum within-block contrast
+    in early blocks, gracefully degrading.
+
+    Why this pairing: the strongest top1 column drives the matmul output
+    for its block; pairing it with the columns most likely to genuinely
+    quantize to 0 (weakest |w|) means the block's "rest is zero"
+    constraint costs essentially nothing. Argmax(|w|) per block reliably
+    pins to slot 0 — Sherry-style oscillation among slots is structurally
+    impossible.
     """
     n = scores.numel()
     if n % block != 0:
         raise ValueError(f"n={n} not divisible by block={block}")
+    if block < 2:
+        raise ValueError(f"block must be >= 2 to have anchor + zeros; got {block}")
     n_blocks = n // block
-    sorted_idx = torch.argsort(scores)         # ascending
-    zeros = sorted_idx[:n_blocks]              # bottom n/block
-    fillers = sorted_idx[n_blocks:]            # top (block-1)*n/block
+    sorted_asc = torch.argsort(scores)                  # ascending |w|
+    anchor_pool = sorted_asc[-n_blocks:].flip(0)        # top: STRONGEST first
+    zero_pool = sorted_asc[:-n_blocks]                  # bottom (block-1)*n_blocks: weakest first
+    if zero_pool.numel() != (block - 1) * n_blocks:
+        raise ValueError("internal pool sizing mismatch")
     perm = torch.empty(n, dtype=torch.long, device=scores.device)
-    perm[0::block] = zeros
+    perm[0::block] = anchor_pool                        # slot 0: designated nonzero anchor
+    z_per_block = zero_pool.reshape(n_blocks, block - 1)
     for k in range(1, block):
-        perm[k::block] = fillers[(k - 1) * n_blocks:k * n_blocks]
+        perm[k::block] = z_per_block[:, k - 1]
+    return perm
+
+
+@torch.no_grad()
+def _build_perm(scores: torch.Tensor, block: int = 4) -> torch.Tensor:
+    """Permutation that gives every block of `block` columns a guaranteed
+    strong|1|, a guaranteed strong-0, and the rest from the middle 50%,
+    paired so that block 0 has maximum within-block contrast.
+
+    Three categories after sorting columns by `scores` (= column |w| sum):
+
+      * strong-0   — bottom n/block columns (smallest |w|): natural zeros.
+      * strong-|1| — top    n/block columns (largest  |w|): natural ±1s.
+      * weak       — middle (block-2)/block: ambiguous.
+
+    Per-block composition (block=4 case):
+
+      slot 0: strong-0[i]                    (smallest |w| in block)
+      slot 1: weak.strongest_remaining[2i]   (filler)
+      slot 2: weak.strongest_remaining[2i+1] (filler)
+      slot 3: strong-|1|.strongest[i]        (largest  |w| in block)
+
+    Pairing: block 0 gets the *globally* smallest column in slot 0 paired
+    with the *globally* largest in slot 3. Block N-1 gets the largest of
+    the bottom quartile paired with the smallest of the top quartile.
+    Maximum within-block contrast in early blocks; weaker but still
+    valid contrast in later ones.
+
+    Why this matters: Sherry's argmin (rule 1) always picks the bottom-
+    quartile slot as the designated zero, by construction (it has the
+    smallest |w| in its block). No oscillation between "which slot is
+    the zero," so no flip-rate cliff late in training.
+    """
+    n = scores.numel()
+    if n % block != 0:
+        raise ValueError(f"n={n} not divisible by block={block}")
+    if block < 3:
+        raise ValueError(f"block must be >= 3 to have strong-0, weak, strong-1; got {block}")
+    n_blocks = n // block
+    sorted_asc = torch.argsort(scores)           # ascending |w|
+    z_pool = sorted_asc[:n_blocks]               # bottom: smallest first
+    t_pool = sorted_asc[-n_blocks:].flip(0)      # top: STRONGEST first
+    m_pool = sorted_asc[n_blocks:-n_blocks].flip(0)  # middle: STRONGEST first
+    # Sanity: m_pool must split evenly into (block-2) per block.
+    if m_pool.numel() != (block - 2) * n_blocks:
+        raise ValueError("internal pool sizing mismatch")
+    perm = torch.empty(n, dtype=torch.long, device=scores.device)
+    perm[0::block] = z_pool                      # slot 0: designated zero
+    perm[block - 1::block] = t_pool              # last slot: designated one
+    # Middle slots: block i takes the next (block-2) strongest from m_pool.
+    # Reshape m_pool to [n_blocks, block-2] so row i is block i's middle slots.
+    m_per_block = m_pool.reshape(n_blocks, block - 2)
+    for k in range(1, block - 1):
+        perm[k::block] = m_per_block[:, k - 1]
     return perm
 
 
@@ -137,15 +205,90 @@ def _permute_cols_slice(layer: QLinear, col_slice: slice, perm: torch.Tensor,
 
 
 @torch.no_grad()
-def permute_for_sherry(model: torch.nn.Module, block: int = 4,
-                       optimizer=None) -> int:
-    """Apply free-dim permutations in place. Returns count of matrices touched.
+def permutation_staleness(model: torch.nn.Module, block: int = 4,
+                          mode: str = "sherry") -> float:
+    """Fraction of blocks whose argmin/argmax of the perm-score is not in
+    slot 0 — i.e. blocks where the permutation's invariant has been broken
+    by training drift.
+
+    `mode='sherry'`: slot 0 should have the *smallest* column score
+    (designated zero). Staleness counts blocks where some other slot now
+    has a smaller score.
+
+    `mode='top1'`: slot 0 should have the *largest* column score
+    (designated anchor). Staleness counts blocks where some other slot
+    now has a larger score.
+
+    What `permute_for_sherry` actually pins is the *column score* order
+    (computed per-matrix as the score `_build_perm` saw at permute time):
+
+      * down_proj:  score[c] = sum_r |down.weight[r, c]|     (per column).
+      * o_proj:     per-KV-head, score[c] = sum over Q-heads in the GQA
+                    group of |o.weight[:, q*head_dim + c]|.sum(0)
+                    (matches the score `permute_for_sherry` computes).
+
+    Per-row staleness (whether each individual row's min lies in slot 0)
+    isn't the right metric: Sherry's argmin already runs per-row each step,
+    and per-row minimums vary across rows naturally. The score-aligned
+    staleness above is the signal that the *structural* alignment has
+    drifted.
+
+    Only counts down_proj and o_proj — the matrices whose in_features dim
+    is actually aligned to Sherry block boundaries by permute_for_sherry.
+    Other QLinears have in_features = hidden, which we don't permute.
+
+    0 = perfectly aligned (just permuted), 1 = fully stale.
+    """
+    cfg = model.config
+    head_dim = getattr(cfg, "head_dim", cfg.hidden_size // cfg.num_attention_heads)
+    n_q = cfg.num_attention_heads
+    n_kv = getattr(cfg, "num_key_value_heads", n_q)
+    q_per_kv = n_q // n_kv
+
+    if mode not in ("sherry", "top1"):
+        raise ValueError(f"mode must be 'sherry' or 'top1', got {mode!r}")
+    n_total = 0
+    n_stale = 0
+    for layer in model.model.layers:
+        # ---- down_proj: column sum across rows ----
+        down: QLinear = layer.mlp.down_proj
+        if down.in_features % block == 0:
+            col_score = down.weight.detach().abs().sum(dim=0)
+            blk = col_score.reshape(-1, block)
+            slot0_idx = blk.argmin(dim=-1) if mode == "sherry" else blk.argmax(dim=-1)
+            n_total += slot0_idx.numel()
+            n_stale += int((slot0_idx != 0).sum())
+
+        # ---- o_proj: per-KV-head, sum of |w| across all Q-heads in group ----
+        o_proj: QLinear = layer.self_attn.o_proj
+        if head_dim % block == 0:
+            for h in range(n_kv):
+                head_score = torch.zeros(head_dim, device=o_proj.weight.device)
+                for q in range(q_per_kv):
+                    q_idx = h * q_per_kv + q
+                    cols = slice(q_idx * head_dim, (q_idx + 1) * head_dim)
+                    head_score = head_score + o_proj.weight.detach()[:, cols].abs().sum(dim=0)
+                blk = head_score.reshape(-1, block)
+                slot0_idx = blk.argmin(dim=-1) if mode == "sherry" else blk.argmax(dim=-1)
+                n_total += slot0_idx.numel()
+                n_stale += int((slot0_idx != 0).sum())
+    if n_total == 0:
+        return 0.0
+    return n_stale / n_total
+
+
+@torch.no_grad()
+def _permute_with(model: torch.nn.Module, build_perm,
+                  block: int = 4, optimizer=None) -> int:
+    """Apply free-dim permutations in place using the given perm builder.
+    Mode-agnostic over the choice of `build_perm` (Sherry's `_build_perm`
+    or top1's `_build_perm_top1`). Returns count of matrices touched.
 
     Pass `optimizer` to also permute its per-parameter state (Lion's exp_avg,
-    AdamW's exp_avg / exp_avg_sq). Required when re-permuting *during* a run
-    (e.g. between curriculum stages); the opt state was accumulated under the
-    old layout and would otherwise update weights through stale momentum
-    indices. Safe to omit at first init (state is empty before the first step).
+    AdamW's exp_avg / exp_avg_sq). Required when re-permuting *during* a run;
+    the opt state was accumulated under the old layout and would otherwise
+    update weights through stale momentum indices. Safe to omit at first
+    init (state is empty before the first step).
     """
     cfg = model.config
     head_dim = getattr(cfg, "head_dim", cfg.hidden_size // cfg.num_attention_heads)
@@ -157,18 +300,19 @@ def permute_for_sherry(model: torch.nn.Module, block: int = 4,
 
     if head_dim % block != 0:
         raise ValueError(f"head_dim={head_dim} not divisible by block={block}; "
-                         "per-head permutation would cross sherry block boundaries")
+                         "per-head permutation would cross block boundaries")
 
     n_touched = 0
     for layer in model.model.layers:
         # ---- MLP intermediate dim ----
         # Score = sum_r |down_proj.weight[r, j]|. The cost of designating
-        # column j as down_proj's per-block zero is dominated by this sum.
+        # column j as down_proj's per-block zero (Sherry) or anchor (top1)
+        # is dominated by this sum.
         down: QLinear = layer.mlp.down_proj
         up: QLinear = layer.mlp.up_proj
         gate: QLinear = layer.mlp.gate_proj
         score = down.weight.detach().abs().sum(dim=0)
-        perm = _build_perm(score, block=block).to(down.weight.device)
+        perm = build_perm(score, block=block).to(down.weight.device)
         _permute_cols(down, perm, opt=optimizer)
         _permute_rows(up, perm, opt=optimizer)
         _permute_rows(gate, perm, opt=optimizer)
@@ -186,7 +330,7 @@ def permute_for_sherry(model: torch.nn.Module, block: int = 4,
                 q_idx = h * q_per_kv + q
                 cols = slice(q_idx * head_dim, (q_idx + 1) * head_dim)
                 head_score = head_score + o_proj.weight.detach()[:, cols].abs().sum(dim=0)
-            perm_h = _build_perm(head_score, block=block).to(o_proj.weight.device)
+            perm_h = build_perm(head_score, block=block).to(o_proj.weight.device)
 
             v_rows = slice(h * head_dim, (h + 1) * head_dim)
             _permute_rows_slice(v_proj, v_rows, perm_h, opt=optimizer)
@@ -196,3 +340,22 @@ def permute_for_sherry(model: torch.nn.Module, block: int = 4,
                 _permute_cols_slice(o_proj, cols, perm_h, opt=optimizer)
             n_touched += 1 + q_per_kv  # v_proj head + o_proj per-Q-head slices
     return n_touched
+
+
+@torch.no_grad()
+def permute_for_sherry(model: torch.nn.Module, block: int = 4,
+                       optimizer=None) -> int:
+    """Permute for Sherry: place lowest-score columns at slot 0 (designated
+    zero), distribute the rest such that block 0 has max contrast. See
+    `_build_perm` for the exact strategy."""
+    return _permute_with(model, _build_perm, block=block, optimizer=optimizer)
+
+
+@torch.no_grad()
+def permute_for_top1(model: torch.nn.Module, block: int = 4,
+                     optimizer=None) -> int:
+    """Permute for top1: place highest-score columns at slot 0 (designated
+    anchor), fill slots 1..block-1 with the (block-1) weakest columns per
+    block. Block 0 has globally strongest paired with globally weakest;
+    contrast tapers gracefully toward block N-1."""
+    return _permute_with(model, _build_perm_top1, block=block, optimizer=optimizer)

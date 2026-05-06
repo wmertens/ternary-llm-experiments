@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🪴</text></svg>"
+    />
+    <title>smollmer · ternary SmolLM2-135M in your browser</title>
+    <style>
+      :root {
+        color-scheme: dark light;
+        --bg: #0e0f12;
+        --panel: #161821;
+        --fg: #e8e8ec;
+        --muted: #8b8e98;
+        --accent: #7aa2f7;
+        --warn: #e0af68;
+        --err: #f7768e;
+      }
+      * { box-sizing: border-box; }
+      html, body { height: 100%; margin: 0; }
+      body {
+        background: var(--bg);
+        color: var(--fg);
+        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+        display: flex;
+        flex-direction: column;
+        min-height: 100vh;
+      }
+      header {
+        padding: 1rem 1.5rem;
+        border-bottom: 1px solid #222530;
+      }
+      header h1 { margin: 0; font-size: 1.05rem; font-weight: 600; }
+      header .sub { color: var(--muted); font-size: 0.85rem; margin-top: 0.2rem; }
+      main {
+        flex: 1;
+        display: grid;
+        grid-template-rows: auto 1fr auto;
+        max-width: 760px;
+        width: 100%;
+        margin: 0 auto;
+        padding: 1rem;
+        gap: 0.75rem;
+      }
+      #status {
+        font-size: 0.85rem;
+        color: var(--muted);
+        min-height: 1.2em;
+      }
+      #status.warn { color: var(--warn); }
+      #status.err  { color: var(--err); }
+      #output {
+        background: var(--panel);
+        border: 1px solid #222530;
+        border-radius: 8px;
+        padding: 0.9rem 1rem;
+        white-space: pre-wrap;
+        font-family: ui-monospace, "JetBrains Mono", "Fira Code", monospace;
+        font-size: 0.92rem;
+        line-height: 1.5;
+        overflow-y: auto;
+        min-height: 200px;
+      }
+      .prompt { color: var(--accent); }
+      .gen { color: var(--fg); }
+      form {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+      }
+      textarea {
+        background: var(--panel);
+        color: var(--fg);
+        border: 1px solid #222530;
+        border-radius: 8px;
+        padding: 0.7rem 0.9rem;
+        font: inherit;
+        resize: vertical;
+        min-height: 60px;
+      }
+      textarea:focus { outline: 1px solid var(--accent); }
+      .row { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+      .row label { font-size: 0.85rem; color: var(--muted); }
+      .row input[type=number] {
+        width: 5em;
+        background: var(--panel);
+        color: var(--fg);
+        border: 1px solid #222530;
+        border-radius: 6px;
+        padding: 0.3rem 0.4rem;
+        font: inherit;
+      }
+      button {
+        background: var(--accent);
+        color: #11131a;
+        border: none;
+        border-radius: 8px;
+        padding: 0.55rem 1.1rem;
+        font: inherit;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      button:disabled { opacity: 0.5; cursor: not-allowed; }
+      button.secondary { background: #2a2e3b; color: var(--fg); }
+      footer {
+        text-align: center;
+        color: var(--muted);
+        font-size: 0.8rem;
+        padding: 0.8rem;
+        border-top: 1px solid #222530;
+      }
+      footer a { color: var(--muted); }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>🪴 smollmer · ternary SmolLM2-135M</h1>
+      <div class="sub">
+        135M params, ~1.6 bpw weights, q2 ONNX. Runs in your browser on WebGPU.
+      </div>
+    </header>
+    <main>
+      <div id="status">Initializing…</div>
+      <div id="output" aria-live="polite"></div>
+      <form id="form">
+        <textarea
+          id="prompt"
+          placeholder="Type a prompt and press Enter (Shift+Enter for newline). E.g. &quot;The capital of France is&quot;"
+          rows="2"
+        ></textarea>
+        <div class="row">
+          <button id="send" type="submit" disabled>Generate</button>
+          <button id="stop" type="button" class="secondary" disabled>Stop</button>
+          <button id="clear" type="button" class="secondary">Clear</button>
+          <span style="flex:1"></span>
+          <label>max tokens
+            <input id="max-tokens" type="number" min="1" max="2048" value="200" />
+          </label>
+          <label>temp
+            <input id="temp" type="number" min="0" max="2" step="0.05" value="0.8" />
+          </label>
+        </div>
+      </form>
+    </main>
+    <footer>
+      <a href="https://github.com/wmertens/smollmer">github.com/wmertens/smollmer</a>
+      ·
+      base: <a href="https://huggingface.co/HuggingFaceTB/SmolLM2-135M">SmolLM2-135M</a>
+    </footer>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

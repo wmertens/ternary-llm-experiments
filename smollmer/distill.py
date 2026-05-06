@@ -29,7 +29,8 @@ from tqdm import tqdm
 
 from .build_student import load_student
 from .qlinear import (QLinear, clamp_qlinear_weights, quantize_levels,
-                      set_levels, set_sherry)
+                      set_levels, set_sherry, set_sherry_alpha,
+                      set_top1, set_top1_alpha)
 
 
 _INTERRUPT = {"flag": False}
@@ -503,24 +504,29 @@ def parse_lr_overrides(spec: str) -> dict[int, float]:
     return out
 
 
-def lr_at(step: int, total: int, base_lr: float, warmup: int) -> float:
+def lr_at(step: int, total: int, base_lr: float, warmup: int,
+          floor: float = 0.1) -> float:
+    """Linear warmup → cosine decay to `floor × base_lr`. floor=0.1 is the
+    classic Bonsai recipe; bump it up (e.g. 0.5) when the late-stage flip-rate
+    cliff is locking the codebook into a suboptimal configuration. floor=1.0
+    disables the cosine entirely (flat LR after warmup)."""
     if warmup and step < warmup:
         return base_lr * (step + 1) / max(1, warmup)
-    # Cosine to 10% of base_lr over the rest of the stage.
     import math
     progress = (step - warmup) / max(1, total - warmup)
     progress = max(0.0, min(1.0, progress))
-    return base_lr * (0.1 + 0.9 * 0.5 * (1.0 + math.cos(math.pi * progress)))
+    return base_lr * (floor + (1.0 - floor) * 0.5 * (1.0 + math.cos(math.pi * progress)))
 
 
 def save_checkpoint(model, path: Path, levels: int, stage: int, model_id: str,
-                    sherry: bool) -> None:
+                    sherry: bool, top1: bool = False) -> None:
     sd = {k: v.detach().cpu().contiguous() for k, v in model.state_dict().items()}
     save_file(sd, str(path), metadata={
         "levels": str(levels),
         "stage": str(stage),
         "model_id": model_id,
         "sherry": "1" if sherry else "0",
+        "top1": "1" if top1 else "0",
     })
 
 
@@ -554,6 +560,32 @@ def main() -> None:
     ap.add_argument("--lr-overrides", type=str, default="",
                     help="Per-stage LR overrides as 'L:lr[,L:lr...]', e.g. "
                          "'9:2e-4,5:1.5e-4'. Stages not listed use --lr.")
+    ap.add_argument("--lr-floor", type=float, default=0.1,
+                    help="Cosine LR decays to floor*base_lr at end of stage. "
+                         "Default 0.1 = classic Bonsai recipe. Bump up (e.g. "
+                         "0.5) when the late-stage flip-rate cliff at L=3 is "
+                         "locking the codebook into a suboptimal Sherry-valid "
+                         "configuration the optimizer can't escape. 1.0 = flat "
+                         "LR after warmup (no cosine decay at all).")
+    ap.add_argument("--sherry-warmup-steps", type=int, default=0,
+                    help="Linearly ramp the Sherry constraint from off "
+                         "(alpha=0, plain quantize_levels) to on (alpha=1) "
+                         "over the first N steps of each Sherry-enabled "
+                         "stage. Lets the network find a good ternary sign "
+                         "pattern before being pinned to a Sherry-valid "
+                         "configuration. 0 disables (instant full Sherry, "
+                         "old behavior). Try 2000 for L=3.")
+    ap.add_argument("--permute-staleness-threshold", type=float, default=0.0,
+                    help="Adaptively re-permute mid-stage when the column-"
+                         "score alignment of down_proj+o_proj drifts: trigger "
+                         "permute_for_sherry when permutation_staleness "
+                         "exceeds this fraction. 0 disables (default). "
+                         "Reasonable values: 0.2-0.4. Suppressed in the last "
+                         "10%% of each stage to let the codebook settle.")
+    ap.add_argument("--permute-min-gap-steps", type=int, default=200,
+                    help="Minimum steps between adaptive re-permutes within "
+                         "a stage. Prevents rapid back-to-back permutes when "
+                         "staleness oscillates near the threshold.")
     ap.add_argument("--wd", type=float, default=0.05)
     ap.add_argument("--warmup-steps", type=int, default=30)
     ap.add_argument("--max-grad-norm", type=float, default=1.0)
@@ -601,19 +633,35 @@ def main() -> None:
     ap.add_argument("--sherry", action=argparse.BooleanOptionalAction, default=False,
                     help="Apply the Sherry-encoding constraint to every QLinear: "
                          "in each contiguous block of 4 weights along in_features, "
-                         "force the smallest-|w| slot to 0. Active at every L "
-                         "(not just L=3) so weight magnitudes redistribute "
-                         "gradually rather than being snapped at the end. Pass "
+                         "force the smallest-|w| slot to 0. Forces 75%% of trits to "
+                         "be ±1 — far more dense than the natural ~85%%-zero ternary "
+                         "distribution. Mutually exclusive with --top1. Pass "
                          "consistently across resumes; saved in ckpt metadata.")
+    ap.add_argument("--top1", action=argparse.BooleanOptionalAction, default=False,
+                    help="Apply the top1 constraint to every QLinear: in each "
+                         "block of 4, keep only the largest-|w| slot at its "
+                         "quantized value (±1 at L=3); zero the other 3. Forces "
+                         "25%% nonzero density, much closer to natural ~14%% "
+                         "nonzero — entropy-optimal at 0.75 bpw vs Sherry's 1.25 "
+                         "bpw. Mutually exclusive with --sherry. Pass "
+                         "consistently across resumes; saved in ckpt metadata.")
+    ap.add_argument("--top1-warmup-steps", type=int, default=0,
+                    help="Linearly ramp the top1 constraint from off (alpha=0, "
+                         "plain quantize_levels) to on (alpha=1) over the first "
+                         "N steps of each top1-enabled stage. Mirror of "
+                         "--sherry-warmup-steps. Try 2000 at L=3.")
     ap.add_argument("--permute-for-sherry", action=argparse.BooleanOptionalAction,
                     default=False,
                     help="Apply free-dim math-preserving permutations once at "
                          "init: down_proj cols + up_proj/gate_proj rows on the "
                          "MLP intermediate dim, and v_proj rows + o_proj cols on "
-                         "per-KV-head head_dim slices. Goal: align low-magnitude "
-                         "columns with sherry-block position 0. Skipped on "
-                         "--resume / interrupted snapshot. Implied (and "
-                         "redundant) when --permute-each-stage is set.")
+                         "per-KV-head head_dim slices. Goal: align block-position "
+                         "0 with the constraint's designated slot (smallest-|w| "
+                         "for sherry, largest-|w| for top1). The flag name is "
+                         "historical; it works for whichever constraint is "
+                         "active. Skipped on --resume / interrupted snapshot. "
+                         "Implied (and redundant) when --permute-each-stage is "
+                         "set.")
     ap.add_argument("--permute-each-stage", action=argparse.BooleanOptionalAction,
                     default=False,
                     help="Re-apply the free-dim permutation at the start of "
@@ -624,6 +672,8 @@ def main() -> None:
                          "interrupt — the on-disk weights are already post-"
                          "permute for that stage).")
     args = ap.parse_args()
+    if args.sherry and args.top1:
+        ap.error("--sherry and --top1 are mutually exclusive")
 
     args.out.mkdir(parents=True, exist_ok=True)
     torch.manual_seed(args.seed)
@@ -641,8 +691,11 @@ def main() -> None:
                                            levels=257,
                                            latent_dtype=latent_dtype)
     print(f"[build] {n_replaced} QLinear modules (latent dtype: {latent_dtype})")
-    n_sherry = set_sherry(model, args.sherry)
-    if args.sherry:
+    if args.top1:
+        n_top1 = set_top1(model, True)
+        print(f"[build] top1 constraint enabled on {n_top1} layers")
+    elif args.sherry:
+        n_sherry = set_sherry(model, True)
         print(f"[build] sherry constraint enabled on {n_sherry} layers")
     model = model.to(args.device)
     if hasattr(model, "config"):
@@ -673,9 +726,13 @@ def main() -> None:
         if unexpected:
             print(f"[resume] unexpected keys: {len(unexpected)} (showing 5): {unexpected[:5]}")
         ckpt_sherry = resume_meta.get("sherry") == "1"
+        ckpt_top1 = resume_meta.get("top1") == "1"
         if ckpt_sherry != args.sherry:
             print(f"[resume] WARNING: --sherry={args.sherry} but ckpt has "
                   f"sherry={ckpt_sherry}; using --sherry value")
+        if ckpt_top1 != args.top1:
+            print(f"[resume] WARNING: --top1={args.top1} but ckpt has "
+                  f"top1={ckpt_top1}; using --top1 value")
     elif interrupted_path.exists():
         print(f"[resume] found interrupted snapshot at {interrupted_path}")
         interrupted_state = torch.load(str(interrupted_path),
@@ -683,15 +740,29 @@ def main() -> None:
                                        weights_only=False)
         model.load_state_dict(interrupted_state["model"])
 
+    # The active block-constraint mode dictates which perm to use. Both
+    # permute_for_sherry and permute_for_top1 share infrastructure but
+    # differ in slot-0 selection (smallest-|w| for sherry, largest-|w| for
+    # top1). 'plain' = no permutation makes sense (no constraint to align to).
+    constraint_mode = "top1" if args.top1 else ("sherry" if args.sherry else "plain")
+
+    def _do_permute(opt=None):
+        from .permute import permute_for_sherry, permute_for_top1
+        if constraint_mode == "top1":
+            return permute_for_top1(model, block=4, optimizer=opt)
+        if constraint_mode == "sherry":
+            return permute_for_sherry(model, block=4, optimizer=opt)
+        raise RuntimeError("--permute-for-sherry passed but no constraint "
+                           "(--sherry / --top1) is active")
+
     fresh_start = args.resume is None and interrupted_state is None
     # --permute-each-stage handles stage 0's permute itself; only fire the
     # init-time permute when running with --permute-for-sherry alone.
     if args.permute_for_sherry and not args.permute_each_stage:
         if fresh_start:
-            from .permute import permute_for_sherry
-            n_perm = permute_for_sherry(model, block=4)
-            print(f"[build] permute-for-sherry applied to {n_perm} matrices "
-                  "(MLP intermediate + per-KV-head V/O)")
+            n_perm = _do_permute()
+            print(f"[build] permute-for-{constraint_mode} applied to {n_perm} "
+                  "matrices (MLP intermediate + per-KV-head V/O)")
         else:
             print("[build] WARNING: --permute-for-sherry ignored on resume "
                   "(loaded weights already encode any prior permutation)")
@@ -790,8 +861,7 @@ def main() -> None:
             is_interrupted_resume = (interrupted_state is not None
                                      and stage_idx == interrupted_state["stage_idx"])
             if not is_interrupted_resume:
-                from .permute import permute_for_sherry
-                n_perm = permute_for_sherry(model, block=4, optimizer=opt)
+                n_perm = _do_permute(opt=opt)
                 print(f"[stage {stage_idx}] permuted {n_perm} matrices "
                       "(--permute-each-stage; opt state synced)")
             else:
@@ -837,27 +907,52 @@ def main() -> None:
         # Re-snapshot the quantized codes so flip-rate measures change *within
         # this stage's level setting*, not across the level transition.
         _, prev_codes = collect_qlinear_metrics(model, {})
+        extras = []
+        if args.lr_floor != 0.1:
+            extras.append(f"lr_floor={args.lr_floor}")
+        if args.sherry and args.sherry_warmup_steps > 0:
+            extras.append(f"sherry_warmup={args.sherry_warmup_steps}")
+        if args.top1 and args.top1_warmup_steps > 0:
+            extras.append(f"top1_warmup={args.top1_warmup_steps}")
+        extras_str = (" " + ", ".join(extras)) if extras else ""
         if step_offset:
             print(f"\n[stage {stage_idx}] levels={levels} on {n_set} layers, "
                   f"resuming at step {step_offset}/{max_steps} "
-                  f"(patience={args.patience}, min={args.min_stage_steps})")
+                  f"(patience={args.patience}, min={args.min_stage_steps}{extras_str})")
         else:
             print(f"\n[stage {stage_idx}] levels={levels} on {n_set} layers, "
                   f"max {max_steps} steps "
-                  f"(patience={args.patience}, min={args.min_stage_steps})")
+                  f"(patience={args.patience}, min={args.min_stage_steps}{extras_str})")
         model.train()
         opt.zero_grad(set_to_none=True)
         running = 0.0
         running_n = 0
+        # Track when we last re-permuted in this stage; used by the adaptive
+        # staleness trigger to enforce --permute-min-gap-steps between fires.
+        # Initialize to step_offset so a stage-resumed from interrupt won't
+        # immediately fire (the perm is still fresh from the recent run).
+        last_permute_step = step_offset
         pbar = tqdm(range(step_offset, max_steps), initial=step_offset, total=max_steps,
                     desc=f"L={levels}", dynamic_ncols=True)
         advance_reason = "max_steps"
         last_step = step_offset
         for step in pbar:
             last_step = step
-            cur_lr = lr_at(step, max_steps, stage_lr, args.warmup_steps)
+            cur_lr = lr_at(step, max_steps, stage_lr, args.warmup_steps,
+                           floor=args.lr_floor)
             for g in opt.param_groups:
                 g["lr"] = cur_lr
+            # Linear constraint-warmup ramp: 0 → 1 over the first N in-stage
+            # steps (uses absolute in-stage step so a mid-warmup resume picks
+            # up where it left off). Cache is invalidated each opt.step by
+            # clamp_qlinear_weights so the new alpha takes effect on the first
+            # forward of this step.
+            if args.top1 and args.top1_warmup_steps > 0:
+                alpha = min(1.0, (step + 1) / args.top1_warmup_steps)
+                set_top1_alpha(model, alpha)
+            elif args.sherry and args.sherry_warmup_steps > 0:
+                alpha = min(1.0, (step + 1) / args.sherry_warmup_steps)
+                set_sherry_alpha(model, alpha)
             for _ in range(args.grad_accum):
                 batch = next(it)
                 tokens = batch["tokens"].to(args.device, non_blocking=True)
@@ -913,6 +1008,48 @@ def main() -> None:
                 if drift_stage is not None:
                     writer.add_scalar("embed/drift_l2_stage", drift_stage,
                                       tb_step)
+                # Adaptive re-permute: trigger when the column-score alignment
+                # has drifted past threshold, gated on (1) being out of the
+                # last 10% of the stage so we don't disrupt convergence, and
+                # (2) having waited at least --permute-min-gap-steps since
+                # the previous permute. Mode-aware: argmin invariant for
+                # sherry (slot 0 = smallest), argmax for top1 (slot 0 =
+                # largest); _do_permute already routes to the right function.
+                if (args.permute_staleness_threshold > 0
+                        and constraint_mode in ("sherry", "top1")):
+                    from .permute import permutation_staleness
+                    staleness = permutation_staleness(model, block=4,
+                                                      mode=constraint_mode)
+                    writer.add_scalar("permute/staleness", staleness, tb_step)
+                    in_late_stage = step >= int(0.9 * max_steps)
+                    enough_gap = (step - last_permute_step) >= args.permute_min_gap_steps
+                    if (staleness > args.permute_staleness_threshold
+                            and enough_gap and not in_late_stage):
+                        n_perm = _do_permute(opt=opt)
+                        last_permute_step = step
+                        writer.add_scalar("permute/fired", 1.0, tb_step)
+                        # Permute is a "soft restart" of stage progress. Reset:
+                        # - best_snapshot: commits to the new layout, prevents
+                        #   stage-end regress check from silently undoing the
+                        #   permute by restoring a pre-permute snapshot.
+                        # - best_ema / best_step: pre-permute loss isn't
+                        #   directly comparable post-permute (model is briefly
+                        #   perturbed); restart the patience clock.
+                        # - prev_codes: avoid a spurious 100% flip_rate on the
+                        #   next log_every (everything just moved).
+                        # - flip_history: post-permute flip_rate isn't
+                        #   comparable to pre-permute, so don't average them.
+                        best_snapshot = snapshot_to_cpu(model)
+                        ctrl.best_ema = float("inf")
+                        ctrl.best_step = step
+                        ctrl.flip_history = []
+                        _, prev_codes = collect_qlinear_metrics(model, {})
+                        print(f"\n[stage {stage_idx}] step {step}: "
+                              f"re-permuted {n_perm} matrices "
+                              f"(staleness={staleness:.3f}); reset "
+                              "best_snapshot, best_ema, flip_history, prev_codes")
+                    else:
+                        writer.add_scalar("permute/fired", 0.0, tb_step)
                 running = 0.0
                 running_n = 0
             if _INTERRUPT["flag"]:
@@ -949,7 +1086,8 @@ def main() -> None:
         start_step = 0
         interrupted_state = None
         ckpt_path = args.out / f"stage_{stage_idx:02d}_L{levels}.safetensors"
-        save_checkpoint(model, ckpt_path, levels, stage_idx, args.model, args.sherry)
+        save_checkpoint(model, ckpt_path, levels, stage_idx, args.model,
+                        args.sherry, args.top1)
         print(f"[stage {stage_idx}] saved {ckpt_path}")
 
     if interrupted_path.exists():
