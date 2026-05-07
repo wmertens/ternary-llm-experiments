@@ -20,8 +20,8 @@ from tqdm import tqdm
 from .build_student import load_student
 from .distill import Lion32, ShardedDataset, kl_with_rest, lr_at
 from .pack import pack_ternary_158, quantize_embed_int8
-from .qlinear import (QLinear, clamp_qlinear_weights, quantize_levels,
-                      set_levels)
+from .qlinear import (QLinear, clamp_qlinear_weights, module_ternary,
+                      quantize_levels, set_levels, set_soft_mode)
 
 EMBED_INT8_KEYS: tuple[str, ...] = ("model.embed_tokens.weight", "lm_head.weight")
 
@@ -73,7 +73,16 @@ def to_packed_state_dict(model: torch.nn.Module,
         qlinear_skip.update({f"{name}.weight", f"{name}.scales"})
         if m.bias is not None:
             qlinear_skip.add(f"{name}.bias")
-        T = quantize_levels(m.weight.detach(), 3).to(torch.int8).cpu()
+        # Use the SAME classifier the fine-tune ran against:
+        #   * soft mode (with or without target_zero_frac) → module_ternary,
+        #     i.e. quantile cutoff if configured, else fixed ±1/3.
+        #   * levels mode → quantize_levels' ±0.5 banker's rounding (the
+        #     legacy curriculum trained against this STE, so the latents
+        #     are pulled toward this boundary).
+        if m.mode == "soft":
+            T = module_ternary(m).to(torch.int8).cpu()
+        else:
+            T = quantize_levels(m.weight.detach(), 3).to(torch.int8).cpu()
         out[f"{name}.T_packed"] = pack_ternary_158(T)
         out[f"{name}.scales"] = m.scales.detach().cpu().to(torch.float16).contiguous()
         if m.bias is not None:
@@ -157,7 +166,37 @@ def main() -> None:
     if unexpected:
         print(f"[resume] unexpected: {len(unexpected)}")
 
-    set_levels(model, 3)
+    # The trained latents were pulled toward whichever c(w) the training
+    # stage used. To deploy consistently, finalize must hard-round with
+    # the SAME classifier — picking the wrong one re-rounds a non-trivial
+    # fraction of trained weights and loses fidelity.
+    #
+    #   * mode="soft" + target_zero_frac → soft α=1 with quantile cutoff
+    #   * mode="soft" w/o target_zero_frac → soft α=1 with fixed ±1/3
+    #   * mode absent/"levels" → set_levels(model, 3), legacy quantize_levels
+    #     with ±0.5 banker's rounding (matches the levels-curriculum STE)
+    target_zero_frac = None
+    if "target_zero_frac" in meta:
+        try:
+            tzf = float(meta["target_zero_frac"])
+            if 0.0 < tzf < 1.0:
+                target_zero_frac = tzf
+        except ValueError:
+            pass
+    ckpt_mode = meta.get("mode", "levels")
+    if ckpt_mode == "soft":
+        n_set = set_soft_mode(model, alpha=1.0,
+                              target_zero_frac=target_zero_frac)
+        cutoff_desc = (f"target_zero_frac={target_zero_frac} (per-(row, "
+                       f"group) |w|-quantile cutoff)"
+                       if target_zero_frac is not None
+                       else "fixed ±1/3 boundary")
+        print(f"[finalize] {n_set} QLinear modules → soft mode α=1, "
+              f"{cutoff_desc}")
+    else:
+        set_levels(model, 3)
+        print("[finalize] mode='levels' (or unset); set_levels(model, 3) "
+              "with quantize_levels' ±0.5 boundary")
     n_train, n_frozen = freeze_for_finalize(model, args.freeze_embed, args.freeze_lm_head)
     print(f"[freeze] trainable={n_train:,} frozen={n_frozen:,}")
 
@@ -216,13 +255,20 @@ def main() -> None:
     packed_sd = to_packed_state_dict(model, dtype=store_dtype,
                                      quant_embed=not args.no_quant_embed)
     out_path = args.out / "final_packed.safetensors"
-    save_file(packed_sd, str(out_path), metadata={
+    deploy_meta = {
         "format": "smollmer-packed-bonsai-v1",
         "model_id": args.model,
         "store_dtype": args.store_dtype,
         "group_size": str(group_size),
         "embed_int8": "0" if args.no_quant_embed else "1",
-    })
+        "ternary_classifier": ("quantile" if target_zero_frac is not None
+                               else ("fixed_third"
+                                     if ckpt_mode == "soft"
+                                     else "fixed_half")),
+    }
+    if target_zero_frac is not None:
+        deploy_meta["target_zero_frac"] = f"{target_zero_frac:.6f}"
+    save_file(packed_sd, str(out_path), metadata=deploy_meta)
     print(f"[done] wrote {out_path} ({sum(v.numel() * v.element_size() for v in packed_sd.values()) / 1e6:.1f} MB)")
 
 
