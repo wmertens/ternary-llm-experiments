@@ -49,28 +49,23 @@ def _install_sigint_handler() -> None:
     signal.signal(signal.SIGINT, handler)
 
 
-def save_resume(path: Path, model, opt, stage_idx: int, next_step: int,
-                curriculum: list[tuple[int, int]],
-                global_step: int,
+def save_resume(path: Path, model, opt, next_step: int,
                 best_snapshot: dict[str, torch.Tensor] | None,
                 ctrl_state: dict | None,
                 run_name: str | None,
-                phase: str = "curriculum",
-                soft_state: dict | None = None,
-                stage_0_best_ema: float | None = None) -> None:
+                soft_state: dict | None = None) -> None:
+    """Atomic write of the resume snapshot. Used both by SIGINT and by the
+    periodic auto-checkpoint — same file (`interrupted.pt`), latest wins.
+    The atomic rename via `.tmp` -> rename means a crash mid-write leaves
+    the previous good snapshot intact."""
     payload = {
         "model": {k: v.detach().cpu() for k, v in model.state_dict().items()},
         "opt": opt.state_dict(),
-        "stage_idx": int(stage_idx),
         "next_step": int(next_step),
-        "curriculum": curriculum,
-        "global_step": int(global_step),
         "best_snapshot": best_snapshot,
         "ctrl_state": ctrl_state,
         "run_name": run_name,
-        "phase": phase,
         "soft_state": soft_state,
-        "stage_0_best_ema": stage_0_best_ema,
     }
     tmp = path.with_suffix(path.suffix + ".tmp")
     torch.save(payload, str(tmp))
@@ -89,53 +84,30 @@ def restore_from_snapshot(model: torch.nn.Module, snap: dict[str, torch.Tensor])
     model.load_state_dict(snap, strict=False)
 
 
-DEFAULT_CURRICULUM: list[tuple[int, int]] = [
-    # (levels, max_steps).  Advance early if EMA loss plateaus
-    # (see --patience).  L=257 is the "match the teacher" anchor and
-    # gets a generous cap; later stages are perturbations.
-    (257, 5000), (129, 2000), (65, 2000), (33, 3000),
-    (17, 4000), (9, 5000), (5, 8000), (3, 15000),
-]
+class BestEmaTracker:
+    """Track loss EMA and remember the best-so-far step. Used purely for
+    snapshotting the lowest-loss model state — there's no exit gate
+    coupled to plateau detection (the soft-stage exit is α-saturation +
+    tail; the safety cap is --soft-steps).
 
-
-class PlateauController:
-    """Track EMA loss; advance when it stops improving for `patience` steps.
-
-    `ema_warmup` skips best-EMA tracking for the first N steps so the seed
-    value (the first step's loss, taken at LR warmup minimum) doesn't lock
-    in a forever-best that later, properly-trained losses can't beat. EMA
-    still updates during warmup; only the best is frozen until step >= warmup.
-
-    `flip_threshold` (>0) gates patience-based advance on the codebook
-    actually being frozen, not just the loss being flat. Patience-fire is
-    honored only when the mean `weights/flip_rate` over the patience window
-    is below `flip_threshold` (e.g. 1e-4 = 0.01% of trits flipping per
-    log-interval, on average). Loss EMA can plateau while the codebook is
-    still reorganizing (esp. L=5 → L=3 collapse) — flip_rate goes to zero
-    only when there's nothing left to extract at this quantization level.
-    Set to 0 to disable. Samples fed via `record_flip(step, flip_rate)`.
+    `ema_warmup` skips best-EMA tracking for the first N steps so a low
+    early-warmup loss (often U-shaped past the LR-warmup window) doesn't
+    lock in as forever-best. EMA still updates during warmup; only the
+    `best` latch is frozen until step >= warmup.
     """
 
-    def __init__(self, max_steps: int, patience: int, min_steps: int,
-                 ema_alpha: float = 0.05, rel_threshold: float = 1e-3,
-                 ema_warmup: int = 0,
-                 flip_threshold: float = 0.0) -> None:
-        self.max_steps = max_steps
-        self.patience = patience
-        self.min_steps = min_steps
+    def __init__(self, ema_alpha: float = 0.05, rel_threshold: float = 1e-3,
+                 ema_warmup: int = 0) -> None:
         self.ema_alpha = ema_alpha
         self.rel_threshold = rel_threshold
         self.ema_warmup = ema_warmup
-        self.flip_threshold = flip_threshold
         self.ema: float | None = None
         self.best_ema: float = float("inf")
         self.best_step: int = 0
-        # (step, flip_rate) samples; trimmed to the patience window in
-        # record_flip to keep memory at O(patience/log_every).
-        self.flip_history: list[tuple[int, float]] = []
 
     def update(self, step: int, loss: float) -> bool:
-        """Update EMA. Returns True iff this step set a new best."""
+        """Update EMA. Returns True iff this step set a new best (i.e. the
+        caller should snapshot the model)."""
         self.ema = loss if self.ema is None else \
             (1.0 - self.ema_alpha) * self.ema + self.ema_alpha * loss
         if step < self.ema_warmup:
@@ -146,65 +118,30 @@ class PlateauController:
             return True
         return False
 
-    def record_flip(self, step: int, flip_rate: float) -> None:
-        self.flip_history.append((step, float(flip_rate)))
-        if self.patience > 0:
-            cutoff = step - self.patience
-            self.flip_history = [
-                (s, f) for s, f in self.flip_history if s >= cutoff]
-
-    def _flip_gate(self, step: int) -> tuple[bool, str]:
-        """Return (gate_open, reason). gate_open=True means flip_rate has
-        dropped enough that patience-fire is allowed."""
-        if self.flip_threshold <= 0:
-            return True, "gate disabled"
-        if not self.flip_history:
-            return True, "no flip data"
-        rates = [f for _, f in self.flip_history]
-        mean_rate = sum(rates) / len(rates)
-        if mean_rate < self.flip_threshold:
-            return True, f"flip plateaued (mean={mean_rate:.2e})"
-        return False, f"flip still active (mean={mean_rate:.2e})"
-
-    def should_advance(self, step: int) -> tuple[bool, str]:
-        if step + 1 >= self.max_steps:
-            return True, "max_steps"
-        if step + 1 < self.min_steps:
-            return False, ""
-        if self.patience > 0 and (step - self.best_step) >= self.patience:
-            gate_open, gate_reason = self._flip_gate(step)
-            if gate_open:
-                return True, (f"plateau (best ema {self.best_ema:.4f} at step "
-                              f"{self.best_step}; {gate_reason})")
-            # Patience expired but codebook still flipping — keep training so
-            # the trits can finish settling.
-            return False, ""
-        return False, ""
-
     def state_dict(self) -> dict:
         return {
             "ema": self.ema,
             "best_ema": self.best_ema,
             "best_step": self.best_step,
-            "flip_history": list(self.flip_history),
         }
 
     def load_state_dict(self, state: dict) -> bool:
         """Restore EMA tracking. Returns True if a stale (within-warmup) best
         was discarded; the caller should also drop its best_snapshot in that
-        case so a poisoned step-0 model isn't restored at stage end."""
+        case so a poisoned warmup-era model isn't restored at stage end."""
         self.ema = state.get("ema")
         bs = int(state.get("best_step", 0))
         if bs < self.ema_warmup:
             self.best_ema = float("inf")
             self.best_step = 0
-            stale = True
-        else:
-            self.best_ema = state.get("best_ema", float("inf"))
-            self.best_step = bs
-            stale = False
-        self.flip_history = list(state.get("flip_history", []))
-        return stale
+            return True
+        self.best_ema = state.get("best_ema", float("inf"))
+        self.best_step = bs
+        return False
+
+
+# Legacy alias so callers in this file keep working through the rename.
+PlateauController = BestEmaTracker
 
 
 class AlphaSchedule:
@@ -700,29 +637,6 @@ def kl_with_rest(student_logits: torch.Tensor,
     return (loss_topk + loss_rest).mean()
 
 
-def parse_curriculum(spec: str) -> list[tuple[int, int]]:
-    if not spec:
-        return DEFAULT_CURRICULUM
-    if spec.strip().lower() in ("none", "skip", "[]"):
-        return []
-    out: list[tuple[int, int]] = []
-    for chunk in spec.split(","):
-        L, n = chunk.split(":")
-        out.append((int(L), int(n)))
-    return out
-
-
-def parse_lr_overrides(spec: str) -> dict[int, float]:
-    """Per-level LR overrides spec, e.g. '9:2e-4,5:1.5e-4'."""
-    if not spec:
-        return {}
-    out: dict[int, float] = {}
-    for chunk in spec.split(","):
-        L, lr = chunk.split(":")
-        out[int(L)] = float(lr)
-    return out
-
-
 def lr_at(step: int, total: int, base_lr: float, warmup: int,
           floor: float = 0.1) -> float:
     """Linear warmup → cosine decay to `floor × base_lr`. floor=0.1 is the
@@ -737,20 +651,21 @@ def lr_at(step: int, total: int, base_lr: float, warmup: int,
     return base_lr * (floor + (1.0 - floor) * 0.5 * (1.0 + math.cos(math.pi * progress)))
 
 
-def save_checkpoint(model, path: Path, levels: int, stage: int, model_id: str,
+def save_checkpoint(model, path: Path, model_id: str,
                     group_size: int,
-                    mode: str | None = None,
                     alpha: float | None = None,
                     target_zero_frac: float | None = None) -> None:
+    """Soft-stage safetensors checkpoint. `levels=3` and `mode=soft` are
+    always recorded (this is the only training mode now); finalize.py and
+    chat.py read `mode`, `alpha`, and `target_zero_frac` to apply the
+    matching ternary classifier at deployment."""
     sd = {k: v.detach().cpu().contiguous() for k, v in model.state_dict().items()}
     metadata = {
-        "levels": str(levels),
-        "stage": str(stage),
+        "levels": "3",
+        "mode": "soft",
         "model_id": model_id,
         "group_size": str(group_size),
     }
-    if mode is not None:
-        metadata["mode"] = mode
     if alpha is not None:
         metadata["alpha"] = f"{float(alpha):.6f}"
     if target_zero_frac is not None:
@@ -764,12 +679,11 @@ def main() -> None:
     ap.add_argument("--cache-dir", type=Path, required=True)
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--resume", type=Path, default=None,
-                    help="Stage checkpoint (.safetensors) to load before training.")
-    ap.add_argument("--start-stage", type=int, default=None,
-                    help="Skip curriculum stages before this index. "
-                         "If unset and --resume is given, auto-advances to "
-                         "ckpt's stage+1 (i.e. starts the NEXT stage). "
-                         "Pass the same stage as the ckpt to redo it.")
+                    help="Optional safetensors checkpoint to warm-start the "
+                         "model from. Distinct from interrupted.pt — "
+                         "interrupted.pt (auto-checkpointed every "
+                         "--soft-checkpoint-every steps and on SIGINT) is "
+                         "loaded automatically when present.")
     ap.add_argument("--reset-opt-on-resume", action="store_true",
                     help="When loading interrupted.pt, skip "
                          "opt.load_state_dict and start with a fresh "
@@ -781,14 +695,6 @@ def main() -> None:
                          "warmup's worth of slow steps as momentum re-warms. "
                          "Lion is generally robust to resume and doesn't "
                          "need this.")
-    ap.add_argument("--curriculum", type=str, default="",
-                    help="Override default curriculum, e.g. "
-                         "`33:200,17:200,9:300,5:500,3:1000`. Pass `none` "
-                         "to skip the levels-stage curriculum entirely "
-                         "(useful with --soft to go straight from the "
-                         "FP-init student into soft training; pair with "
-                         "--soft-floor theoretical so L_T comes from the "
-                         "cache instead of a stage-0 EMA that won't exist).")
     ap.add_argument("--batch-size", type=int, default=2)
     ap.add_argument("--grad-accum", type=int, default=8)
     ap.add_argument("--optimizer", default="lion",
@@ -797,21 +703,12 @@ def main() -> None:
                          "AdamW (standard). Cautious-AdamW (Bonsai recipe; one-line "
                          "mod from Liang et al. 2024 arXiv:2411.16085, lr~1e-2).")
     ap.add_argument("--lr", type=float, default=3e-4,
-                    help="Lion LR. Sweet spot for Lion + ternary QAT is 3e-4 to "
-                         "1e-3 (per bitlooplm sweep + Bonsai recipe). At lr=5e-5 "
-                         "only ~4%% of weights can flip bins per 100 steps -- "
-                         "too slow for L=3. The best-snapshot restore catches "
-                         "the case where high LR thrashes a near-optimal init.")
-    ap.add_argument("--lr-overrides", type=str, default="",
-                    help="Per-stage LR overrides as 'L:lr[,L:lr...]', e.g. "
-                         "'9:2e-4,5:1.5e-4'. Stages not listed use --lr.")
+                    help="Base learning rate. Lion sweet spot for ternary "
+                         "QAT is 3e-4..1e-3; AdamW family ~5e-4..1e-3. "
+                         "Cosine decays to --lr-floor·lr over --soft-steps.")
     ap.add_argument("--lr-floor", type=float, default=0.1,
-                    help="Cosine LR decays to floor*base_lr at end of stage. "
-                         "Default 0.1 = classic Bonsai recipe. Bump up (e.g. "
-                         "0.5) when the late-stage flip-rate cliff at L=3 is "
-                         "locking the codebook into a suboptimal Sherry-valid "
-                         "configuration the optimizer can't escape. 1.0 = flat "
-                         "LR after warmup (no cosine decay at all).")
+                    help="Cosine LR decays to floor·base_lr by --soft-steps. "
+                         "Default 0.1; 1.0 disables decay (flat LR).")
     ap.add_argument("--scale-group-size", type=int, default=128,
                     help="Per-(row, column-group) scale granularity for "
                          "QLinear. Each group of N consecutive input columns "
@@ -831,32 +728,16 @@ def main() -> None:
     ap.add_argument("--wd", type=float, default=0.05)
     ap.add_argument("--warmup-steps", type=int, default=30)
     ap.add_argument("--max-grad-norm", type=float, default=1.0)
-    ap.add_argument("--patience", type=int, default=750,
-                    help="Advance to next stage if EMA loss hasn't improved for "
-                         "this many steps. Set 0 to always run full max_steps.")
-    ap.add_argument("--min-stage-steps", type=int, default=200,
-                    help="Always run at least this many steps in each stage.")
     ap.add_argument("--plateau-threshold", type=float, default=1e-3,
-                    help="Minimum relative EMA drop counted as 'improvement'.")
-    ap.add_argument("--flip-plateau-threshold", type=float, default=1e-4,
-                    help="Gate patience-based stage advance on weights/flip_rate "
-                         "(fraction of trits that changed since the previous "
-                         "log-interval). Patience-fire is honored only when the "
-                         "MEAN flip_rate over the last `patience` steps is below "
-                         "this threshold. Default 1e-4 = 0.01%% of trits "
-                         "flipping per interval on average. Loss EMA can flatten "
-                         "while the codebook is still reorganizing "
-                         "(esp. L=5→L=3 collapse) — flip_rate going to zero is "
-                         "the direct signal that there's nothing left to extract "
-                         "at this level. Set 0 to disable. Does not gate "
-                         "max_steps advance.")
+                    help="Minimum relative EMA drop counted as a 'best' "
+                         "improvement (for best_snapshot tracking).")
     ap.add_argument("--ema-warmup", type=int, default=500,
-                    help="Skip best-EMA tracking for the first N steps of each "
-                         "stage. The Lion-LR-warmup loss is often U-shaped past "
-                         "the LR-warmup window (peak around step ~200 in this "
-                         "setup), so set this past the typical peak — otherwise "
-                         "the first post-warmup EMA value, which is still on the "
-                         "way up, locks in as best.")
+                    help="Skip best-EMA tracking for the first N steps. "
+                         "The LR-warmup loss is often U-shaped past the "
+                         "LR-warmup window, so set this past the typical "
+                         "peak — otherwise the first post-warmup EMA "
+                         "value, which is still on the way up, locks in "
+                         "as best.")
     ap.add_argument("--log-every", type=int, default=10)
     ap.add_argument("--num-workers", type=int, default=1)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -866,18 +747,6 @@ def main() -> None:
                     help="Trade some compute for activation memory (recommended on <=8GB).")
     ap.add_argument("--compile", action="store_true")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--soft", action="store_true",
-                    help="After the levels curriculum finishes, run a "
-                         "soft-ternary stage that uses a continuous "
-                         "attractor T_α(w) = c(w) + (1-α)(w-c(w)) plus an "
-                         "L2 penalty ‖w-c(w)‖². α is monotonically driven "
-                         "by the gap between step loss and the teacher "
-                         "cross-entropy floor (practical = stage-0 best "
-                         "EMA; theoretical = upper bound from cached "
-                         "top-K + rest_mass). Pair with a truncated "
-                         "curriculum like `--curriculum 257:5000` so the "
-                         "anchor establishes the practical floor and the "
-                         "soft stage replaces the levels walk.")
     ap.add_argument("--soft-steps", type=int, default=100000,
                     help="Hard max steps in the soft-ternary stage. The "
                          "natural exit is α-saturation (--soft-saturation-tail) "
@@ -978,20 +847,12 @@ def main() -> None:
                          "slow_ratio=10, the slow window is ~200 steps. "
                          "Larger ratio = more conservative bumps (waits "
                          "for longer-term stability).")
-    ap.add_argument("--soft-vocab-size", type=int, default=0,
-                    help="Vocab size for the teacher-floor estimate. 0 = "
-                         "infer from --model's tokenizer at startup.")
-    ap.add_argument("--soft-floor", type=str, default="practical",
-                    choices=["practical", "theoretical"],
-                    help="Which floor to steer α on. 'practical' = "
-                         "converged stage-0 EMA (recommended; reflects the "
-                         "actual achievable loss for this student capacity). "
-                         "'theoretical' = upper bound on H(p_t) from the "
-                         "cache (looser, fires α earlier).")
-    ap.add_argument("--soft-floor-override", type=float, default=None,
-                    help="Bypass auto-detection and use this absolute loss "
-                         "as L_T. Useful for resuming when the stage-0 "
-                         "EMA wasn't tracked, or for sweeps.")
+    ap.add_argument("--soft-checkpoint-every", type=int, default=2000,
+                    help="Auto-write interrupted.pt every N opt.steps so a "
+                         "crash leaves a recent resume point. Same path "
+                         "and format as the SIGINT save; on next run, the "
+                         "loop picks up at the latest auto-checkpoint. "
+                         "Set 0 to disable (only SIGINT writes).")
     ap.add_argument("--tb-dir", type=Path, default=None,
                     help="TensorBoard root. Default: <out>/tb. "
                          "View with `tensorboard --logdir <tb-dir>`.")
@@ -1077,16 +938,8 @@ def main() -> None:
         if unexp_i:
             print(f"[resume] interrupted snapshot has {len(unexp_i)} unexpected "
                   f"model keys (showing 5): {unexp_i[:5]}")
-        # Surface enough state at load time that resume issues are visible
-        # without having to add prints inside the loop.
-        ph = interrupted_state.get("phase", "curriculum")
         ss = interrupted_state.get("soft_state")
-        print(f"[resume]   phase={ph} stage_idx={interrupted_state.get('stage_idx')} "
-              f"next_step={interrupted_state.get('next_step')} "
-              f"global_step={interrupted_state.get('global_step', 0)}")
-        if interrupted_state.get("stage_0_best_ema") is not None:
-            print(f"[resume]   stage_0_best_ema="
-                  f"{interrupted_state['stage_0_best_ema']:.4f}")
+        print(f"[resume]   next_step={interrupted_state.get('next_step')}")
         if ss:
             sat = ss.get("saturation_step")
             sched = ss.get("schedule", {})
@@ -1109,49 +962,16 @@ def main() -> None:
         raise ValueError(f"unknown optimizer: {args.optimizer}")
     print(f"[opt] {args.optimizer} lr={args.lr} wd={args.wd} (fp32 state)")
 
-    curriculum = parse_curriculum(args.curriculum)
-    lr_overrides = parse_lr_overrides(args.lr_overrides)
-    print(f"[plan] curriculum: {curriculum}")
-    if lr_overrides:
-        print(f"[plan] lr_overrides: {lr_overrides}")
-
-    phase = "curriculum"
-    stage_0_best_ema: float | None = None
     if interrupted_state is not None:
         if args.reset_opt_on_resume:
             print("[resume] --reset-opt-on-resume: skipping opt.load_state_dict; "
                   "starting with fresh optimizer momentum")
         else:
             opt.load_state_dict(interrupted_state["opt"])
-        start_stage = interrupted_state["stage_idx"]
-        start_step = interrupted_state["next_step"]
-        phase = interrupted_state.get("phase", "curriculum")
-        stage_0_best_ema = interrupted_state.get("stage_0_best_ema")
-        if args.start_stage is not None:
-            print(f"[resume] --start-stage {args.start_stage} overrides snapshot's stage {start_stage}")
-            start_stage = args.start_stage
-            start_step = 0
-            phase = "curriculum"
-        else:
-            print(f"[resume] continuing at stage {start_stage} step {start_step} "
-                  f"(phase={phase})")
-        if interrupted_state.get("curriculum") and interrupted_state["curriculum"] != curriculum:
-            print(f"[resume] WARNING: curriculum changed since interrupt — "
-                  f"snapshot had {interrupted_state['curriculum']}")
-        global_step = int(interrupted_state.get("global_step", 0))
+        global_step = int(interrupted_state.get("next_step", 0))
+        print(f"[resume] continuing at step {global_step}")
     else:
-        start_step = 0
         global_step = 0
-        if args.start_stage is not None:
-            start_stage = args.start_stage
-            print(f"[plan] starting at stage {start_stage}")
-        elif args.resume is not None and "stage" in resume_meta:
-            start_stage = int(resume_meta["stage"]) + 1
-            print(f"[plan] auto-advancing to stage {start_stage} "
-                  f"(checkpoint was saved at end of stage {resume_meta['stage']}; "
-                  f"pass --start-stage to override)")
-        else:
-            start_stage = 0
 
     tb_root = args.tb_dir if args.tb_dir is not None else (args.out / "tb")
     if interrupted_state is not None and interrupted_state.get("run_name"):
@@ -1162,9 +982,7 @@ def main() -> None:
         run_name = datetime.now().strftime("run_%Y%m%d_%H%M%S")
     run_dir = tb_root / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
-    print(f"[tb] run_dir={run_dir} (view: tensorboard --logdir {tb_root}); "
-          "each stage writes to a separate sub-run.")
-    _, prev_codes = collect_qlinear_metrics(model, {})
+    print(f"[tb] run_dir={run_dir} (view: tensorboard --logdir {tb_root})")
 
     ds = ShardedDataset(args.cache_dir, seed=args.seed)
     dl = DataLoader(ds, batch_size=args.batch_size,
@@ -1177,674 +995,436 @@ def main() -> None:
                       "float16": torch.float16,
                       "none": None}[args.autocast_dtype]
 
-    # If we're resuming directly into the soft phase (or the user asked to
-    # skip the curriculum entirely), don't enter the levels loop.
-    curriculum_iter = [] if phase == "soft" else list(enumerate(curriculum))
-    for stage_idx, (levels, max_steps) in curriculum_iter:
-        if stage_idx < start_stage:
-            continue
-        n_set = set_levels(model, levels)
-        # Per-stage embed reference. On a mid-stage resume this captures the
-        # current (already-drifted) embed rather than the true stage-start
-        # value — accept the underreporting for that partial stage; every
-        # clean stage entry is accurate.
-        _embed = model.get_input_embeddings()
-        embed_stage_init = (_embed.weight.detach().clone()
-                            if _embed is not None else None)
-        stage_lr = lr_overrides.get(levels, args.lr)
-        if levels in lr_overrides:
-            print(f"[stage {stage_idx}] lr override: {stage_lr} (vs default {args.lr})")
-        step_offset = start_step if stage_idx == start_stage else 0
-        ctrl = PlateauController(max_steps=max_steps,
-                                 patience=args.patience,
-                                 min_steps=max(args.min_stage_steps, step_offset + 1),
-                                 rel_threshold=args.plateau_threshold,
-                                 ema_warmup=args.ema_warmup,
-                                 flip_threshold=args.flip_plateau_threshold)
-        # Remember the best-so-far model in CPU RAM. Lion can thrash around
-        # near a minimum; restoring the best snapshot at stage end avoids
-        # carrying regression damage into the next stage.
-        stale_best = False
-        if (interrupted_state is not None and stage_idx == interrupted_state["stage_idx"]
-                and interrupted_state.get("best_snapshot") is not None):
-            if interrupted_state.get("ctrl_state"):
-                stale_best = ctrl.load_state_dict(interrupted_state["ctrl_state"])
-                if stale_best:
-                    print(f"[resume] discarded stale best (saved within "
-                          f"ema_warmup={args.ema_warmup}); will re-snapshot")
-                else:
-                    print(f"[resume] restored controller (ema={ctrl.ema}, "
-                          f"best_ema={ctrl.best_ema}@{ctrl.best_step}) and best_snapshot")
-            best_snapshot = (snapshot_to_cpu(model) if stale_best
-                             else interrupted_state["best_snapshot"])
-        else:
-            best_snapshot = snapshot_to_cpu(model)
-        # Per-stage TB writer. Each stage gets its own sub-run so curves are
-        # directly comparable across stages (TB's compare-runs view overlays
-        # them at matching in-stage step). On mid-stage resume, purge_step
-        # drops any events from this run that are at >= step_offset so we
-        # don't double-write across the interrupt boundary.
-        stage_tb_dir = run_dir / f"stage_{stage_idx:02d}_L{levels}"
-        stage_tb_dir.mkdir(parents=True, exist_ok=True)
-        writer = SummaryWriter(log_dir=str(stage_tb_dir),
-                               purge_step=step_offset if step_offset else None)
-        writer.add_text("stage", f"stage {stage_idx} levels={levels} "
-                                  f"max_steps={max_steps} step_offset={step_offset} "
-                                  f"global_step={global_step}",
-                        step_offset)
-        # Re-snapshot the quantized codes so flip-rate measures change *within
-        # this stage's level setting*, not across the level transition.
-        _, prev_codes = collect_qlinear_metrics(model, {})
-        extras = []
-        if args.lr_floor != 0.1:
-            extras.append(f"lr_floor={args.lr_floor}")
-        extras_str = (" " + ", ".join(extras)) if extras else ""
-        if step_offset:
-            print(f"\n[stage {stage_idx}] levels={levels} on {n_set} layers, "
-                  f"resuming at step {step_offset}/{max_steps} "
-                  f"(patience={args.patience}, min={args.min_stage_steps}{extras_str})")
-        else:
-            print(f"\n[stage {stage_idx}] levels={levels} on {n_set} layers, "
-                  f"max {max_steps} steps "
-                  f"(patience={args.patience}, min={args.min_stage_steps}{extras_str})")
-        model.train()
+
+    # ============ Soft-ternary training =====================================
+    # L_T is purely diagnostic now (the schedule uses fast/slow EMA, not
+    # gap to a reference floor). Computed once from the cache as the lumped
+    # cross-entropy floor — what `kl_with_rest` actually floors at when the
+    # student matches the teacher's K+1 lumped distribution. Logged in TB
+    # so you can eyeball "are we near what the teacher achieves" without
+    # any flag.
+    from transformers import AutoTokenizer
+    _tok = AutoTokenizer.from_pretrained(args.model)
+    floor_data = load_teacher_floor(args.cache_dir, len(_tok))
+    L_T = float(floor_data["floor"])
+    print(f"\n[soft] L_T (diagnostic) = {L_T:.4f} (lumped floor from cache)")
+
+    # Schedule: load from interrupted snapshot if present, else fresh.
+    schedule = AlphaSchedule(alpha_max=args.soft_alpha_max,
+                             patience=args.soft_patience,
+                             bump=args.soft_bump,
+                             tolerance=args.soft_tolerance,
+                             ema_alpha=args.soft_ema,
+                             slow_ratio=args.soft_slow_ratio)
+    if (interrupted_state is not None
+            and interrupted_state.get("soft_state")):
+        soft_st = interrupted_state["soft_state"]
+        schedule.load_state_dict(soft_st.get("schedule", {}))
+        soft_step_offset = int(soft_st.get("next_step", 0))
+        print(f"[soft] resuming at step {soft_step_offset} "
+              f"α={schedule.alpha:.4f} bumps={schedule.bumps} "
+              f"steady={schedule.steady_count}")
+    else:
+        soft_step_offset = 0
+
+    # In `well` mode the forward is identity (U penalty does the work) so
+    # we hold QLinear.alpha at 0; the schedule's α drives only the penalty
+    # coefficient. In `l2` mode the forward IS T_α(w).
+    forward_alpha = schedule.alpha if args.soft_attractor == "l2" else 0.0
+    target_zero_frac = (float(args.soft_zero_frac)
+                        if 0.0 < args.soft_zero_frac < 1.0 else None)
+    n_set = set_soft_mode(model, alpha=forward_alpha,
+                          target_zero_frac=target_zero_frac)
+    print(f"[soft] {n_set} QLinear modules → soft mode")
+    print(f"[soft]   attractor    = {args.soft_attractor}")
+    if target_zero_frac is not None:
+        print(f"[soft]   zero_frac    = {target_zero_frac} "
+              f"(per-(row, group) |w|-quantile cutoff)")
+    else:
+        print(f"[soft]   zero_frac    = disabled (fixed ±1/3 boundary)")
+    print(f"[soft]   L_T          = {L_T:.4f} (diagnostic; lumped from cache)")
+    print(f"[soft]   λ_max        = {args.soft_l2_coef}")
+    print(f"[soft]   α_max        = {args.soft_alpha_max}")
+    print(f"[soft]   patience     = {args.soft_patience} steady steps/bump")
+    print(f"[soft]   bump         = {args.soft_bump} (≈"
+          f"{int(args.soft_alpha_max / max(args.soft_bump, 1e-9))} bumps "
+          f"to saturate)")
+    print(f"[soft]   tolerance    = {args.soft_tolerance} "
+          f"(loss-EMA rise still counted as stable)")
+    print(f"[soft]   ema_alpha    = {args.soft_ema} (loss-EMA smoothing)")
+    print(f"[soft]   saturation   = exit when α ≥ α_max - "
+          f"{args.soft_saturation_eps:g}, then "
+          f"+{args.soft_saturation_tail} steps")
+    print(f"[soft]   max_steps    = {args.soft_steps} (safety cap)")
+    print(f"[soft]   ckpt_every   = {args.soft_checkpoint_every} steps "
+          f"(auto-write {args.out / 'interrupted.pt'})")
+    print(f"[soft]   lr           = {args.lr} "
+          f"(cosine to {args.lr_floor}·lr, warmup={args.warmup_steps})")
+    print(f"[soft]   optimizer    = {args.optimizer}")
+    if soft_step_offset:
+        print(f"[soft]   resuming     = step {soft_step_offset}, "
+              f"α={schedule.alpha:.4f}, bumps={schedule.bumps}, "
+              f"steady={schedule.steady_count}, "
+              f"slow_ema={schedule.slow_ema}")
+
+    soft_tb_dir = run_dir / "stage_soft"
+    soft_tb_dir.mkdir(parents=True, exist_ok=True)
+    writer = SummaryWriter(log_dir=str(soft_tb_dir),
+                           purge_step=soft_step_offset if soft_step_offset else None)
+    writer.add_text(
+        "stage",
+        "  \n".join([
+            f"**soft** training (resume @ step {soft_step_offset})",
+            f"- attractor: `{args.soft_attractor}`",
+            (f"- zero_frac: {target_zero_frac} (per-group quantile)"
+             if target_zero_frac is not None else
+             "- zero_frac: disabled (fixed ±1/3 boundary)"),
+            f"- L_T (diagnostic): {L_T:.4f}",
+            f"- λ_max (soft_l2_coef): {args.soft_l2_coef}",
+            f"- α_max: {args.soft_alpha_max}",
+            f"- patience: {args.soft_patience}",
+            f"- bump: {args.soft_bump}",
+            f"- tolerance: {args.soft_tolerance}",
+            f"- ema_alpha: {args.soft_ema}",
+            f"- slow_ratio: {args.soft_slow_ratio}",
+            f"- saturation eps: {args.soft_saturation_eps}",
+            f"- saturation tail: {args.soft_saturation_tail}",
+            f"- max_steps: {args.soft_steps}",
+            f"- ckpt_every: {args.soft_checkpoint_every}",
+            f"- lr: {args.lr} (cosine to floor={args.lr_floor})",
+            f"- optimizer: {args.optimizer}",
+        ]),
+        soft_step_offset)
+    writer.add_scalar("soft/cfg/L_T", L_T, soft_step_offset)
+    writer.add_scalar("soft/cfg/zero_frac",
+                      target_zero_frac if target_zero_frac is not None
+                      else -1.0, soft_step_offset)
+    writer.add_scalar("soft/cfg/lambda_max", args.soft_l2_coef,
+                      soft_step_offset)
+    writer.add_scalar("soft/cfg/alpha_max", args.soft_alpha_max,
+                      soft_step_offset)
+    writer.add_scalar("soft/cfg/patience",
+                      float(args.soft_patience), soft_step_offset)
+    writer.add_scalar("soft/cfg/bump", args.soft_bump,
+                      soft_step_offset)
+    writer.add_scalar("soft/cfg/tolerance", args.soft_tolerance,
+                      soft_step_offset)
+    writer.add_scalar("soft/cfg/ema_alpha", args.soft_ema,
+                      soft_step_offset)
+    writer.add_scalar("soft/cfg/max_steps", float(args.soft_steps),
+                      soft_step_offset)
+    writer.add_scalar("soft/cfg/saturation_eps",
+                      args.soft_saturation_eps, soft_step_offset)
+    writer.add_scalar("soft/cfg/saturation_tail",
+                      float(args.soft_saturation_tail),
+                      soft_step_offset)
+    # 0=l2, 1=well — TB only renders numeric scalars.
+    writer.add_scalar("soft/cfg/attractor_id",
+                      0.0 if args.soft_attractor == "l2" else 1.0,
+                      soft_step_offset)
+
+    _embed = model.get_input_embeddings()
+    embed_stage_init = (_embed.weight.detach().clone()
+                        if _embed is not None else None)
+
+    ctrl = BestEmaTracker(rel_threshold=args.plateau_threshold,
+                          ema_warmup=args.ema_warmup)
+    if (interrupted_state is not None
+            and interrupted_state.get("ctrl_state")):
+        ctrl.load_state_dict(interrupted_state["ctrl_state"])
+    if (interrupted_state is not None
+            and interrupted_state.get("best_snapshot") is not None):
+        best_snapshot = interrupted_state["best_snapshot"]
+    else:
+        best_snapshot = snapshot_to_cpu(model)
+    # Baseline for flip-rate tracking against the soft alphabet.
+    _, prev_codes = collect_qlinear_metrics(model, {})
+
+    soft_lr = args.lr
+    model.train()
+    opt.zero_grad(set_to_none=True)
+    running = 0.0
+    running_n = 0
+    pbar = tqdm(range(soft_step_offset, args.soft_steps),
+                initial=soft_step_offset, total=args.soft_steps,
+                desc="soft", dynamic_ncols=True)
+    advance_reason = "max_steps"
+    last_step = soft_step_offset
+    # Saturation gate: fire when α first reaches α_max (within eps), then
+    # run `tail` more steps for anneal/cleanup. The schedule is monotone
+    # so once saturated it stays — no debouncing needed.
+    _ss = (interrupted_state.get("soft_state", {})
+           if interrupted_state else {}).get("saturation_step")
+    saturation_step: int | None = int(_ss) if _ss is not None else None
+    if saturation_step is not None:
+        print(f"[soft]   α already saturated at step {saturation_step + 1}")
+    # Initial histogram at step soft_step_offset so the TB plot has a
+    # baseline tick before any training has happened (the "before"
+    # snapshot for the three-peak emergence story). On a fresh run
+    # soft_step_offset is 0; on resume it's wherever we picked up.
+    if args.soft_hist_every > 0:
+        hist_sample = first_qlinear_forward_sample(model)
+        if hist_sample is not None:
+            name, w_flat = hist_sample
+            if torch.isfinite(w_flat).all():
+                writer.add_histogram(f"soft/hist/{name}", w_flat,
+                                     soft_step_offset, bins=64)
+    for step in pbar:
+        last_step = step
+        cur_lr = lr_at(step, args.soft_steps, soft_lr, args.warmup_steps,
+                       floor=args.lr_floor)
+        for g in opt.param_groups:
+            g["lr"] = cur_lr
+        for _ in range(args.grad_accum):
+            batch = next(it)
+            tokens = batch["tokens"].to(args.device, non_blocking=True)
+            topk_idx = batch["topk_idx"].to(args.device, non_blocking=True)
+            topk_prob = batch["topk_prob"].to(args.device, non_blocking=True)
+            rest_mass = batch["rest_mass"].to(args.device, non_blocking=True)
+            ctx = (torch.amp.autocast(args.device.split(":")[0],
+                                      dtype=autocast_dtype)
+                   if autocast_dtype is not None
+                   else torch.amp.autocast(args.device.split(":")[0],
+                                           enabled=False))
+            with ctx:
+                out = model(tokens)
+                loss = kl_with_rest(out.logits, topk_idx, topk_prob, rest_mass)
+            if not torch.isfinite(loss):
+                # Fail fast in the soft loop too — silent NaN propagation
+                # corrupts the loss-EMA, the schedule freezes (steady_count
+                # stuck at 0 because NaN comparisons are False), and all
+                # downstream TB scalars/histograms turn into NaN.
+                logits_max = float(out.logits.detach().abs().max())
+                logits_finite = bool(torch.isfinite(out.logits).all())
+                w_finite = all(torch.isfinite(p).all().item()
+                               for p in model.parameters())
+                raise RuntimeError(
+                    f"non-finite loss in soft stage at step {step} "
+                    f"(α={schedule.alpha:.4f}, loss={loss.item()}); "
+                    f"logits |max|={logits_max:.3e} "
+                    f"finite={logits_finite}; all-params-finite={w_finite}")
+            (loss / args.grad_accum).backward()
+            running += loss.item()
+            running_n += 1
+        # Snapshot the KL-only gradient norm before the attractor penalty
+        # adds to it (only on log steps to avoid the per-param iteration).
+        log_this_step = (step + 1) % args.log_every == 0
+        kl_grad_norm: float | None = None
+        if log_this_step:
+            kl_grad_norm = grad_l2_norm(model)
+        # Attractor penalty: one backward per opt.step (regularization on
+        # weights, not data, so no grad_accum scaling). λ(α) = λ_max·α —
+        # zero at the start (no need to pull) and ramps up to λ_max at
+        # α≈1, matching the schedule.
+        cur_lambda = args.soft_l2_coef * schedule.alpha
+        penalty_val: float | None = None
+        if cur_lambda > 0:
+            if args.soft_attractor == "l2":
+                penalty = attractor_l2(model)
+            else:
+                penalty = triple_well_loss(model)
+            (cur_lambda * penalty).backward()
+            penalty_val = float(penalty.detach())
+        grad_norm: float | None = None
+        if args.max_grad_norm:
+            g = torch.nn.utils.clip_grad_norm_(model.parameters(),
+                                               args.max_grad_norm)
+            grad_norm = float(g)
+        opt.step()
+        clamp_qlinear_weights(model)
         opt.zero_grad(set_to_none=True)
-        running = 0.0
-        running_n = 0
-        pbar = tqdm(range(step_offset, max_steps), initial=step_offset, total=max_steps,
-                    desc=f"L={levels}", dynamic_ncols=True)
-        advance_reason = "max_steps"
-        last_step = step_offset
-        for step in pbar:
-            last_step = step
-            cur_lr = lr_at(step, max_steps, stage_lr, args.warmup_steps,
-                           floor=args.lr_floor)
-            for g in opt.param_groups:
-                g["lr"] = cur_lr
-            for _ in range(args.grad_accum):
-                batch = next(it)
-                tokens = batch["tokens"].to(args.device, non_blocking=True)
-                topk_idx = batch["topk_idx"].to(args.device, non_blocking=True)
-                topk_prob = batch["topk_prob"].to(args.device, non_blocking=True)
-                rest_mass = batch["rest_mass"].to(args.device, non_blocking=True)
-                ctx = (torch.amp.autocast(args.device.split(":")[0], dtype=autocast_dtype)
-                       if autocast_dtype is not None else torch.amp.autocast(args.device.split(":")[0], enabled=False))
-                with ctx:
-                    out = model(tokens)
-                    loss = kl_with_rest(out.logits, topk_idx, topk_prob, rest_mass)
-                if not torch.isfinite(loss):
-                    # Fail fast on NaN/Inf: silently propagating leaves the
-                    # whole run in a wedged state (loss=NaN forever, no diff).
-                    # Dump activation/weight stats so we can see whether the
-                    # blow-up was in logits or already in the latent.
-                    logits_max = float(out.logits.detach().abs().max())
-                    logits_finite = bool(torch.isfinite(out.logits).all())
-                    w_finite = all(torch.isfinite(p).all().item()
-                                   for p in model.parameters())
-                    raise RuntimeError(
-                        f"non-finite loss at stage {stage_idx} step {step} "
-                        f"(loss={loss.item()}); logits |max|={logits_max:.3e} "
-                        f"finite={logits_finite}; all-params-finite={w_finite}")
-                (loss / args.grad_accum).backward()
-                running += loss.item()
-                running_n += 1
-            grad_norm: float | None = None
-            if args.max_grad_norm:
-                g = torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
-                grad_norm = float(g)
-            opt.step()
-            clamp_qlinear_weights(model)
-            opt.zero_grad(set_to_none=True)
-            global_step += 1
-            step_loss = running / max(1, running_n)
-            improved = ctrl.update(step, step_loss)
-            if improved:
-                best_snapshot = snapshot_to_cpu(model)
-            if (step + 1) % args.log_every == 0:
-                pbar.set_postfix(loss=f"{step_loss:.4f}",
-                                 ema=f"{ctrl.ema:.4f}",
-                                 best=f"{ctrl.best_ema:.4f}@{ctrl.best_step}",
-                                 lr=f"{cur_lr:.2e}")
-                # Per-stage runs use in-stage step on the x-axis so curves
-                # from different stages overlay cleanly in TB's compare view.
-                tb_step = step + 1
-                writer.add_scalar("loss/step", step_loss, tb_step)
-                if ctrl.ema is not None:
-                    writer.add_scalar("loss/ema", ctrl.ema, tb_step)
-                writer.add_scalar("lr", cur_lr, tb_step)
-                writer.add_scalar("levels", float(levels), tb_step)
-                writer.add_scalar("global_step", float(global_step), tb_step)
+        global_step += 1
+        step_loss = running / max(1, running_n)
+        cur_alpha, steady_count, bumped = schedule.step(step_loss)
+        gap = max(0.0, step_loss - L_T) if L_T is not None else None
+        # Only the l2 form uses α in the forward; well-mode forward is
+        # always identity (QLinear.alpha stays 0).
+        if args.soft_attractor == "l2":
+            set_soft_alpha(model, cur_alpha)
+        # Saturation gate: latch the step at which α first reaches the
+        # ceiling (within --soft-saturation-eps). Schedule is monotone,
+        # so once latched we don't unset it.
+        if (saturation_step is None
+                and cur_alpha >= args.soft_alpha_max
+                                 - args.soft_saturation_eps):
+            saturation_step = step
+            tqdm.write(f"[soft] α saturated at step {step + 1} "
+                       f"(α={cur_alpha:.4f} ≥ α_max - eps); will exit "
+                       f"after {args.soft_saturation_tail}-step tail.")
+        # Best-snapshot tracking is on from the start so a derailed run
+        # has a recoverable checkpoint at the lowest loss seen — useful
+        # for restarting with new schedule params from a known-good
+        # state. End-of-stage rollback only fires if the schedule
+        # actually completed (saturation reached); a partial run leaves
+        # the model at its current state to preserve schedule progress.
+        improved = ctrl.update(step, step_loss)
+        if improved:
+            best_snapshot = snapshot_to_cpu(model)
+        if log_this_step:
+            postfix = {
+                "loss": f"{step_loss:.4f}",
+                "ema": f"{ctrl.ema:.4f}",
+                "α": f"{cur_alpha:.3f}",
+                "λ": f"{cur_lambda:.2e}",
+                "stdy": f"{steady_count}/{args.soft_patience}",
+                "lr": f"{cur_lr:.2e}",
+            }
+            if gap is not None:
+                postfix["gap"] = f"{gap:.3f}"
+            if penalty_val is not None:
+                postfix["pen"] = f"{penalty_val:.3f}"
+            pbar.set_postfix(postfix)
+            tb_step = step + 1
+            writer.add_scalar("loss/step", step_loss, tb_step)
+            if ctrl.ema is not None:
+                writer.add_scalar("loss/ema", ctrl.ema, tb_step)
+            writer.add_scalar("lr", cur_lr, tb_step)
+            writer.add_scalar("global_step", float(global_step), tb_step)
+            writer.add_scalar("soft/alpha", cur_alpha, tb_step)
+            writer.add_scalar("soft/steady_count",
+                              float(schedule.steady_count), tb_step)
+            writer.add_scalar("soft/bumps", float(schedule.bumps),
+                              tb_step)
+            if schedule.ema is not None:
+                writer.add_scalar("soft/loss_ema_fast",
+                                  schedule.ema, tb_step)
+            if schedule.slow_ema is not None:
+                writer.add_scalar("soft/loss_ema_slow",
+                                  schedule.slow_ema, tb_step)
+                if schedule.ema is not None:
+                    writer.add_scalar(
+                        "soft/loss_ema_diff",
+                        schedule.ema - schedule.slow_ema, tb_step)
+            if gap is not None:
+                writer.add_scalar("soft/gap", gap, tb_step)
+            writer.add_scalar("soft/lambda", cur_lambda, tb_step)
+            if L_T is not None:
+                writer.add_scalar("soft/L_T", L_T, tb_step)
+            if penalty_val is not None:
+                writer.add_scalar("soft/penalty", penalty_val, tb_step)
+            if grad_norm is not None:
+                writer.add_scalar("grad_norm", grad_norm, tb_step)
+            if kl_grad_norm is not None:
+                writer.add_scalar("soft/grad_norm_kl", kl_grad_norm,
+                                  tb_step)
                 if grad_norm is not None:
-                    writer.add_scalar("grad_norm", grad_norm, tb_step)
-                qm, prev_codes = collect_qlinear_metrics(model, prev_codes)
-                for k, v in qm.items():
-                    writer.add_scalar(k, v, tb_step)
-                fr = qm.get("weights/flip_rate")
-                if fr is not None:
-                    ctrl.record_flip(step, fr)
-                drift, drift_stage = embed_drift_l2(model, embed_init,
-                                                    embed_stage_init)
-                if drift is not None:
-                    writer.add_scalar("embed/drift_l2", drift, tb_step)
-                if drift_stage is not None:
-                    writer.add_scalar("embed/drift_l2_stage", drift_stage,
-                                      tb_step)
-                running = 0.0
-                running_n = 0
-            if _INTERRUPT["flag"]:
-                pbar.close()
-                save_resume(interrupted_path, model, opt, stage_idx, step + 1, curriculum,
-                            global_step, best_snapshot, ctrl.state_dict(), run_name,
-                            phase="curriculum",
-                            stage_0_best_ema=stage_0_best_ema)
-                writer.flush()
-                writer.close()
-                print(f"[!] saved resume snapshot to {interrupted_path}; "
-                      f"re-run smollmer-distill to continue.")
-                sys.exit(0)
-            advance, why = ctrl.should_advance(step)
-            if advance:
-                advance_reason = why
-                pbar.close()
-                break
-        regressed = ctrl.ema is not None and ctrl.ema > ctrl.best_ema * 1.005
-        print(f"[stage {stage_idx}] advancing after {last_step + 1} steps "
-              f"(reason: {advance_reason}; ema={ctrl.ema:.4f}, best={ctrl.best_ema:.4f}@{ctrl.best_step})")
-        writer.add_text("stage_end",
-                        f"stage {stage_idx} levels={levels} steps={last_step + 1} "
-                        f"reason={advance_reason} ema={ctrl.ema:.4f} "
-                        f"best={ctrl.best_ema:.4f}@{ctrl.best_step} regressed={regressed}",
-                        last_step + 1)
-        writer.flush()
-        writer.close()
-        if regressed:
-            print(f"[stage {stage_idx}] restoring best snapshot from step {ctrl.best_step} "
-                  f"(EMA regressed {ctrl.ema:.4f} > best {ctrl.best_ema:.4f})")
-            restore_from_snapshot(model, best_snapshot)
-        # Stage complete; clear in-stage start_step so subsequent stages start fresh.
-        # Drop the interrupted_state reference so we don't reapply it on later
-        # stages — its best_snapshot is for the now-finished stage only.
-        start_step = 0
-        interrupted_state = None
-        # Capture the anchor stage's converged EMA as the *practical* teacher
-        # floor — this is what the soft-ternary α schedule steers on.
-        if stage_idx == 0 and ctrl.best_ema != float("inf"):
-            stage_0_best_ema = float(ctrl.best_ema)
-            print(f"[stage 0] practical floor (best EMA) = {stage_0_best_ema:.4f}")
-        ckpt_path = args.out / f"stage_{stage_idx:02d}_L{levels}.safetensors"
-        save_checkpoint(model, ckpt_path, levels, stage_idx, args.model,
-                        args.scale_group_size)
-        print(f"[stage {stage_idx}] saved {ckpt_path}")
-
-    if args.soft:
-        # ============ Soft-ternary stage =====================================
-        # Pick L_T. Practical (stage-0 best EMA) is preferred — it captures
-        # the actual achievable loss for this student capacity. Theoretical
-        # (upper bound on H(p_t) computed once from the cached top-K + rest)
-        # is the fallback when stage 0 wasn't run in this invocation.
-        if args.soft_floor_override is not None:
-            L_T = float(args.soft_floor_override)
-            floor_src = "override"
-        elif args.soft_floor == "practical" and stage_0_best_ema is not None:
-            L_T = float(stage_0_best_ema)
-            floor_src = "practical (stage-0 best EMA)"
-        else:
-            vocab_size = args.soft_vocab_size
-            if vocab_size <= 0:
-                from transformers import AutoTokenizer
-                tok = AutoTokenizer.from_pretrained(args.model)
-                vocab_size = len(tok)
-                print(f"[soft] vocab_size={vocab_size} (from {args.model})")
-            floor_data = load_teacher_floor(args.cache_dir, vocab_size)
-            L_T = float(floor_data["floor"])
-            floor_src = "theoretical (cache upper bound)"
-            if args.soft_floor == "practical" and stage_0_best_ema is None:
-                print("[soft] WARNING: --soft-floor=practical but stage_0_best_ema "
-                      "is unknown (no anchor stage run); falling back to theoretical.")
-        print(f"\n[soft] L_T = {L_T:.4f} ({floor_src})")
-        if stage_0_best_ema is not None:
-            print(f"[soft]   stage-0 best EMA: {stage_0_best_ema:.4f}")
-
-        if (phase == "soft" and interrupted_state is not None
-                and interrupted_state.get("soft_state")):
-            soft_st = interrupted_state["soft_state"]
-            schedule = AlphaSchedule(alpha_max=args.soft_alpha_max,
-                                     patience=args.soft_patience,
-                                     bump=args.soft_bump,
-                                     tolerance=args.soft_tolerance,
-                                     ema_alpha=args.soft_ema,
-                                     slow_ratio=args.soft_slow_ratio)
-            schedule.load_state_dict(soft_st["schedule"])
-            soft_step_offset = int(soft_st.get("next_step", 0))
-            print(f"[soft] resuming at step {soft_step_offset} "
-                  f"α={schedule.alpha:.4f} bumps={schedule.bumps} "
-                  f"steady={schedule.steady_count}")
-        else:
-            schedule = AlphaSchedule(alpha_max=args.soft_alpha_max,
-                                     patience=args.soft_patience,
-                                     bump=args.soft_bump,
-                                     tolerance=args.soft_tolerance,
-                                     ema_alpha=args.soft_ema,
-                                     slow_ratio=args.soft_slow_ratio)
-            soft_step_offset = 0
-
-        # In `well` mode the forward is identity (the triple-well potential
-        # is a regularizer, not a forward reparam) so we hold QLinear.alpha
-        # at 0 throughout; the schedule's α drives only the penalty
-        # coefficient. In `l2` mode the forward IS T_α(w), so QLinear.alpha
-        # tracks the schedule.
-        forward_alpha = schedule.alpha if args.soft_attractor == "l2" else 0.0
-        target_zero_frac = (float(args.soft_zero_frac)
-                            if 0.0 < args.soft_zero_frac < 1.0 else None)
-        n_set = set_soft_mode(model, alpha=forward_alpha,
-                              target_zero_frac=target_zero_frac)
-        floor_extra = (f", override={args.soft_floor_override}"
-                       if args.soft_floor_override is not None else "")
-        print(f"[soft] {n_set} QLinear modules → soft mode")
-        print(f"[soft]   attractor    = {args.soft_attractor}")
-        if target_zero_frac is not None:
-            print(f"[soft]   zero_frac    = {target_zero_frac} "
-                  f"(per-(row, group) |w|-quantile cutoff)")
-        else:
-            print(f"[soft]   zero_frac    = disabled (fixed ±1/3 boundary)")
-        print(f"[soft]   L_T          = {L_T:.4f} ({floor_src})")
-        print(f"[soft]   λ_max        = {args.soft_l2_coef}")
-        print(f"[soft]   α_max        = {args.soft_alpha_max}")
-        print(f"[soft]   patience     = {args.soft_patience} steady steps/bump")
-        print(f"[soft]   bump         = {args.soft_bump} (≈"
-              f"{int(args.soft_alpha_max / max(args.soft_bump, 1e-9))} bumps "
-              f"to saturate)")
-        print(f"[soft]   tolerance    = {args.soft_tolerance} "
-              f"(loss-EMA rise still counted as stable)")
-        print(f"[soft]   ema_alpha    = {args.soft_ema} (loss-EMA smoothing)")
-        print(f"[soft]   saturation   = exit when α ≥ α_max - "
-              f"{args.soft_saturation_eps:g}, then "
-              f"+{args.soft_saturation_tail} steps")
-        print(f"[soft]   floor mode   = {args.soft_floor}{floor_extra}")
-        print(f"[soft]   max_steps    = {args.soft_steps} (safety cap)")
-        print(f"[soft]   lr           = {args.lr} "
-              f"(cosine to {args.lr_floor}·lr, warmup={args.warmup_steps})")
-        print(f"[soft]   optimizer    = {args.optimizer}")
-        if soft_step_offset:
-            print(f"[soft]   resuming     = step {soft_step_offset}, "
-                  f"α={schedule.alpha:.4f}, bumps={schedule.bumps}, "
-                  f"steady={schedule.steady_count}, "
-                  f"slow_ema={schedule.slow_ema}")
-
-        soft_tb_dir = run_dir / "stage_soft"
-        soft_tb_dir.mkdir(parents=True, exist_ok=True)
-        writer = SummaryWriter(log_dir=str(soft_tb_dir),
-                               purge_step=soft_step_offset if soft_step_offset else None)
-        # Every soft-stage setting in one block so a TB run is self-documenting.
-        # Constants get add_scalar at step_offset too, so they show up on the
-        # axis at run-start (one tick) and stay flat — useful for sweeps where
-        # you compare runs at different λ_max / α_max settings.
-        writer.add_text(
-            "stage",
-            "  \n".join([
-                f"**soft** stage (resume @ step {soft_step_offset})",
-                f"- attractor: `{args.soft_attractor}`",
-                (f"- zero_frac: {target_zero_frac} (per-group quantile)"
-                 if target_zero_frac is not None else
-                 "- zero_frac: disabled (fixed ±1/3 boundary)"),
-                f"- L_T = {L_T:.4f} ({floor_src})",
-                (f"- stage_0_best_ema = {stage_0_best_ema:.4f}"
-                 if stage_0_best_ema is not None else
-                 "- stage_0_best_ema = (unknown)"),
-                f"- λ_max (soft_l2_coef) = {args.soft_l2_coef}",
-                f"- α_max = {args.soft_alpha_max}",
-                f"- patience = {args.soft_patience}",
-                f"- bump = {args.soft_bump}",
-                f"- tolerance = {args.soft_tolerance}",
-                f"- ema_alpha = {args.soft_ema}",
-                f"- saturation eps = {args.soft_saturation_eps}",
-                f"- saturation tail = {args.soft_saturation_tail}",
-                f"- floor mode = {args.soft_floor}"
-                + (f" (override={args.soft_floor_override})"
-                   if args.soft_floor_override is not None else ""),
-                f"- max_steps = {args.soft_steps}",
-                f"- lr = {args.lr} (cosine to floor={args.lr_floor})",
-                f"- optimizer = {args.optimizer}",
-            ]),
-            soft_step_offset)
-        writer.add_scalar("soft/cfg/L_T", L_T, soft_step_offset)
-        writer.add_scalar("soft/cfg/zero_frac",
-                          target_zero_frac if target_zero_frac is not None
-                          else -1.0, soft_step_offset)
-        writer.add_scalar("soft/cfg/lambda_max", args.soft_l2_coef,
-                          soft_step_offset)
-        writer.add_scalar("soft/cfg/alpha_max", args.soft_alpha_max,
-                          soft_step_offset)
-        writer.add_scalar("soft/cfg/patience",
-                          float(args.soft_patience), soft_step_offset)
-        writer.add_scalar("soft/cfg/bump", args.soft_bump,
-                          soft_step_offset)
-        writer.add_scalar("soft/cfg/tolerance", args.soft_tolerance,
-                          soft_step_offset)
-        writer.add_scalar("soft/cfg/ema_alpha", args.soft_ema,
-                          soft_step_offset)
-        writer.add_scalar("soft/cfg/max_steps", float(args.soft_steps),
-                          soft_step_offset)
-        writer.add_scalar("soft/cfg/saturation_eps",
-                          args.soft_saturation_eps, soft_step_offset)
-        writer.add_scalar("soft/cfg/saturation_tail",
-                          float(args.soft_saturation_tail),
-                          soft_step_offset)
-        # Numeric attractor encoding so the value is visible on a scalar
-        # chart (TB doesn't render strings as scalars). 0=l2, 1=well.
-        writer.add_scalar("soft/cfg/attractor_id",
-                          0.0 if args.soft_attractor == "l2" else 1.0,
-                          soft_step_offset)
-
-        _embed = model.get_input_embeddings()
-        embed_stage_init = (_embed.weight.detach().clone()
-                            if _embed is not None else None)
-
-        ctrl = PlateauController(max_steps=args.soft_steps,
-                                 patience=args.patience,
-                                 min_steps=max(args.min_stage_steps,
-                                               soft_step_offset + 1),
-                                 rel_threshold=args.plateau_threshold,
-                                 ema_warmup=args.ema_warmup,
-                                 flip_threshold=args.flip_plateau_threshold)
-        if (phase == "soft" and interrupted_state is not None
-                and interrupted_state.get("ctrl_state")):
-            ctrl.load_state_dict(interrupted_state["ctrl_state"])
-        if (phase == "soft" and interrupted_state is not None
-                and interrupted_state.get("best_snapshot") is not None):
-            best_snapshot = interrupted_state["best_snapshot"]
-        else:
-            best_snapshot = snapshot_to_cpu(model)
-        # Reset flip-rate baseline for the soft stage's ternary alphabet.
-        _, prev_codes = collect_qlinear_metrics(model, {})
-
-        # Use --lr as the soft-stage LR (no per-stage override path for soft).
-        # The lr_at schedule still does warmup + cosine to args.lr_floor across
-        # args.soft_steps.
-        soft_lr = args.lr
-        soft_stage_idx = len(curriculum)  # virtual idx for save_resume
-        model.train()
-        opt.zero_grad(set_to_none=True)
-        running = 0.0
-        running_n = 0
-        pbar = tqdm(range(soft_step_offset, args.soft_steps),
-                    initial=soft_step_offset, total=args.soft_steps,
-                    desc="soft", dynamic_ncols=True)
-        advance_reason = "max_steps"
-        last_step = soft_step_offset
-        # Saturation gate: fire when α first reaches α_max (within eps), then
-        # run `tail` more steps for anneal/cleanup. The schedule is monotone
-        # so once saturated it stays — no debouncing needed.
-        saturation_step: int | None = (
-            int(interrupted_state["soft_state"]["saturation_step"])
-            if (phase == "soft" and interrupted_state is not None
-                and interrupted_state.get("soft_state")
-                and interrupted_state["soft_state"].get("saturation_step")
-                    is not None)
-            else None)
-        if saturation_step is not None:
-            print(f"[soft]   α already saturated at step {saturation_step + 1}")
-        # Initial histogram at step soft_step_offset so the TB plot has a
-        # baseline tick before any training has happened (the "before"
-        # snapshot for the three-peak emergence story). On a fresh run
-        # soft_step_offset is 0; on resume it's wherever we picked up.
-        if args.soft_hist_every > 0:
+                    # Penalty's net contribution to the gradient (proxy:
+                    # vector-sum norms aren't strictly additive but the
+                    # difference tracks the order of magnitude).
+                    writer.add_scalar(
+                        "soft/grad_norm_penalty",
+                        max(0.0, grad_norm - kl_grad_norm), tb_step)
+            qm, prev_codes = collect_qlinear_metrics(model, prev_codes)
+            for k, v in qm.items():
+                writer.add_scalar(k, v, tb_step)
+            soft_qm, _ = collect_soft_metrics(model)
+            for k, v in soft_qm.items():
+                writer.add_scalar(k, v, tb_step)
+            drift, drift_stage = embed_drift_l2(model, embed_init,
+                                                embed_stage_init)
+            if drift is not None:
+                writer.add_scalar("embed/drift_l2", drift, tb_step)
+            if drift_stage is not None:
+                writer.add_scalar("embed/drift_l2_stage", drift_stage,
+                                  tb_step)
+            running = 0.0
+            running_n = 0
+        # Forward-weight histogram on its own cadence (independent of
+        # log_every). Shows the attractor-applied weight: in l2 mode the
+        # soft-blend T_α(w) — three-peak structure emerges as α grows;
+        # in well mode at α=0 forward = identity = raw latent.
+        if (args.soft_hist_every > 0
+                and (step + 1) % args.soft_hist_every == 0):
             hist_sample = first_qlinear_forward_sample(model)
             if hist_sample is not None:
                 name, w_flat = hist_sample
                 if torch.isfinite(w_flat).all():
                     writer.add_histogram(f"soft/hist/{name}", w_flat,
-                                         soft_step_offset, bins=64)
-        for step in pbar:
-            last_step = step
-            cur_lr = lr_at(step, args.soft_steps, soft_lr, args.warmup_steps,
-                           floor=args.lr_floor)
-            for g in opt.param_groups:
-                g["lr"] = cur_lr
-            for _ in range(args.grad_accum):
-                batch = next(it)
-                tokens = batch["tokens"].to(args.device, non_blocking=True)
-                topk_idx = batch["topk_idx"].to(args.device, non_blocking=True)
-                topk_prob = batch["topk_prob"].to(args.device, non_blocking=True)
-                rest_mass = batch["rest_mass"].to(args.device, non_blocking=True)
-                ctx = (torch.amp.autocast(args.device.split(":")[0],
-                                          dtype=autocast_dtype)
-                       if autocast_dtype is not None
-                       else torch.amp.autocast(args.device.split(":")[0],
-                                               enabled=False))
-                with ctx:
-                    out = model(tokens)
-                    loss = kl_with_rest(out.logits, topk_idx, topk_prob, rest_mass)
-                if not torch.isfinite(loss):
-                    # Fail fast in the soft loop too — silent NaN propagation
-                    # corrupts the loss-EMA, the schedule freezes (steady_count
-                    # stuck at 0 because NaN comparisons are False), and all
-                    # downstream TB scalars/histograms turn into NaN.
-                    logits_max = float(out.logits.detach().abs().max())
-                    logits_finite = bool(torch.isfinite(out.logits).all())
-                    w_finite = all(torch.isfinite(p).all().item()
-                                   for p in model.parameters())
-                    raise RuntimeError(
-                        f"non-finite loss in soft stage at step {step} "
-                        f"(α={schedule.alpha:.4f}, loss={loss.item()}); "
-                        f"logits |max|={logits_max:.3e} "
-                        f"finite={logits_finite}; all-params-finite={w_finite}")
-                (loss / args.grad_accum).backward()
-                running += loss.item()
-                running_n += 1
-            # Snapshot the KL-only gradient norm before the attractor penalty
-            # adds to it (only on log steps to avoid the per-param iteration).
-            log_this_step = (step + 1) % args.log_every == 0
-            kl_grad_norm: float | None = None
-            if log_this_step:
-                kl_grad_norm = grad_l2_norm(model)
-            # Attractor penalty: one backward per opt.step (regularization on
-            # weights, not data, so no grad_accum scaling). λ(α) = λ_max·α —
-            # zero at the start (no need to pull) and ramps up to λ_max at
-            # α≈1, matching the schedule.
-            cur_lambda = args.soft_l2_coef * schedule.alpha
-            penalty_val: float | None = None
-            if cur_lambda > 0:
-                if args.soft_attractor == "l2":
-                    penalty = attractor_l2(model)
+                                         step + 1, bins=64)
                 else:
-                    penalty = triple_well_loss(model)
-                (cur_lambda * penalty).backward()
-                penalty_val = float(penalty.detach())
-            grad_norm: float | None = None
-            if args.max_grad_norm:
-                g = torch.nn.utils.clip_grad_norm_(model.parameters(),
-                                                   args.max_grad_norm)
-                grad_norm = float(g)
-            opt.step()
-            clamp_qlinear_weights(model)
-            opt.zero_grad(set_to_none=True)
-            global_step += 1
-            step_loss = running / max(1, running_n)
-            cur_alpha, steady_count, bumped = schedule.step(step_loss)
-            gap = max(0.0, step_loss - L_T) if L_T is not None else None
-            # Only the l2 form uses α in the forward; well-mode forward is
-            # always identity (QLinear.alpha stays 0).
-            if args.soft_attractor == "l2":
-                set_soft_alpha(model, cur_alpha)
-            # Saturation gate: latch the step at which α first reaches the
-            # ceiling (within --soft-saturation-eps). Schedule is monotone,
-            # so once latched we don't unset it.
-            if (saturation_step is None
-                    and cur_alpha >= args.soft_alpha_max
-                                     - args.soft_saturation_eps):
-                saturation_step = step
-                tqdm.write(f"[soft] α saturated at step {step + 1} "
-                           f"(α={cur_alpha:.4f} ≥ α_max - eps); will exit "
-                           f"after {args.soft_saturation_tail}-step tail.")
-            # Best-snapshot tracking is on from the start so a derailed run
-            # has a recoverable checkpoint at the lowest loss seen — useful
-            # for restarting with new schedule params from a known-good
-            # state. End-of-stage rollback only fires if the schedule
-            # actually completed (saturation reached); a partial run leaves
-            # the model at its current state to preserve schedule progress.
-            improved = ctrl.update(step, step_loss)
-            if improved:
-                best_snapshot = snapshot_to_cpu(model)
-            if log_this_step:
-                postfix = {
-                    "loss": f"{step_loss:.4f}",
-                    "ema": f"{ctrl.ema:.4f}",
-                    "α": f"{cur_alpha:.3f}",
-                    "λ": f"{cur_lambda:.2e}",
-                    "stdy": f"{steady_count}/{args.soft_patience}",
-                    "lr": f"{cur_lr:.2e}",
-                }
-                if gap is not None:
-                    postfix["gap"] = f"{gap:.3f}"
-                if penalty_val is not None:
-                    postfix["pen"] = f"{penalty_val:.3f}"
-                pbar.set_postfix(postfix)
-                tb_step = step + 1
-                writer.add_scalar("loss/step", step_loss, tb_step)
-                if ctrl.ema is not None:
-                    writer.add_scalar("loss/ema", ctrl.ema, tb_step)
-                writer.add_scalar("lr", cur_lr, tb_step)
-                writer.add_scalar("global_step", float(global_step), tb_step)
-                writer.add_scalar("soft/alpha", cur_alpha, tb_step)
-                writer.add_scalar("soft/steady_count",
-                                  float(schedule.steady_count), tb_step)
-                writer.add_scalar("soft/bumps", float(schedule.bumps),
-                                  tb_step)
-                if schedule.ema is not None:
-                    writer.add_scalar("soft/loss_ema_fast",
-                                      schedule.ema, tb_step)
-                if schedule.slow_ema is not None:
-                    writer.add_scalar("soft/loss_ema_slow",
-                                      schedule.slow_ema, tb_step)
-                    if schedule.ema is not None:
-                        writer.add_scalar(
-                            "soft/loss_ema_diff",
-                            schedule.ema - schedule.slow_ema, tb_step)
-                if gap is not None:
-                    writer.add_scalar("soft/gap", gap, tb_step)
-                writer.add_scalar("soft/lambda", cur_lambda, tb_step)
-                if L_T is not None:
-                    writer.add_scalar("soft/L_T", L_T, tb_step)
-                if penalty_val is not None:
-                    writer.add_scalar("soft/penalty", penalty_val, tb_step)
-                if grad_norm is not None:
-                    writer.add_scalar("grad_norm", grad_norm, tb_step)
-                if kl_grad_norm is not None:
-                    writer.add_scalar("soft/grad_norm_kl", kl_grad_norm,
-                                      tb_step)
-                    if grad_norm is not None:
-                        # Penalty's net contribution to the gradient (proxy:
-                        # vector-sum norms aren't strictly additive but the
-                        # difference tracks the order of magnitude).
-                        writer.add_scalar(
-                            "soft/grad_norm_penalty",
-                            max(0.0, grad_norm - kl_grad_norm), tb_step)
-                qm, prev_codes = collect_qlinear_metrics(model, prev_codes)
-                for k, v in qm.items():
-                    writer.add_scalar(k, v, tb_step)
-                fr = qm.get("weights/flip_rate")
-                if fr is not None:
-                    ctrl.record_flip(step, fr)
-                soft_qm, _ = collect_soft_metrics(model)
-                for k, v in soft_qm.items():
-                    writer.add_scalar(k, v, tb_step)
-                drift, drift_stage = embed_drift_l2(model, embed_init,
-                                                    embed_stage_init)
-                if drift is not None:
-                    writer.add_scalar("embed/drift_l2", drift, tb_step)
-                if drift_stage is not None:
-                    writer.add_scalar("embed/drift_l2_stage", drift_stage,
-                                      tb_step)
-                running = 0.0
-                running_n = 0
-            # Forward-weight histogram on its own cadence (independent of
-            # log_every). Shows the attractor-applied weight: in l2 mode the
-            # soft-blend T_α(w) — three-peak structure emerges as α grows;
-            # in well mode at α=0 forward = identity = raw latent.
-            if (args.soft_hist_every > 0
-                    and (step + 1) % args.soft_hist_every == 0):
-                hist_sample = first_qlinear_forward_sample(model)
-                if hist_sample is not None:
-                    name, w_flat = hist_sample
-                    if torch.isfinite(w_flat).all():
-                        writer.add_histogram(f"soft/hist/{name}", w_flat,
-                                             step + 1, bins=64)
-                    else:
-                        tqdm.write(f"[soft] skipping histogram at step "
-                                   f"{step + 1}: non-finite values in "
-                                   f"{name}")
-            if _INTERRUPT["flag"]:
-                pbar.close()
-                soft_state = {"schedule": schedule.state_dict(),
-                              "next_step": step + 1,
-                              "saturation_step": saturation_step}
-                save_resume(interrupted_path, model, opt, soft_stage_idx,
-                            step + 1, curriculum, global_step, best_snapshot,
-                            ctrl.state_dict(), run_name,
-                            phase="soft", soft_state=soft_state,
-                            stage_0_best_ema=stage_0_best_ema)
-                writer.flush()
-                writer.close()
-                print(f"[!] saved soft resume snapshot to {interrupted_path}")
-                sys.exit(0)
-            # Primary exit: α-saturation tail elapsed. The schedule has
-            # finished ramping and the latents have had `tail` steps to
-            # settle; further training is diminishing returns and risks
-            # over-fitting the attractor against the data.
-            if (saturation_step is not None
-                    and (step - saturation_step) >= args.soft_saturation_tail):
-                advance_reason = (f"α saturated at step {saturation_step + 1} "
-                                  f"+ tail={args.soft_saturation_tail}")
-                pbar.close()
-                break
-            # No plateau exit in soft: a flat loss is the IDEAL state — it
-            # means the model is settled at the current α, the schedule's
-            # `steady_count` is accumulating, and the next bump is on its
-            # way. Exiting on flat loss here would terminate before α
-            # reaches α_max, leaving the model under-attracted. The only
-            # exits are saturation+tail (above) and --soft-steps (the
-            # outer for-loop's range cap).
-        regressed = (ctrl.ema is not None
-                     and ctrl.best_ema != float("inf")
-                     and ctrl.ema > ctrl.best_ema * 1.005)
-        print(f"[soft] complete after {last_step + 1} steps "
-              f"(reason: {advance_reason}; ema={ctrl.ema}, "
-              f"best={ctrl.best_ema}@{ctrl.best_step}, "
-              f"final α={schedule.alpha:.4f})")
-        writer.add_text("stage_end",
-                        f"soft steps={last_step + 1} reason={advance_reason} "
-                        f"ema={ctrl.ema} best={ctrl.best_ema}@{ctrl.best_step} "
-                        f"alpha_final={schedule.alpha:.4f} regressed={regressed}",
-                        last_step + 1)
-        writer.flush()
-        writer.close()
-        # Rollback only if the schedule actually completed — a partial run
-        # rolling back to a low-α best would erase all the schedule progress.
-        # If the user wants a low-α best for restart-with-new-params, they
-        # have it in interrupted_state.best_snapshot via SIGINT.
-        if regressed and saturation_step is not None:
-            print(f"[soft] restoring best snapshot from step {ctrl.best_step}")
-            restore_from_snapshot(model, best_snapshot)
-        elif regressed:
-            print(f"[soft] regressed but schedule did not saturate "
-                  f"(ema={ctrl.ema:.4f} > best={ctrl.best_ema:.4f}); "
-                  f"NOT restoring — partial-α progress preserved. The "
-                  f"best snapshot is in best_snapshot in memory; SIGINT "
-                  f"now to persist it via interrupted.pt.")
-        soft_ckpt = args.out / "stage_soft.safetensors"
-        # `levels=3` in metadata: this ckpt is intended to be hard-rounded
-        # to ternary by finalize.py (which calls set_levels(model, 3)).
-        save_checkpoint(model, soft_ckpt, 3, soft_stage_idx, args.model,
-                        args.scale_group_size,
-                        mode="soft", alpha=schedule.alpha,
-                        target_zero_frac=target_zero_frac)
-        print(f"[soft] saved {soft_ckpt}")
+                    tqdm.write(f"[soft] skipping histogram at step "
+                               f"{step + 1}: non-finite values in "
+                               f"{name}")
+        # Auto-checkpoint: write the same interrupted.pt every N steps so a
+        # crash leaves a recent resume point. Same path as the SIGINT save —
+        # latest wins; the atomic .tmp/rename in save_resume means a crash
+        # mid-write leaves the previous good snapshot intact.
+        if (args.soft_checkpoint_every > 0
+                and (step + 1) % args.soft_checkpoint_every == 0):
+            soft_state = {"schedule": schedule.state_dict(),
+                          "next_step": step + 1,
+                          "saturation_step": saturation_step}
+            save_resume(interrupted_path, model, opt, step + 1,
+                        best_snapshot, ctrl.state_dict(), run_name,
+                        soft_state=soft_state)
+            tqdm.write(f"[ckpt] auto-wrote {interrupted_path} at step "
+                       f"{step + 1}")
+        if _INTERRUPT["flag"]:
+            pbar.close()
+            soft_state = {"schedule": schedule.state_dict(),
+                          "next_step": step + 1,
+                          "saturation_step": saturation_step}
+            save_resume(interrupted_path, model, opt, step + 1,
+                        best_snapshot, ctrl.state_dict(), run_name,
+                        soft_state=soft_state)
+            writer.flush()
+            writer.close()
+            print(f"[!] saved soft resume snapshot to {interrupted_path}")
+            sys.exit(0)
+        # Primary exit: α-saturation tail elapsed. The schedule has
+        # finished ramping and the latents have had `tail` steps to
+        # settle; further training is diminishing returns and risks
+        # over-fitting the attractor against the data.
+        if (saturation_step is not None
+                and (step - saturation_step) >= args.soft_saturation_tail):
+            advance_reason = (f"α saturated at step {saturation_step + 1} "
+                              f"+ tail={args.soft_saturation_tail}")
+            pbar.close()
+            break
+        # No plateau exit in soft: a flat loss is the IDEAL state — it
+        # means the model is settled at the current α, the schedule's
+        # `steady_count` is accumulating, and the next bump is on its
+        # way. Exiting on flat loss here would terminate before α
+        # reaches α_max, leaving the model under-attracted. The only
+        # exits are saturation+tail (above) and --soft-steps (the
+        # outer for-loop's range cap).
+    regressed = (ctrl.ema is not None
+                 and ctrl.best_ema != float("inf")
+                 and ctrl.ema > ctrl.best_ema * 1.005)
+    print(f"[soft] complete after {last_step + 1} steps "
+          f"(reason: {advance_reason}; ema={ctrl.ema}, "
+          f"best={ctrl.best_ema}@{ctrl.best_step}, "
+          f"final α={schedule.alpha:.4f})")
+    writer.add_text("stage_end",
+                    f"soft steps={last_step + 1} reason={advance_reason} "
+                    f"ema={ctrl.ema} best={ctrl.best_ema}@{ctrl.best_step} "
+                    f"alpha_final={schedule.alpha:.4f} regressed={regressed}",
+                    last_step + 1)
+    writer.flush()
+    writer.close()
+    # Rollback only if the schedule actually completed — a partial run
+    # rolling back to a low-α best would erase all the schedule progress.
+    # If the user wants a low-α best for restart-with-new-params, they
+    # have it in interrupted_state.best_snapshot via SIGINT.
+    if regressed and saturation_step is not None:
+        print(f"[soft] restoring best snapshot from step {ctrl.best_step}")
+        restore_from_snapshot(model, best_snapshot)
+    elif regressed:
+        print(f"[soft] regressed but schedule did not saturate "
+              f"(ema={ctrl.ema:.4f} > best={ctrl.best_ema:.4f}); "
+              f"NOT restoring — partial-α progress preserved. The "
+              f"best snapshot is in best_snapshot in memory; SIGINT "
+              f"now to persist it via interrupted.pt.")
+    soft_ckpt = args.out / "stage_soft.safetensors"
+    save_checkpoint(model, soft_ckpt, args.model, args.scale_group_size,
+                    alpha=schedule.alpha,
+                    target_zero_frac=target_zero_frac)
+    print(f"[soft] saved {soft_ckpt}")
 
     if interrupted_path.exists():
         interrupted_path.unlink()
         print(f"[done] removed {interrupted_path}")
-    print("[done] curriculum complete.")
+    print("[done] soft training complete.")
 
 
 if __name__ == "__main__":

@@ -17,7 +17,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, TextStreamer
 
 from .build_student import quantize_in_place
 from .pack import dequantize_embed_int8, unpack_ternary_158
-from .qlinear import QLinear, set_levels
+from .qlinear import QLinear, set_levels, set_soft_mode
 
 
 def _detect_packed(sd_keys) -> bool:
@@ -100,7 +100,29 @@ def load_model(model_id: str, ckpt_path: Path, device: str, dtype: torch.dtype,
                   f"First 5: {unexpected[:5]}")
         if not missing and not unexpected:
             print(f"[load] all {len(sd)} keys matched")
-        set_levels(model, int(meta.get("levels", 3)))
+        # Soft-mode ckpts (the only kind smollmer-distill writes now) carry
+        # `mode=soft` and optionally `target_zero_frac` in metadata. Apply
+        # the SAME ternary classifier the training pulled the latents
+        # toward — α=1 makes the soft forward output exactly c(w), so chat
+        # sees the deployable hard ternary. Legacy curriculum ckpts (no
+        # `mode` key) fall back to set_levels with quantize_levels'
+        # ±0.5 boundary.
+        if meta.get("mode") == "soft":
+            tzf = None
+            if "target_zero_frac" in meta:
+                try:
+                    v = float(meta["target_zero_frac"])
+                    if 0.0 < v < 1.0:
+                        tzf = v
+                except ValueError:
+                    pass
+            set_soft_mode(model, alpha=1.0, target_zero_frac=tzf)
+            cutoff_desc = (f"target_zero_frac={tzf} (per-(row, group) "
+                           f"|w|-quantile cutoff)"
+                           if tzf is not None else "fixed ±1/3 boundary")
+            print(f"[load] soft mode α=1, {cutoff_desc}")
+        else:
+            set_levels(model, int(meta.get("levels", 3)))
 
     # Sanity check: at least one QLinear should have non-trivial weight values.
     for name, m in model.named_modules():
@@ -154,9 +176,15 @@ def main() -> None:
     if args.levels is not None:
         set_levels(model, args.levels)
 
-    cur_levels = next((m.levels for m in model.modules() if isinstance(m, QLinear)), None)
+    first_q = next((m for m in model.modules() if isinstance(m, QLinear)), None)
     fmt = "packed" if is_packed else "stage"
-    print(f"[ready] format={fmt} levels={cur_levels} meta={meta}")
+    if first_q is not None and first_q.mode == "soft":
+        mode_desc = (f"soft α={first_q.alpha:.3f} "
+                     f"target_zero_frac={first_q.target_zero_frac}")
+    else:
+        mode_desc = (f"levels={first_q.levels}" if first_q is not None
+                     else "no QLinear")
+    print(f"[ready] format={fmt} {mode_desc} meta={meta}")
     print("Type a prompt and Enter; Ctrl-D / Ctrl-C to exit.\n")
 
     while True:
