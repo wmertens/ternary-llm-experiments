@@ -34,6 +34,8 @@ Gradient flow:
 """
 from __future__ import annotations
 
+import math
+
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -109,6 +111,30 @@ def module_ternary(m: "QLinear") -> torch.Tensor:
     return nearest_ternary(m.weight)
 
 
+def module_ternary_fixed(m: "QLinear") -> torch.Tensor:
+    """c(w) using the per-(row, group) well saddle as a FROZEN classifier:
+    threshold = well_a/√3 per group. Unlike module_ternary's quantile
+    cutoff which moves with the current |w| distribution, this threshold
+    is fixed at init by init_well_a — so flips against it represent
+    actual basin migrations rather than distribution-relative reshuffling.
+
+    With well_a all 1.0 (default / no calibration), the threshold is
+    1/√3 ≈ 0.577 — wider than nearest_ternary's ±1/3, so this matches
+    the well's geometric basin rather than the L2 form's classifier.
+
+    Used by the flip_rate_fixed metric to detect actual saddle crossings
+    that the moving-quantile classifier misses (it rescales with the
+    distribution and so shows ~0 flips even when weights are reorganizing
+    around a stable proportion)."""
+    with torch.no_grad():
+        out_f = m.weight.shape[0]
+        wb = m.weight.view(out_f, m.n_groups, m.group_size)
+        threshold = (m.well_a.float() / math.sqrt(3.0)).unsqueeze(-1)
+        is_zero = wb.abs().float() <= threshold
+        c = torch.where(is_zero, torch.zeros_like(wb), torch.sign(wb))
+        return c.view(out_f, -1).to(m.weight.dtype)
+
+
 def soft_ternary(w: torch.Tensor, alpha: float,
                  c: torch.Tensor | None = None) -> torch.Tensor:
     """Residual contraction reparameterization toward {-1, 0, +1}.
@@ -163,6 +189,15 @@ class QLinear(nn.Linear):
         # is [out_features, n_groups]; broadcast to [out_features, in_features]
         # at forward time by repeating each group's scale across its columns.
         self.scales = nn.Parameter(torch.ones(out_features, self.n_groups))
+        # Per-(row, group) well minima location for the triple-well attractor.
+        # Default 1.0 → canonical U(w)=w²(w²-1)² with minima at ±1. Set by
+        # init_well_a() to √3·quantile(|w_init|, target_zero_frac) per group
+        # so the saddle a/√3 lands at the target |w| quantile. Persistent
+        # buffer so resume restores the calibration that was used.
+        self.register_buffer(
+            "well_a",
+            torch.ones(out_features, self.n_groups, dtype=torch.float32),
+        )
         self.levels = int(levels)
         self.mode = mode
         self.alpha = float(alpha)
@@ -255,40 +290,48 @@ def set_soft_alpha(model: nn.Module, alpha: float) -> int:
     return n
 
 
-def triple_well_potential(w: torch.Tensor) -> torch.Tensor:
-    """U(w) = w²·(w² - 1)². Triple-well potential with minima of value 0
-    at the ternary attractors {-1, 0, +1} and saddle points of height
-    4/27 ≈ 0.148 at ±1/√3 ≈ ±0.577. Smooth everywhere (C^∞); the
-    gradient is
+def triple_well_potential(w: torch.Tensor,
+                          a: torch.Tensor | float = 1.0) -> torch.Tensor:
+    """U_a(w) = U(w/a) where U(u) = u²·(u²-1)². Triple-well with minima of
+    value 0 at {-a, 0, +a} and saddle points of height 4/27 ≈ 0.148 at
+    ±a/√3. a=1 (default) recovers the original ±1 minima. `a` may be a
+    scalar or a tensor broadcastable to `w` (e.g. a per-(row, group)
+    tensor reshaped to [out, n_groups, 1] against w shaped [out, n_groups,
+    group_size]).
 
-        U'(w) = 2 w (3w² - 1) (w² - 1)
-
-    which is zero at the attractors and at the saddles, and pulls every
-    other w toward its nearest attractor. Outside [-1, 1] U grows like
-    w⁶, so the existing clamp_qlinear_weights keeps the latent bounded.
+    Saddle height is preserved (still 4/27 in U units) regardless of a;
+    only the basin width scales with a. Smaller a → narrower 0-basin,
+    fewer weights captured to 0.
 
     Use as a regularizer (`triple_well_loss`) when --soft-attractor=well:
-    minimizing L_kl + α·U(W) over latents folds the reparam and the
-    penalty into one C^∞ function. No piecewise boundary at ±1/3 (so no
-    momentum-buffer chatter from a latent flipping which attractor it
-    serves), at the cost of a fixed basin geometry — the 0-basin extends
-    to ±1/√3 instead of ±1/3, so values in (1/3, 1/√3) get pulled toward
-    0 here vs. ±1 under the L2 form.
+    minimizing L_kl + α·U_a(W) over latents folds the reparam and the
+    penalty into one C^∞ function. With per-group a calibrated to a
+    target zero-frac at init, the 0-basin lines up with the natural |w|
+    quantile of each group — same intent as the L2 form's quantile cutoff,
+    just frozen at init instead of recomputed every step.
+
+    Latents converge near {-a, 0, +a}; deploy-time `rescale_well_for_deploy`
+    absorbs a into the per-group scales (math-preserving) so the rest of
+    the pipeline sees the standard {-1, 0, +1} codebook.
     """
-    w2 = w * w
-    return w2 * (w2 - 1.0) * (w2 - 1.0)
+    if isinstance(a, float) and a == 1.0:
+        u = w
+    else:
+        u = w / a
+    u2 = u * u
+    return u2 * (u2 - 1.0) * (u2 - 1.0)
 
 
 def triple_well_loss(model: nn.Module) -> torch.Tensor:
-    """Mean U(w) across all QLinear latents (per-element mean, so the
-    coefficient stays scale-invariant across model sizes). Differentiable;
-    its gradient is U'(w)/N per latent — the attractor force the optimizer
-    sees when you multiply by your α-driven coefficient and add to the
-    loss before backward.
+    """Mean U_a(w) across all QLinear latents using each module's per-(row,
+    group) `well_a` buffer (default 1.0 = canonical ±1 wells; populated by
+    init_well_a for per-group calibration). Per-element mean, so the
+    coefficient stays scale-invariant across model sizes.
 
     Sum is computed in fp32 even when latents are fp16: with millions of
-    weights per layer and per-element U values up to 4/27, the per-layer
-    sum overflows fp16's 65504 ceiling and goes to inf. The .float() cast
+    weights per layer and per-element U values up to ~4/27 inside basins
+    (much larger if latents drift outside [-a, a]), the per-layer sum
+    overflows fp16's 65504 ceiling and goes to inf. The .float() cast
     propagates a fp32 gradient back to the fp16 latent at backward time.
     """
     parts: list[torch.Tensor] = []
@@ -298,11 +341,68 @@ def triple_well_loss(model: nn.Module) -> torch.Tensor:
         if isinstance(m, QLinear):
             w = m.weight
             device = w.device
-            parts.append(triple_well_potential(w.float()).sum())
+            wb = w.float().view(w.shape[0], m.n_groups, m.group_size)
+            ab = m.well_a.float().view(w.shape[0], m.n_groups, 1)
+            parts.append(triple_well_potential(wb, ab).sum())
             n_total += w.numel()
     if not parts or n_total == 0:
         return torch.tensor(0.0, device=device or "cpu")
     return torch.stack(parts).sum() / n_total
+
+
+@torch.no_grad()
+def init_well_a(model: nn.Module, target_zero_frac: float) -> int:
+    """For each QLinear, fill `well_a` per (row, group) with
+    √3·quantile(|w|, target_zero_frac) so the saddle a/√3 lands at the
+    target |w| quantile. Result: ~target_zero_frac of init weights per
+    group sit inside the 0-basin naturally — the well analogue of
+    nearest_ternary_quantile's per-group cutoff.
+
+    Returns the count of QLinear modules updated. No-op (returns 0) when
+    target_zero_frac is outside (0, 1)."""
+    if not (0.0 < target_zero_frac < 1.0):
+        return 0
+    sqrt3 = math.sqrt(3.0)
+    n = 0
+    for m in model.modules():
+        if isinstance(m, QLinear):
+            w = m.weight.detach().float()
+            wb = w.view(w.shape[0], m.n_groups, m.group_size).abs()
+            cutoff = wb.quantile(float(target_zero_frac), dim=-1)
+            m.well_a.copy_((sqrt3 * cutoff).clamp_min(1e-6))
+            n += 1
+    return n
+
+
+@torch.no_grad()
+def rescale_well_for_deploy(model: nn.Module) -> int:
+    """Math-preserving rescale: per (row, group), `latent /= a` and
+    `scales *= a` using each module's `well_a`. Forward output
+    `latent · scales` is unchanged. Latents that drifted past ±a (e.g.
+    sat near the ±1 clamp) get clipped back to ±1 after the rescale,
+    which is a small information loss only for weights the well never
+    fully captured. After this, `well_a` is reset to 1.0 and
+    set_soft_mode + module_ternary classify against the ±1/3 (or
+    quantile) boundary as usual; finalize.py and chat.py work unchanged.
+
+    Returns count of QLinear modules actually rescaled (skips ones whose
+    well_a is already 1.0). Invalidates the per-module q cache."""
+    n = 0
+    for m in model.modules():
+        if not isinstance(m, QLinear):
+            continue
+        a = m.well_a.float()  # [out, n_groups]
+        if torch.equal(a, torch.ones_like(a)):
+            continue
+        out_f = m.weight.shape[0]
+        wb = m.weight.data.float().view(out_f, m.n_groups, m.group_size)
+        wb = (wb / a.unsqueeze(-1)).clamp_(-1.0, 1.0)
+        m.weight.data.copy_(wb.view(out_f, -1).to(m.weight.dtype))
+        m.scales.data.mul_(a.to(m.scales.dtype))
+        m.well_a.fill_(1.0)
+        m.invalidate_q_cache()
+        n += 1
+    return n
 
 
 def attractor_l2(model: nn.Module) -> torch.Tensor:

@@ -116,11 +116,16 @@ def load_model(model_id: str, ckpt_path: Path, device: str, dtype: torch.dtype,
                         tzf = v
                 except ValueError:
                     pass
-            set_soft_mode(model, alpha=1.0, target_zero_frac=tzf)
+            # Honor metadata alpha: a finalized deploy ckpt records alpha=1
+            # (hard ternary), but a mid-training dump may record alpha=0
+            # (training-time forward, useful for sanity checks before the
+            # well_a deploy rescale has been applied).
+            ckpt_alpha = float(meta.get("alpha", 1.0))
+            set_soft_mode(model, alpha=ckpt_alpha, target_zero_frac=tzf)
             cutoff_desc = (f"target_zero_frac={tzf} (per-(row, group) "
                            f"|w|-quantile cutoff)"
                            if tzf is not None else "fixed ±1/3 boundary")
-            print(f"[load] soft mode α=1, {cutoff_desc}")
+            print(f"[load] soft mode α={ckpt_alpha:.3f}, {cutoff_desc}")
         else:
             set_levels(model, int(meta.get("levels", 3)))
 

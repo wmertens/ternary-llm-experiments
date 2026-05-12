@@ -14,6 +14,7 @@ where p_rest_s = 1 - sum(p_s[topk_idx]).  Drop teacher constants.
 from __future__ import annotations
 
 import argparse
+import math
 import random
 import signal
 import sys
@@ -29,9 +30,10 @@ from tqdm import tqdm
 
 from .build_student import load_student
 from .qlinear import (QLinear, attractor_l2, clamp_qlinear_weights,
-                      module_ternary, nearest_ternary, quantize_levels,
-                      set_levels, set_soft_alpha, set_soft_mode,
-                      triple_well_loss)
+                      init_well_a, module_ternary, module_ternary_fixed,
+                      nearest_ternary, quantize_levels,
+                      rescale_well_for_deploy, set_levels, set_soft_alpha,
+                      set_soft_mode, triple_well_loss)
 from .teacher_floor import load_or_compute as load_teacher_floor
 
 
@@ -426,17 +428,37 @@ def quantized_codes(m: QLinear) -> torch.Tensor:
 def collect_qlinear_metrics(
     model: torch.nn.Module,
     prev_codes: dict[str, torch.Tensor],
-) -> tuple[dict[str, float], dict[str, torch.Tensor]]:
-    """Aggregate ternary-QAT health metrics across every QLinear module."""
+    prev_codes_fixed: dict[str, torch.Tensor] | None = None,
+) -> tuple[dict[str, float],
+           dict[str, torch.Tensor],
+           dict[str, torch.Tensor]]:
+    """Aggregate ternary-QAT health metrics across every QLinear module.
+
+    Returns (metrics, new_codes, new_codes_fixed). The two code dicts are
+    fed back as `prev_codes` and `prev_codes_fixed` on the next call:
+      * `flip_rate`: against the moving (quantile or ±1/3) classifier —
+        same alphabet the L2 forward / soft-stage bin counts use. In
+        well mode this is largely diagnostic since the forward isn't
+        contracted; under cycling it goes to ~0 because the cutoff
+        rescales with the |w| distribution.
+      * `flip_rate_fixed`: against a frozen per-(row, group) saddle at
+        well_a/√3. Catches actual basin migrations that the moving
+        classifier misses. Equivalent to the deploy-form classifier in
+        pre-rescale coordinates.
+    """
     new_codes: dict[str, torch.Tensor] = {}
+    new_codes_fixed: dict[str, torch.Tensor] = {}
     total = 0
     n_zero = 0
     n_extreme = 0
     n_flip = 0
     n_compared = 0
+    n_flip_fixed = 0
+    n_compared_fixed = 0
     scale_max = 0.0
     sum_scale_mean = 0.0
     n_layers = 0
+    prev_codes_fixed = prev_codes_fixed or {}
     for name, m in model.named_modules():
         if not isinstance(m, QLinear):
             continue
@@ -451,6 +473,13 @@ def collect_qlinear_metrics(
             n_flip += int((codes != prev).sum())
             n_compared += codes.numel()
         new_codes[name] = codes
+        if m.mode == "soft":
+            codes_fixed = module_ternary_fixed(m).to(torch.int8)
+            prev_f = prev_codes_fixed.get(name)
+            if prev_f is not None and prev_f.shape == codes_fixed.shape:
+                n_flip_fixed += int((codes_fixed != prev_f).sum())
+                n_compared_fixed += codes_fixed.numel()
+            new_codes_fixed[name] = codes_fixed
         sm = m.scales.detach().abs()
         scale_max = max(scale_max, sm.max().item())
         sum_scale_mean += sm.mean().item()
@@ -463,7 +492,9 @@ def collect_qlinear_metrics(
     }
     if n_compared:
         metrics["weights/flip_rate"] = n_flip / n_compared
-    return metrics, new_codes
+    if n_compared_fixed:
+        metrics["weights/flip_rate_fixed"] = n_flip_fixed / n_compared_fixed
+    return metrics, new_codes, new_codes_fixed
 
 
 @torch.no_grad()
@@ -659,7 +690,18 @@ def save_checkpoint(model, path: Path, model_id: str,
     always recorded (this is the only training mode now); finalize.py and
     chat.py read `mode`, `alpha`, and `target_zero_frac` to apply the
     matching ternary classifier at deployment."""
-    sd = {k: v.detach().cpu().contiguous() for k, v in model.state_dict().items()}
+    # SmolLM2 ties lm_head.weight to embed_tokens.weight; safetensors
+    # refuses shared storage, so clone the second occurrence per data_ptr.
+    sd: dict[str, torch.Tensor] = {}
+    seen: dict[int, str] = {}
+    for k, v in model.state_dict().items():
+        t = v.detach().cpu().contiguous()
+        ptr = t.data_ptr()
+        if ptr in seen:
+            t = t.clone()
+        else:
+            seen[ptr] = k
+        sd[k] = t
     metadata = {
         "levels": "3",
         "mode": "soft",
@@ -684,6 +726,17 @@ def main() -> None:
                          "interrupted.pt (auto-checkpointed every "
                          "--soft-checkpoint-every steps and on SIGINT) is "
                          "loaded automatically when present.")
+    ap.add_argument("--resume-from-best", action="store_true",
+                    help="On resume, restore model weights from the "
+                         "best_snapshot stored in interrupted.pt (the lowest "
+                         "ctrl-EMA point so far) instead of the latest "
+                         "weights. Optimizer momentum is kept (don't combine "
+                         "with --reset-opt-on-resume; that gives a "
+                         "zero-momentum Lion, which is noisy on first "
+                         "steps). Use when training has regressed past a "
+                         "known-good checkpoint within the same run. "
+                         "(The schedule's plateau detector is reset on any "
+                         "resume regardless of this flag.)")
     ap.add_argument("--reset-opt-on-resume", action="store_true",
                     help="When loading interrupted.pt, skip "
                          "opt.load_state_dict and start with a fresh "
@@ -726,6 +779,19 @@ def main() -> None:
                          "waste capacity rounding to 0. Skipped on --resume "
                          "(the saved ckpt already encodes the permutation).")
     ap.add_argument("--wd", type=float, default=0.05)
+    ap.add_argument("--wd-cycle-amp", type=float, default=0.0,
+                    help="Sinusoidal cycle amplitude on weight decay. "
+                         "effective_wd = wd · (1 + amp · sin(2π·step/period)), "
+                         "clamped ≥0. amp=1.0 swings 0↔2·wd; amp=1.5 swings "
+                         "0↔2.5·wd (with a clamp-to-zero plateau for the lower "
+                         "lobe). Default 0 = constant wd. Periodic squeeze "
+                         "toward zero gives the zero-basin a tighter peak "
+                         "without permanent over-decay.")
+    ap.add_argument("--wd-cycle-period", type=int, default=1200,
+                    help="Period of the wd cycle in opt steps. Only used when "
+                         "--wd-cycle-amp > 0. Default 1200 — much slower than "
+                         "the α cycle so the two go in/out of phase rather "
+                         "than reinforcing.")
     ap.add_argument("--warmup-steps", type=int, default=30)
     ap.add_argument("--max-grad-norm", type=float, default=1.0)
     ap.add_argument("--plateau-threshold", type=float, default=1e-3,
@@ -784,10 +850,12 @@ def main() -> None:
                          "boundary. Set ≤0 or ≥1 to disable (use fixed "
                          "±1/3 boundary instead, which over-zeros for "
                          "real Gaussian-ish weight distributions). With "
-                         "--soft-attractor=well the U penalty has fixed "
-                         "minima at ±1, so this flag only retargets the "
-                         "L2 attractor and the bin-occupancy metrics — "
-                         "it doesn't change the well's basin geometry.")
+                         "--soft-attractor=well this flag also calibrates "
+                         "each QLinear's per-(row, group) well_a at init "
+                         "(saddle a/√3 lands at the target |w| quantile) "
+                         "so the well's natural basin split matches the "
+                         "target — analogue of the L2 quantile cutoff but "
+                         "frozen at init.")
     ap.add_argument("--soft-attractor", choices=["l2", "well"], default="l2",
                     help="Form of the soft-stage attractor. 'l2' (default) "
                          "pairs the residual-contraction reparam "
@@ -809,6 +877,67 @@ def main() -> None:
                          "well potential's per-element values are roughly "
                          "comparable in magnitude to the L2 form so the "
                          "same coefficient is a reasonable starting point.")
+    ap.add_argument("--soft-alpha-init", type=float, default=0.0,
+                    help="Initial α (and so initial λ=λ_max·α) at the start "
+                         "of soft training. Default 0 means the well/L2 "
+                         "penalty is off at step 1 — but with KL≈teacher-"
+                         "floor at init, Lion's sign update is dominated "
+                         "by gradient noise and produces a warmup loss-"
+                         "overshoot. Setting alpha_init>0 (e.g. 0.03) gives "
+                         "Lion a coherent signal toward basin minima from "
+                         "step 1, eliminating that overshoot at the cost of "
+                         "slightly premature basin capture (which the per-"
+                         "group well_a calibration makes nearly free since "
+                         "init quantiles already define the 'natural' "
+                         "assignment). Ignored on resume — schedule state "
+                         "in interrupted.pt takes precedence.")
+    ap.add_argument("--soft-cycle-amp", type=float, default=0.0,
+                    help="Base sinusoidal cycle amplitude on the well-penalty "
+                         "α (period=--soft-cycle-period steps). Default 0 = "
+                         "disabled (monotonic schedule). Set e.g. 0.05 for a "
+                         "small base swing — gives boundary weights a periodic "
+                         "chance to re-cross saddles under KL guidance during "
+                         "dips, then re-locks them in their (possibly new) "
+                         "basins during peaks. Cycle modifies only the penalty "
+                         "coefficient (and the soft-forward via effective_α), "
+                         "not the schedule's α itself. Effective amplitude is "
+                         "scaled by --soft-cycle-grow as the schedule "
+                         "progresses.")
+    ap.add_argument("--soft-cycle-period", type=int, default=200,
+                    help="Period of the α cycle in opt steps. Only used "
+                         "when --soft-cycle-amp > 0. Default 200 — slow "
+                         "enough that Lion momentum (~10-step window) "
+                         "tracks the cycle, fast enough that the cycle "
+                         "completes between schedule bumps (which fire "
+                         "every patience × bump-count steady steps).")
+    ap.add_argument("--latent-noise-amp", type=float, default=0.0,
+                    help="Per-step Gaussian noise amplitude on QLinear "
+                         "latents (Langevin-style annealing). Per-(row, group) "
+                         "noise scale = amp · (1−α)^pow · well_a/√3 — i.e. "
+                         "noise is large early when α is small, decays to 0 "
+                         "at saturation, and per-group amplitude tracks the "
+                         "natural saddle-distance so all groups feel "
+                         "comparable saddle-crossing pressure. Default 0 = "
+                         "disabled. With this on, the cycle knobs should "
+                         "typically be 0 (noise is the annealing mechanism).")
+    ap.add_argument("--latent-noise-pow", type=float, default=2.0,
+                    help="Exponent on the (1−α) noise decay schedule. 1.0 = "
+                         "linear (noise drops smoothly through training). "
+                         "2.0 = quadratic (noise stays high through mid-α, "
+                         "drops sharply near saturation — more annealing "
+                         "time). Higher = more abrupt cooldown.")
+    ap.add_argument("--soft-cycle-grow", type=float, default=0.0,
+                    help="Quadratic growth factor on the cycle amplitude as "
+                         "the schedule progresses: cycle_amp = base · "
+                         "(1 + grow · (α/α_max)²). grow=0 → constant base "
+                         "amplitude (no taper, no growth). grow=4 → at α=α_max "
+                         "the cycle amplitude is 5× base (e.g. base 0.05 → "
+                         "0.25 swing → effective_α reaches ±0.25 around the "
+                         "schedule, clamped to [0,1]; near saturation this is "
+                         "full hard-ternary at peaks, which forces latent "
+                         "flips during the next trough). Quadratic so the "
+                         "early/mid α range stays calm and the aggression "
+                         "concentrates at the polish end where flips matter.")
     ap.add_argument("--soft-alpha-max", type=float, default=0.95,
                     help="α ceiling during distill. <1 keeps the (1-α) "
                          "slope on KL gradient flowing to the latent. The "
@@ -930,8 +1059,19 @@ def main() -> None:
         interrupted_state = torch.load(str(interrupted_path),
                                        map_location=args.device,
                                        weights_only=False)
-        miss_i, unexp_i = model.load_state_dict(interrupted_state["model"],
-                                                strict=False)
+        sd_to_load = interrupted_state["model"]
+        if args.resume_from_best:
+            best_sd = interrupted_state.get("best_snapshot")
+            if best_sd is None:
+                print("[resume] --resume-from-best: no best_snapshot in "
+                      "interrupted.pt; falling back to current model")
+            else:
+                cs = interrupted_state.get("ctrl_state") or {}
+                print(f"[resume] --resume-from-best: loading model from "
+                      f"best_snapshot (best_step={cs.get('best_step')}, "
+                      f"best_ema={cs.get('best_ema')})")
+                sd_to_load = best_sd
+        miss_i, unexp_i = model.load_state_dict(sd_to_load, strict=False)
         if miss_i:
             print(f"[resume] interrupted snapshot missing {len(miss_i)} model "
                   f"keys (showing 5): {miss_i[:5]}")
@@ -1015,11 +1155,24 @@ def main() -> None:
                              bump=args.soft_bump,
                              tolerance=args.soft_tolerance,
                              ema_alpha=args.soft_ema,
-                             slow_ratio=args.soft_slow_ratio)
+                             slow_ratio=args.soft_slow_ratio,
+                             alpha_init=args.soft_alpha_init)
     if (interrupted_state is not None
             and interrupted_state.get("soft_state")):
         soft_st = interrupted_state["soft_state"]
         schedule.load_state_dict(soft_st.get("schedule", {}))
+        # Always rebuild the plateau detector from current losses on resume.
+        # The saved slow_ema reflects the pre-SIGINT loss range; if the
+        # post-resume EMA happens to start below it, every step counts as
+        # "steady" and bumps fire continuously until slow_ema catches up.
+        # Resetting ensures the schedule re-anchors to current loss reality
+        # and only resumes bumping after slow_ema has stabilized.
+        print(f"[soft] resetting schedule ema/slow_ema/steady_count on "
+              f"resume (had slow_ema={schedule.slow_ema}, "
+              f"steady_count={schedule.steady_count})")
+        schedule.ema = None
+        schedule.slow_ema = None
+        schedule.steady_count = 0
         soft_step_offset = int(soft_st.get("next_step", 0))
         print(f"[soft] resuming at step {soft_step_offset} "
               f"α={schedule.alpha:.4f} bumps={schedule.bumps} "
@@ -1037,6 +1190,22 @@ def main() -> None:
                           target_zero_frac=target_zero_frac)
     print(f"[soft] {n_set} QLinear modules → soft mode")
     print(f"[soft]   attractor    = {args.soft_attractor}")
+    # Calibrate per-(row, group) well_a from init |w| quantile so the
+    # well's 0-basin lines up with target_zero_frac. Only on fresh start —
+    # on resume the saved well_a in state_dict is the right one to use,
+    # and re-init from current (drifted) weights would shift the basins
+    # mid-run.
+    if (args.soft_attractor == "well" and target_zero_frac is not None
+            and interrupted_state is None):
+        n_init = init_well_a(model, target_zero_frac)
+        print(f"[soft]   well_a       = init'd per-(row, group) for "
+              f"{n_init} modules from √3·|w|.quantile({target_zero_frac}); "
+              f"deploy rescale at end")
+    elif args.soft_attractor == "well":
+        print(f"[soft]   well_a       = "
+              + ("loaded from resume snapshot"
+                 if interrupted_state is not None
+                 else "1.0 (canonical ±1 wells; no zero-frac calibration)"))
     if target_zero_frac is not None:
         print(f"[soft]   zero_frac    = {target_zero_frac} "
               f"(per-(row, group) |w|-quantile cutoff)")
@@ -1137,8 +1306,9 @@ def main() -> None:
         best_snapshot = interrupted_state["best_snapshot"]
     else:
         best_snapshot = snapshot_to_cpu(model)
-    # Baseline for flip-rate tracking against the soft alphabet.
-    _, prev_codes = collect_qlinear_metrics(model, {})
+    # Baseline for flip-rate tracking against both the soft alphabet
+    # (moving quantile classifier) and the frozen well-saddle classifier.
+    _, prev_codes, prev_codes_fixed = collect_qlinear_metrics(model, {})
 
     soft_lr = args.lr
     model.train()
@@ -1173,8 +1343,15 @@ def main() -> None:
         last_step = step
         cur_lr = lr_at(step, args.soft_steps, soft_lr, args.warmup_steps,
                        floor=args.lr_floor)
+        if args.wd_cycle_amp > 0 and args.wd_cycle_period > 0:
+            wd_cycle_factor = max(0.0, 1.0 + args.wd_cycle_amp * math.sin(
+                2.0 * math.pi * global_step / args.wd_cycle_period))
+        else:
+            wd_cycle_factor = 1.0
+        effective_wd = args.wd * wd_cycle_factor
         for g in opt.param_groups:
             g["lr"] = cur_lr
+            g["weight_decay"] = effective_wd
         for _ in range(args.grad_accum):
             batch = next(it)
             tokens = batch["tokens"].to(args.device, non_blocking=True)
@@ -1216,7 +1393,25 @@ def main() -> None:
         # weights, not data, so no grad_accum scaling). λ(α) = λ_max·α —
         # zero at the start (no need to pull) and ramps up to λ_max at
         # α≈1, matching the schedule.
-        cur_lambda = args.soft_l2_coef * schedule.alpha
+        # Optional sinusoidal cycle on top of the schedule's α: gives
+        # boundary weights periodic re-assignment opportunities during
+        # dips. Amplitude scales quadratically with α/α_max via
+        # --soft-cycle-grow so polish-phase swings can reach hard
+        # ternary at peaks while early-phase swings stay small.
+        if args.soft_cycle_amp > 0 and args.soft_cycle_period > 0:
+            alpha_frac = min(1.0, schedule.alpha
+                             / max(args.soft_alpha_max, 1e-9))
+            grow_factor = 1.0 + args.soft_cycle_grow * (alpha_frac ** 2)
+            cycle_amp = args.soft_cycle_amp * grow_factor
+            cycle_offset = cycle_amp * math.sin(
+                2.0 * math.pi * global_step / args.soft_cycle_period)
+            effective_alpha = max(0.0, min(1.0,
+                                          schedule.alpha + cycle_offset))
+        else:
+            cycle_amp = 0.0
+            cycle_offset = 0.0
+            effective_alpha = schedule.alpha
+        cur_lambda = args.soft_l2_coef * effective_alpha
         penalty_val: float | None = None
         if cur_lambda > 0:
             if args.soft_attractor == "l2":
@@ -1233,6 +1428,29 @@ def main() -> None:
         opt.step()
         clamp_qlinear_weights(model)
         opt.zero_grad(set_to_none=True)
+        # Langevin-style latent noise: Gaussian kick scaled per-(row, group)
+        # by well_a/√3 (the basin's saddle distance), modulated by
+        # (1−α)^pow so it anneals to 0 at saturation. Applied after opt.step
+        # so it's a true position perturbation, not a gradient injection.
+        noise_sigma_base = 0.0
+        if args.latent_noise_amp > 0 and schedule.alpha < 1.0:
+            noise_sigma_base = (args.latent_noise_amp
+                                * (1.0 - schedule.alpha)
+                                ** args.latent_noise_pow)
+        if noise_sigma_base > 0:
+            sqrt3 = math.sqrt(3.0)
+            with torch.no_grad():
+                for m in model.modules():
+                    if not isinstance(m, QLinear):
+                        continue
+                    # well_a: [out_features, n_groups]; expand along the
+                    # in_features axis to per-element noise scale.
+                    a_per_group = (m.well_a / sqrt3).to(m.weight.dtype)
+                    scale = a_per_group.repeat_interleave(
+                        m.group_size, dim=-1)
+                    m.weight.add_(torch.randn_like(m.weight)
+                                  * (noise_sigma_base * scale))
+            clamp_qlinear_weights(model)
         global_step += 1
         step_loss = running / max(1, running_n)
         cur_alpha, steady_count, bumped = schedule.step(step_loss)
@@ -1298,6 +1516,18 @@ def main() -> None:
             if gap is not None:
                 writer.add_scalar("soft/gap", gap, tb_step)
             writer.add_scalar("soft/lambda", cur_lambda, tb_step)
+            if args.soft_cycle_amp > 0:
+                writer.add_scalar("soft/effective_alpha",
+                                  effective_alpha, tb_step)
+                writer.add_scalar("soft/cycle_offset",
+                                  cycle_offset, tb_step)
+                writer.add_scalar("soft/cycle_amp", cycle_amp, tb_step)
+            if args.wd_cycle_amp > 0:
+                writer.add_scalar("wd/cycle_factor", wd_cycle_factor, tb_step)
+                writer.add_scalar("wd/effective", effective_wd, tb_step)
+            if args.latent_noise_amp > 0:
+                writer.add_scalar("noise/sigma_base", noise_sigma_base,
+                                  tb_step)
             if L_T is not None:
                 writer.add_scalar("soft/L_T", L_T, tb_step)
             if penalty_val is not None:
@@ -1314,7 +1544,8 @@ def main() -> None:
                     writer.add_scalar(
                         "soft/grad_norm_penalty",
                         max(0.0, grad_norm - kl_grad_norm), tb_step)
-            qm, prev_codes = collect_qlinear_metrics(model, prev_codes)
+            qm, prev_codes, prev_codes_fixed = collect_qlinear_metrics(
+                model, prev_codes, prev_codes_fixed)
             for k, v in qm.items():
                 writer.add_scalar(k, v, tb_step)
             soft_qm, _ = collect_soft_metrics(model)
@@ -1415,6 +1646,12 @@ def main() -> None:
               f"NOT restoring — partial-α progress preserved. The "
               f"best snapshot is in best_snapshot in memory; SIGINT "
               f"now to persist it via interrupted.pt.")
+    if args.soft_attractor == "well":
+        n_rescaled = rescale_well_for_deploy(model)
+        if n_rescaled > 0:
+            print(f"[soft] rescaled {n_rescaled} QLinear modules from "
+                  f"per-group well minima to deploy codebook ±1 "
+                  f"(latent /= a, scales *= a; well_a reset to 1.0)")
     soft_ckpt = args.out / "stage_soft.safetensors"
     save_checkpoint(model, soft_ckpt, args.model, args.scale_group_size,
                     alpha=schedule.alpha,
