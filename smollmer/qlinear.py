@@ -232,7 +232,10 @@ class QLinear(nn.Linear):
         q_blocks = q_ste.view(self.out_features, self.n_groups, self.group_size)
         scales_b = self.scales.unsqueeze(-1).to(q_blocks.dtype)
         w_scaled = (q_blocks * scales_b).view(self.out_features, self.in_features)
-        y = F.linear(x, w_scaled)
+        # F.linear requires matching dtypes; outside autocast (or with
+        # latent-dtype != activation dtype) we have to align. .to() is a
+        # no-op when dtypes already match.
+        y = F.linear(x, w_scaled.to(dtype=x.dtype))
         if self.bias is not None:
             y = y + self.bias
         return y

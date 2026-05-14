@@ -42,12 +42,22 @@ _INTERRUPT = {"flag": False}
 
 def _install_sigint_handler() -> None:
     def handler(signum, frame):
+        # Flag is set BEFORE any I/O so a broken-pipe print can't lose the
+        # save signal — happens when stdout is piped to a tee that died of
+        # the same SIGINT (same foreground process group). All prints in
+        # this handler are wrapped to make signal delivery best-effort.
         if _INTERRUPT["flag"]:
-            print("\n[!!] second SIGINT — hard exit, no save", flush=True)
+            try:
+                print("\n[!!] second SIGINT — hard exit, no save", flush=True)
+            except Exception:
+                pass
             sys.exit(130)
         _INTERRUPT["flag"] = True
-        print("\n[!] SIGINT — finishing current step, then saving resume state. "
-              "Press Ctrl-C again to hard-exit.", flush=True)
+        try:
+            print("\n[!] SIGINT — finishing current step, then saving resume "
+                  "state. Press Ctrl-C again to hard-exit.", flush=True)
+        except Exception:
+            pass
     signal.signal(signal.SIGINT, handler)
 
 
@@ -55,6 +65,7 @@ def save_resume(path: Path, model, opt, next_step: int,
                 best_snapshot: dict[str, torch.Tensor] | None,
                 ctrl_state: dict | None,
                 run_name: str | None,
+                samples_consumed: int = 0,
                 soft_state: dict | None = None) -> None:
     """Atomic write of the resume snapshot. Used both by SIGINT and by the
     periodic auto-checkpoint — same file (`interrupted.pt`), latest wins.
@@ -64,6 +75,7 @@ def save_resume(path: Path, model, opt, next_step: int,
         "model": {k: v.detach().cpu() for k, v in model.state_dict().items()},
         "opt": opt.state_dict(),
         "next_step": int(next_step),
+        "samples_consumed": int(samples_consumed),
         "best_snapshot": best_snapshot,
         "ctrl_state": ctrl_state,
         "run_name": run_name,
@@ -620,11 +632,18 @@ def embed_drift_l2(model: torch.nn.Module,
 
 
 class ShardedDataset(IterableDataset):
-    def __init__(self, shard_dir: Path, seed: int = 0) -> None:
+    def __init__(self, shard_dir: Path, seed: int = 0,
+                 start_skip: int = 0) -> None:
         self.paths = sorted(Path(shard_dir).glob("shard_*.safetensors"))
         if not self.paths:
             raise FileNotFoundError(f"no shard_*.safetensors under {shard_dir}")
         self.seed = seed
+        # Samples to fast-forward through on the next __iter__. Since the
+        # rng is seeded deterministically (seed + wid*7919), walking the
+        # inner loops without yielding reproduces the exact pre-skip
+        # ordering. DataLoader pickles `self` to the worker, so this
+        # survives the fork.
+        self.start_skip = int(start_skip)
 
     def __iter__(self):
         worker = torch.utils.data.get_worker_info()
@@ -632,6 +651,12 @@ class ShardedDataset(IterableDataset):
         nworkers = worker.num_workers if worker else 1
         rng = random.Random(self.seed + wid * 7919)
         my_paths = self.paths[wid::nworkers] or self.paths
+        # DataLoader round-robins workers, so each worker emits ~1/nworkers
+        # of the global stream. Split the skip across workers using the
+        # round-robin remainder so total skipped == start_skip.
+        my_skip = (self.start_skip // nworkers
+                   + (1 if wid < (self.start_skip % nworkers) else 0))
+        produced = 0
         while True:
             order = list(my_paths)
             rng.shuffle(order)
@@ -641,6 +666,10 @@ class ShardedDataset(IterableDataset):
                 idx_order = list(range(S))
                 rng.shuffle(idx_order)
                 for i in idx_order:
+                    if produced < my_skip:
+                        produced += 1
+                        continue
+                    produced += 1
                     yield {
                         "tokens": shard["tokens"][i].long(),
                         "topk_idx": shard["topk_idx"][i].long(),
@@ -762,6 +791,27 @@ def main() -> None:
     ap.add_argument("--lr-floor", type=float, default=0.1,
                     help="Cosine LR decays to floor·base_lr by --soft-steps. "
                          "Default 0.1; 1.0 disables decay (flat LR).")
+    ap.add_argument("--opt-warmup-passes", type=int, default=0,
+                    help="Run N forward+backward+opt.step() passes with lr=0 "
+                         "BEFORE the real training loop, so (m, v) start from "
+                         "averaged-grad statistics instead of cold zeros. "
+                         "Params don't move (lr=0). For AdamW this mostly "
+                         "smooths v_hat (bias correction handles cold v in "
+                         "1 step, but averaging dampens noisy-direction "
+                         "outliers); for Lion this warms the momentum buffer "
+                         "toward grad-mean direction. Each pass costs one "
+                         "training step's compute. Default 0 (off).")
+    ap.add_argument("--scale-lr-mult", type=float, default=None,
+                    help="LR multiplier for QLinear .scales parameters "
+                         "(separate optimizer group). Scales receive full "
+                         "KL grad (no (1-α) attenuation) and multiply the "
+                         "output directly, so a sign-momentum or AdamW step "
+                         "at the latent LR can dominate the loss trajectory "
+                         "and walk weights out of a good basin on resume. "
+                         "Default: 1.0/scale_group_size (~0.016 at gs=64), "
+                         "matching the intuition that each scale spans N "
+                         "ternary columns so a single scale update has "
+                         "~N× the leverage of one latent update.")
     ap.add_argument("--scale-group-size", type=int, default=128,
                     help="Per-(row, column-group) scale granularity for "
                          "QLinear. Each group of N consecutive input columns "
@@ -1092,15 +1142,33 @@ def main() -> None:
     if args.compile:
         model = torch.compile(model)
 
+    scale_lr_mult = (args.scale_lr_mult if args.scale_lr_mult is not None
+                     else 1.0 / float(args.scale_group_size))
+    scale_param_ids = {id(m.scales) for m in model.modules()
+                       if isinstance(m, QLinear)}
+    scale_params, other_params = [], []
+    for p in model.parameters():
+        if not p.requires_grad:
+            continue
+        (scale_params if id(p) in scale_param_ids else other_params).append(p)
+    param_groups = [
+        {"params": other_params, "lr": args.lr, "lr_mult": 1.0,
+         "name": "latents"},
+        {"params": scale_params, "lr": args.lr * scale_lr_mult,
+         "lr_mult": scale_lr_mult, "name": "scales"},
+    ]
     if args.optimizer == "lion":
-        opt = Lion32(model.parameters(), lr=args.lr, weight_decay=args.wd)
+        opt = Lion32(param_groups, lr=args.lr, weight_decay=args.wd)
     elif args.optimizer == "adamw":
-        opt = AdamW32(model.parameters(), lr=args.lr, weight_decay=args.wd)
+        opt = AdamW32(param_groups, lr=args.lr, weight_decay=args.wd)
     elif args.optimizer == "cautious-adamw":
-        opt = CautiousAdamW(model.parameters(), lr=args.lr, weight_decay=args.wd)
+        opt = CautiousAdamW(param_groups, lr=args.lr, weight_decay=args.wd)
     else:
         raise ValueError(f"unknown optimizer: {args.optimizer}")
     print(f"[opt] {args.optimizer} lr={args.lr} wd={args.wd} (fp32 state)")
+    print(f"[opt]   latents : {len(other_params)} tensors @ lr={args.lr:g}")
+    print(f"[opt]   scales  : {len(scale_params)} tensors @ "
+          f"lr={args.lr * scale_lr_mult:g} (mult={scale_lr_mult:g})")
 
     if interrupted_state is not None:
         if args.reset_opt_on_resume:
@@ -1109,9 +1177,17 @@ def main() -> None:
         else:
             opt.load_state_dict(interrupted_state["opt"])
         global_step = int(interrupted_state.get("next_step", 0))
-        print(f"[resume] continuing at step {global_step}")
+        # Older checkpoints (pre-data-position) lack samples_consumed; fall
+        # back to inferring from step × grad_accum × batch_size, which is
+        # exact when grad_accum/batch_size haven't changed across resume.
+        samples_consumed = int(interrupted_state.get(
+            "samples_consumed",
+            global_step * args.grad_accum * args.batch_size))
+        print(f"[resume] continuing at step {global_step}, "
+              f"data position = {samples_consumed} samples")
     else:
         global_step = 0
+        samples_consumed = 0
 
     tb_root = args.tb_dir if args.tb_dir is not None else (args.out / "tb")
     if interrupted_state is not None and interrupted_state.get("run_name"):
@@ -1124,7 +1200,12 @@ def main() -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     print(f"[tb] run_dir={run_dir} (view: tensorboard --logdir {tb_root})")
 
-    ds = ShardedDataset(args.cache_dir, seed=args.seed)
+    ds = ShardedDataset(args.cache_dir, seed=args.seed,
+                        start_skip=samples_consumed)
+    if samples_consumed:
+        print(f"[data] fast-forwarding {samples_consumed} samples to resume "
+              f"position (worker will load shards but skip until counter "
+              f"catches up)")
     dl = DataLoader(ds, batch_size=args.batch_size,
                     num_workers=args.num_workers,
                     pin_memory=(args.device.startswith("cuda")),
@@ -1236,9 +1317,7 @@ def main() -> None:
               f"steady={schedule.steady_count}, "
               f"slow_ema={schedule.slow_ema}")
 
-    soft_tb_dir = run_dir / "stage_soft"
-    soft_tb_dir.mkdir(parents=True, exist_ok=True)
-    writer = SummaryWriter(log_dir=str(soft_tb_dir),
+    writer = SummaryWriter(log_dir=str(run_dir),
                            purge_step=soft_step_offset if soft_step_offset else None)
     writer.add_text(
         "stage",
@@ -1339,6 +1418,41 @@ def main() -> None:
             if torch.isfinite(w_flat).all():
                 writer.add_histogram(f"soft/hist/{name}", w_flat,
                                      soft_step_offset, bins=64)
+    # Optimizer (m, v) pre-warm: run K forward+backward+opt.step() passes
+    # with lr=0 so the optimizer's moment buffers start from averaged
+    # gradient statistics. Params don't move (lr=0); only opt state updates.
+    # Skipped on resume since (m, v) are restored from the checkpoint.
+    if args.opt_warmup_passes > 0 and interrupted_state is None:
+        print(f"[opt-warmup] {args.opt_warmup_passes} forward+backward "
+              f"passes at lr=0 to populate (m, v)")
+        saved_lrs = [g["lr"] for g in opt.param_groups]
+        for g in opt.param_groups:
+            g["lr"] = 0.0
+        warm_bar = tqdm(range(args.opt_warmup_passes),
+                        desc="opt-warmup", dynamic_ncols=True, leave=False)
+        for _ in warm_bar:
+            opt.zero_grad(set_to_none=True)
+            for _ in range(args.grad_accum):
+                batch = next(it)
+                tokens = batch["tokens"].to(args.device, non_blocking=True)
+                topk_idx = batch["topk_idx"].to(args.device, non_blocking=True)
+                topk_prob = batch["topk_prob"].to(args.device, non_blocking=True)
+                rest_mass = batch["rest_mass"].to(args.device, non_blocking=True)
+                ctx = (torch.amp.autocast(args.device.split(":")[0],
+                                          dtype=autocast_dtype)
+                       if autocast_dtype is not None
+                       else torch.amp.autocast(args.device.split(":")[0],
+                                               enabled=False))
+                with ctx:
+                    out = model(tokens)
+                    loss = kl_with_rest(out.logits, topk_idx, topk_prob,
+                                        rest_mass)
+                (loss / args.grad_accum).backward()
+            opt.step()
+            opt.zero_grad(set_to_none=True)
+        for g, lr in zip(opt.param_groups, saved_lrs):
+            g["lr"] = lr
+        print(f"[opt-warmup] done; (m, v) populated, params unchanged")
     for step in pbar:
         last_step = step
         cur_lr = lr_at(step, args.soft_steps, soft_lr, args.warmup_steps,
@@ -1350,7 +1464,7 @@ def main() -> None:
             wd_cycle_factor = 1.0
         effective_wd = args.wd * wd_cycle_factor
         for g in opt.param_groups:
-            g["lr"] = cur_lr
+            g["lr"] = cur_lr * g.get("lr_mult", 1.0)
             g["weight_decay"] = effective_wd
         for _ in range(args.grad_accum):
             batch = next(it)
@@ -1497,6 +1611,7 @@ def main() -> None:
             if ctrl.ema is not None:
                 writer.add_scalar("loss/ema", ctrl.ema, tb_step)
             writer.add_scalar("lr", cur_lr, tb_step)
+            writer.add_scalar("lr/scales", cur_lr * scale_lr_mult, tb_step)
             writer.add_scalar("global_step", float(global_step), tb_step)
             writer.add_scalar("soft/alpha", cur_alpha, tb_step)
             writer.add_scalar("soft/steady_count",
@@ -1580,6 +1695,7 @@ def main() -> None:
         # crash leaves a recent resume point. Same path as the SIGINT save —
         # latest wins; the atomic .tmp/rename in save_resume means a crash
         # mid-write leaves the previous good snapshot intact.
+        samples_at_save = (step + 1) * args.grad_accum * args.batch_size
         if (args.soft_checkpoint_every > 0
                 and (step + 1) % args.soft_checkpoint_every == 0):
             soft_state = {"schedule": schedule.state_dict(),
@@ -1587,6 +1703,7 @@ def main() -> None:
                           "saturation_step": saturation_step}
             save_resume(interrupted_path, model, opt, step + 1,
                         best_snapshot, ctrl.state_dict(), run_name,
+                        samples_consumed=samples_at_save,
                         soft_state=soft_state)
             tqdm.write(f"[ckpt] auto-wrote {interrupted_path} at step "
                        f"{step + 1}")
@@ -1597,6 +1714,7 @@ def main() -> None:
                           "saturation_step": saturation_step}
             save_resume(interrupted_path, model, opt, step + 1,
                         best_snapshot, ctrl.state_dict(), run_name,
+                        samples_consumed=samples_at_save,
                         soft_state=soft_state)
             writer.flush()
             writer.close()

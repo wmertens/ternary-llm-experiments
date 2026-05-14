@@ -1,0 +1,3409 @@
+╭─── Claude Code v2.1.123 ─────────────────────────────────────────────────────╮
+│                                                    │ Tips for getting        │
+│                 Welcome back w00t!                 │ started                 │
+│                                                    │ Run /init to create a … │
+│                       ▐▛███▜▌                      │ ─────────────────────── │
+│                      ▝▜█████▛▘                     │ What's new              │
+│                        ▘▘ ▝▝                       │ Added `CLAUDE_CODE_SES… │
+│  Opus 4.7 · Claude Max · wout.mertens@gmail.com's  │ Added `CLAUDE_CODE_DIS… │
+│  Organization                                      │ Added a "Pasting…" foo… │
+│                 ~/Projects/smollmer                │ /release-notes for more │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+✻ Conversation compacted (ctrl+o for history)
+
+
+● Run D exited cleanly. Final state in
+  ckpts.prog-D-lr3e-4-mspr50/interrupted.pt:
+
+  - Live state: step 3935, round 35/64, EMA 1.761 (regressed)
+  - best_snapshot preserved: model weights at step 2085, EMA 1.6222 (below
+  L_T=1.6348 — the good point)
+  - ctrl_state preserved: best_step=2085, best_ema=1.6222
+
+  The good news: the recovery point is right there in the same file. The bad
+  news: progressive_distill.py doesn't have distill.py's --resume-from-best flag
+   — to actually restart from the step-2085 state you'd need either:
+  1. Port that flag (small change), then resume with --resume-from-best.
+  2. Manually swap best_snapshot into model in the ckpt and re-save.
+  3. Dump the best_snapshot directly to a safetensors via a small script and
+  warm-start a new run with --resume <that.safetensors>.
+
+  Up to you. For now the file is on disk, no further runs in flight, GPU is
+  free. Let me know what's next.
+
+✻ Churned for 48s
+
+❯ /compact                                                                      
+  ⎿  Compacted (ctrl+o to see full summary)
+  ⎿  Referenced file progressive-quantization.md
+  ⎿  Referenced file progressive_distill.py
+  ⎿  Read permute.py (101 lines)
+  ⎿  Read build_student.py (112 lines)
+  ⎿  Referenced file qlinear.py
+
+❯ write a run.sh script in that ckpts dir that resumes the run and logs to      
+  log.txt in that dir                                                           
+
+  Searched for 2 patterns, listed 2 directories (ctrl+o to expand)
+
+● Bash(grep -rn "progressive_distill"
+      /home/wmertens/Projects/smollmer/.bash_history
+      /home/wmertens/.bash_history 2>/dev/null | tail -10; echo ---; history
+      2>/dev/null…)
+  ⎿  ---
+
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+● Write(smollmer/ckpts.prog-D-lr3e-4-mspr50/run.sh)
+  ⎿  Wrote 19 lines to smollmer/ckpts.prog-D-lr3e-4-mspr50/run.sh
+       2 # Resume Run D progressive distillation from interrupted.pt.
+       3 # Logs (append) to log.txt in this dir. TB run_name is restored 
+         from the ckpt.
+       4 set -euo pipefail
+       5 
+       7 cd /home/wmertens/Projects/smollmer
+       8 export LD_LIBRARY_PATH=/run/opengl-driver/lib${LD_LIBRARY_PATH:+
+         :$LD_LIBRARY_PATH}
+       9 
+      10 CKPT_DIR=smollmer/ckpts.prog-D-lr3e-4-mspr50
+     … +11 lines (ctrl+o to expand)
+
+● Bash(chmod +x /home/wmertens/Projects/smollmer/smollmer/ckpts.prog-D-lr3e-4-ms
+      pr50/run.sh && ls -la
+      /home/wmertens/Projects/smollmer/smollmer/ckpts.prog-D-lr3e-4-msp…)
+  ⎿  total 2362865
+     drwxr-xr-x  2 wmertens users          0 May 12 22:38 .
+     drwxr-xr-x 29 wmertens users          0 May 12 17:24 ..
+     … +2 lines (ctrl+o to expand)
+
+● Wrote ckpts.prog-D-lr3e-4-mspr50/run.sh (executable). It cds to the repo root,
+   sets the NixOS CUDA loader path, and resumes from interrupted.pt with the
+  original Run D settings (lr=3e-4, min-steps-per-round=50; other progressive
+  params at defaults), appending output to log.txt alongside the ckpt. The TB
+  run_name is restored from the checkpoint automatically, so the TB run
+  continues in place rather than forking.
+
+✻ Cogitated for 53s
+
+※ recap: Goal: progressive ternary distillation of SmolLM2-135M. Run D was sigint'd after late-round regression; step-2085 best_snapshot (EMA 1.6222) is preserved in interrupted.pt, and ckpts.prog-D-lr3e-4-mspr50/run.sh now resumes the run. Next: decide whether to launch run.sh or pivot to a fresh run from best_snapshot. (disable recaps in /config)
+
+❯ $ ./run.sh                                                                    
+  [build] loading HuggingFaceTB/SmolLM2-135M, group_size=64, permute=False      
+  Loading weights: 100%|██████████| 272/272 [00:00<00:00, 769.71it/s]           
+  [build] 210 QLinear modules (latent dtype torch.float16)                      
+  [build] gradient checkpointing enabled                                        
+  [progressive] c=0.85; soft mode α=0; 210 QLinears w/ progressive buffers;     
+  rescaled 0 (fresh_start=False)                                                
+  [opt] cautious-adamw lr=0.0003 wd=0.001 scale_lr_mult=0.015625                
+  Traceback (most recent call last):                                            
+    File "<frozen runpy>", line 198, in _run_module_as_main                     
+    File "<frozen runpy>", line 88, in _run_code                                
+    File "/home/wmertens/Projects/smollmer/smollmer/progressive_distill.py",    
+  line 896, in <module>                                                         
+      main()                                                                    
+    File "/home/wmertens/Projects/smollmer/smollmer/progressive_distill.py",    
+  line 558, in main                                                             
+      with safe_open(str(args.resume), framework="pt") as f:                    
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^                          
+  safetensors_rust.SafetensorError: Error while deserializing header: header    
+  too large                                                                     
+
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+● The --resume flag is for safetensors warm-starts; interrupted-run resume is
+  auto-detected from <out>/interrupted.pt (see line 499-500, 565). Removing the
+  --resume line.
+
+● Update(smollmer/ckpts.prog-D-lr3e-4-mspr50/run.sh)
+  ⎿  Removed 1 line
+      13  exec python -u -m smollmer.progressive_distill \
+      14    --cache-dir smollmer/cache \
+      15    --out "$CKPT_DIR" \
+      16 -  --resume "$CKPT_DIR/interrupted.pt" \                        
+      16    --lr 3e-4 \
+      17    --min-steps-per-round 50 \
+      18    2>&1 | tee -a "$LOG"
+
+● Re-run ./run.sh — it will pick up interrupted.pt automatically (step 3935,
+  round 35, with the best_snapshot from step 2085 preserved in ctrl_state).
+
+✻ Crunched for 22s
+
+❯ $ ./run.sh                                                                    
+  [build] loading HuggingFaceTB/SmolLM2-135M, group_size=64, permute=False      
+  Loading weights: 100%|██████████| 272/272 [00:00<00:00, 7045.29it/s]          
+  [build] 210 QLinear modules (latent dtype torch.float16)                      
+  [build] gradient checkpointing enabled                                        
+  [progressive] c=0.85; soft mode α=0; 210 QLinears w/ progressive buffers;     
+  rescaled 0 (fresh_start=False)                                                
+  [opt] cautious-adamw lr=0.0003 wd=0.001 scale_lr_mult=0.015625                
+  [resume] smollmer/ckpts.prog-D-lr3e-4-mspr50/interrupted.pt at step 3935,     
+  round 35, committed_frac=0.5469                                               
+  [progressive] L_T = 1.6348                                                    
+  [tb] smollmer/ckpts.prog-D-lr3e-4-mspr50/tb/1778594380 prog CAdamW lr3e-4     
+  wu400 c0.85 zf0.38 gap0.10 mspr50 p50                                         
+  progressive: 0it [00:02, ?it/s]                                               
+  Traceback (most recent call last):                                            
+    File "<frozen runpy>", line 198, in _run_module_as_main                     
+    File "<frozen runpy>", line 88, in _run_code                                
+    File "/home/wmertens/Projects/smollmer/smollmer/progressive_distill.py",    
+  line 896, in <module>                                                         
+      main()                                                                    
+    File "/home/wmertens/Projects/smollmer/smollmer/progressive_distill.py",    
+  line 691, in main                                                             
+      raise RuntimeError(                                                       
+  RuntimeError: non-finite loss at step 3936, round 35, loss=nan                
+  Read 1 file (ctrl+o to expand)
+
+● The first forward pass on the resumed state produces NaN. That's worse than
+  the EMA-1.76 regression we saw at SIGINT — the saved model is in a numerically
+   broken state. Let me check if NaNs are actually present in the saved weights.
+
+● Bash(cd /home/wmertens/Projects/smollmer && export LD_LIBRARY_PATH=/run/opengl
+      -driver/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH} && python -c "
+      import torch…)
+  ⎿  Error: Exit code 1
+     Traceback (most recent call last):
+       File "<string>", line 2, in <module>
+         import torch
+     ModuleNotFoundError: No module named 'torch'
+
+● Bash(cd /home/wmertens/Projects/smollmer && which python; ls .venv/bin/python
+      2>/dev/null; ls venv/bin/python 2>/dev/null; head -1
+      smollmer/ckpts.prog-D-lr3e-4-mspr5…)
+  ⎿  /home/wmertens/.nix-profile/bin/python
+     .venv/bin/python
+     #!/usr/bin/env bash
+     … +21 lines (ctrl+o to expand)
+  ⎿  Shell cwd was reset to /home/wmertens/Projects/smollmer/smollmer
+
+● Bash(cd /home/wmertens/Projects/smollmer && export LD_LIBRARY_PATH=/run/opengl
+      -driver/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH} && .venv/bin/python -c "
+      import torch…)
+  ⎿  top keys: ['model', 'opt', 'next_step', 'samples_consumed', 'best_snap
+     shot', 'ctrl_state', 'run_name', 'soft_state']
+     ctrl_state: {'ema': 1.761313083596434, 'best_ema': 1.6221946775798197,
+     … +11 lines (ctrl+o to expand)
+  ⎿  Shell cwd was reset to /home/wmertens/Projects/smollmer/smollmer
+
+● Both saved states are clean (no NaN/Inf). The live model at step 3935 is
+  structurally fine — but the forward pass NaNs anyway. That points to fp16/bf16
+   numerical fragility on this degraded weight state: training was already in a
+  runaway path (EMA 1.62 → 1.76 between steps 2085 and 3935), and resume happens
+   to land on a batch the degraded model can't handle.
+
+  Two clean options:
+
+  (a) Quick test — try resume with fp32 autocast to see if it's purely a
+  precision issue (low cost, but doesn't fix the underlying regression):
+  # add to run.sh: --autocast-dtype none
+
+  (b) Pivot to Run E from best_snapshot — extract the step-2085 weights into a
+  safetensors warm-start file, start a fresh run in a new ckpt dir. This is what
+   the original "best ckpts dir" plan was for. The --resume <safetensors> path
+  already supports this (lines 557-564) — it does a warm-start without restoring
+   opt/step/round, so you get a clean start with the good weights.
+
+  Sketch for (b):
+
+  # Extract best_snapshot to safetensors
+  .venv/bin/python -c "
+  import torch
+  from safetensors.torch import save_file
+  st = torch.load('smollmer/ckpts.prog-D-lr3e-4-mspr50/interrupted.pt', 
+  map_location='cpu', weights_only=False)
+  save_file(st['best_snapshot'], 
+  'smollmer/ckpts.prog-D-lr3e-4-mspr50/best_step2085.safetensors',
+            metadata={'best_step':'2085','best_ema':'1.6222'})
+  print('saved best_step2085.safetensors')
+  "
+
+  # New run in fresh dir with mitigations
+  python -u -m smollmer.progressive_distill \
+    --cache-dir smollmer/cache \
+    --out smollmer/ckpts.prog-E-from-2085 \
+    --resume smollmer/ckpts.prog-D-lr3e-4-mspr50/best_step2085.safetensors \
+    --lr 2e-4 \                 # softer than 3e-4
+    --min-steps-per-round 100 \ # more time per round
+    --commit-gap-threshold 0.03 # tighter gap before committing
+
+  Which path? I lean (b) — (a) might let it limp forward, but the trajectory was
+   already bad and you'd be paying inference time on a regressing run. (b)
+  preserves the only weights we have that beat L_T.
+
+✻ Brewed for 1m 13s
+
+※ recap: Goal: ternarize SmolLM2-135M via progressive commits. Resuming Run D from interrupted.pt now NaNs on the first forward (live model already regressed past EMA 1.76). Next: extract the step-2085 best_snapshot to safetensors and start Run E with softer settings. (disable recaps in /config)
+
+❯ I'm not convinced that the trajectory was bad, so we'll continue with a       
+
+● Update(smollmer/ckpts.prog-D-lr3e-4-mspr50/run.sh)
+  ⎿  Added 1 line
+      16    --out "$CKPT_DIR" \
+      17    --lr 3e-4 \
+      18    --min-steps-per-round 50 \
+      19 +  --autocast-dtype none \                                      
+      20    2>&1 | tee -a "$LOG"
+
+● Added --autocast-dtype none so the forward runs in fp32. Re-run ./run.sh — if
+  the first batch produces a finite loss, the NaN was a bf16 fragility and
+  training can continue. (The fp16 latent weights stay fp16 — autocast off just
+  stops casting activations to bf16.)
+
+✻ Crunched for 7s
+
+❯ /remote-control 
+  ⎿  Remote Control connecting…
+
+  /remote-control is active · Code in CLI or at https://claude.ai/code/session_01PpPQ8RNsXMnJki25mT4Bim
+
+❯ it works but it's extremely slow, 3-4s/it                                     
+
+● That tracks — bf16 has 8-bit exponent so it shouldn't overflow at activation
+  magnitudes, but its 7-bit mantissa means near-equal logits in softmax lose
+  enough precision to produce NaN downstream. fp32 avoids it but you pay ~2× on
+  these GPUs. There's no clean middle ground (fp16 has less range than bf16 —
+  strictly worse).
+
+  A few options if 3-4 s/it is too painful:
+
+  1. Eat it for now, watch for recovery. If the trajectory was actually fine and
+   bf16 was just a fragility on a particular batch, EMA should drop back into
+  reasonable territory within a few hundred steps. Then SIGINT and re-resume
+  with bf16 — the gate state + step-in-round are preserved, so it picks up
+  seamlessly. ~500 fp32 steps = ~30 min, worth knowing.
+  2. Skip-and-continue on NaN. Cheaper change: catch the NaN at line 690-693,
+  drop the batch, log it. If only an occasional bf16-fragile batch triggers it,
+  you'd run at full speed minus the rare skip. Risk: masks real divergence. Easy
+   to add as a --skip-nonfinite-batches flag.
+  3. Lower grad-accum to reclaim wall-clock. You're at --grad-accum 8 
+  --batch-size 2. Dropping to --grad-accum 4 halves step time but doubles
+  steps-per-round in effect. Net throughput is the same; only useful if you want
+   more frequent gate checks.
+
+  My pick: (1). Let it run fp32 for ~500 steps, see whether EMA actually drops
+  back; that's the answer to "was the trajectory bad." If yes, SIGINT and swap
+  back to bf16 cheaply. If no, (b) gets stronger.
+
+✻ Cogitated for 30s
+
+※ recap: Resuming Run D progressive distillation from interrupted.pt; bf16 NaN'd on first batch, fp32 runs but at 3-4 s/it. Next: let fp32 run ~500 steps to see if EMA recovers, then decide whether to swap back to bf16 or pivot to Run E from best_snapshot. (disable recaps in /config)
+
+❯ looks like it ran out of memory when committing :( It didn't do that before   
+  the resume. Maybe there are structures that could be freed?                   
+                                                                                
+  [commit] round 36/64 reason=stable + gap=0.0495<0.05; committed 1658880;      
+  total_frac=0.5625; max_per_group=36; q_err_mean=0.4088; targets               
+  neg/zero/pos=0.50/0.01/0.50                                                   
+  progressive: 550it [42:40,  4.66s/it, loss=1.7140, ema=1.7046, round=36/64,   
+  cf=0.562, in_round=350, lr=3.00e-04]                                          
+  Traceback (most recent call last):                                            
+    File "<frozen runpy>", line 198, in _run_module_as_main                     
+    File "<frozen runpy>", line 88, in _run_code                                
+    File "/home/wmertens/Projects/smollmer/smollmer/progressive_distill.py",    
+  line 896, in <module>                                                         
+      main()                                                                    
+    File "/home/wmertens/Projects/smollmer/smollmer/progressive_distill.py",    
+  line 694, in main                                                             
+      (loss / args.grad_accum).backward()                                       
+    File "/home/wmertens/Projects/smollmer/.venv/lib/python3.12/site-packages/t 
+  orch/_tensor.py", line 631, in backward                                       
+      torch.autograd.backward(                                                  
+    File "/home/wmertens/Projects/smollmer/.venv/lib/python3.12/site-packages/t 
+  orch/autograd/__init__.py", line 381, in backward                             
+      _engine_run_backward(                                                     
+    File "/home/wmertens/Projects/smollmer/.venv/lib/python3.12/site-packages/t 
+  orch/autograd/graph.py", line 869, in _engine_run_backward                    
+      return Variable._execution_engine.run_backward(  # Calls into the C++     
+  engine to run the backward pass                                               
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ 
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^                                                  
+  torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 192.00 MiB. GPU 
+   0 has a total capacity of 5.64 GiB of which 202.25 MiB is free. Including    
+  non-PyTorch memory, this process has 5.42 GiB memory in use. Of the allocated 
+   memory 5.11 GiB is allocated by PyTorch, and 202.36 MiB is reserved by       
+  PyTorch but unallocated. If reserved but unallocated memory is large try      
+  setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid             
+  fragmentation.  See documentation for Memory Management                       
+  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage 
+  -with-pytorch-cuda-alloc-conf)                                                
+
+● Good — fp32 works through commits (ema 1.70, going down nicely). The OOM is
+  fragmentation: the commit's temporary tensors leave the allocator unable to
+  find a contiguous 192MB block for the next backward. Let me check what's
+  resident and what the commit allocates.
+
+  Read 1 file (ctrl+o to expand)
+
+● Couple of things compound here:
+
+  1. The big one: --autocast-dtype none switched latent dtype to fp32 (line
+  497-498). So both latent weights AND activations are fp32 now — roughly 2× the
+   memory of the original bf16 run. The OOM isn't about the commit itself, it's
+  that fp32 left a much tighter budget and fragmentation tipped it over.
+  2. frozen_mask (bool) + frozen_target (int8) are ~105 MB each on GPU
+  permanently — they only need to be on GPU for zero_frozen_grad/enforce_frozen
+  calls and once per commit.
+  3. The commit allocates ~5 same-shape fp32 temporaries per QLinear
+  (w/target/q_err/score). Sequential so peak is bounded, but it leaves the
+  allocator fragmented.
+
+  Cheapest paths in order of bang-for-buck:
+
+  (a) --batch-size 1 --grad-accum 16 — halves activation memory, same effective
+  batch. Single-flag fix.
+
+  (b) Add torch.cuda.empty_cache() after the commit block to defragment before
+  the next backward. Two-line patch.
+
+  (c) Keep frozen_mask/frozen_target on CPU, ship to GPU only inside the three
+  hot ops. Saves ~210 MB. ~15-line patch but every hot op pays a CPU→GPU shuttle
+   each step.
+
+  Let me look at where the commit is called so I can wire (b) in cleanly.
+
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+● Doing both (a) and (b). The empty_cache is free safety; the batch-size halving
+   is mathematically equivalent (effective batch unchanged at 16) but cuts
+  activation memory in half.
+
+● Update(smollmer/progressive_distill.py)
+  ⎿  Added 2 lines
+      738                              if "exp_avg" in st:
+      739                                  st["exp_avg"].mul_(args.post_c
+           ommit_momentum_damp)
+      740                      enforce_frozen(model, args.c)  # re-pin af
+           ter damp
+      741 +                    if args.device.startswith("cuda"):        
+      742 +                        torch.cuda.empty_cache()              
+      743                      round_idx += 1
+      744                      cf = total_committed_fraction(model)
+      745                      mx = max_committed_per_group(model)
+
+● Update(smollmer/ckpts.prog-D-lr3e-4-mspr50/run.sh)
+  ⎿  Added 2 lines
+      17    --lr 3e-4 \
+      18    --min-steps-per-round 50 \
+      19    --autocast-dtype none \
+      20 +  --batch-size 1 \                                             
+      21 +  --grad-accum 16 \                                            
+      22    2>&1 | tee -a "$LOG"
+● Two changes:
+  - progressive_distill.py:741 — torch.cuda.empty_cache() right after each
+  successful commit's enforce_frozen(), before the next round's training starts.
+  - run.sh — --batch-size 1 --grad-accum 16 to halve activation memory
+  (effective batch is still 16, identical to before).
+
+  Re-run ./run.sh. If it still OOMs, the next lever is moving
+  frozen_mask/frozen_target to CPU (saves ~210 MB) — heavier patch, but it's the
+   next big chunk available.
+
+✻ Cooked for 59s
+
+※ recap: Goal: resume progressive ternary distillation Run D to test whether the trajectory recovers. Current task: ran out of GPU memory mid-commit; patched empty_cache and halved batch size. Next action: re-run ./run.sh and watch for OOM or EMA recovery.
+
+❯ does the stable check also allow committing while the EMA is still dropping?  
+
+● Yes, and that's a real bug. Look at the check:
+
+  if self.fast <= self.slow + self.tolerance:
+      self.steady += 1
+
+  The slow EMA lags the fast EMA. So:
+  - Loss dropping → fast EMA drops first → fast < slow → condition TRUE → steady
+   increments. ✗ (would commit mid-drop)
+  - Loss flat → fast ≈ slow → TRUE → steady increments. ✓
+  - Loss rising → fast rises first → fast > slow + tol → FALSE → steady resets.
+  ✓
+
+  So the gate currently treats "still actively improving" as identical to
+  "stabilized." That contradicts the docstring's own description ("hasn't outrun
+   slow-EMA") and your stated intent (commit only when the model has settled,
+  otherwise you lock in a latent the optimizer was still moving).
+
+  Two-sided fix:
+
+  if abs(self.fast - self.slow) <= self.tolerance:
+      self.steady += 1
+  else:
+      self.steady = 0
+
+  This is true only when the EMAs have converged — i.e., loss is genuinely flat.
+   A dropping loss has fast < slow - tolerance, which now resets steady. A
+  rising loss has fast > slow + tolerance, also resets. Want me to make the
+  change?
+
+✻ Cooked for 13s
+
+❯ y                                                                             
+
+● Update(smollmer/progressive_distill.py)
+  ⎿  Added 1 line, removed 1 line
+      360              self.fast = (1 - self.ema_alpha) * self.fast + sel
+           f.ema_alpha * x
+      361              self.slow = ((1 - self.slow_ema_alpha) * self.slow
+      362                           + self.slow_ema_alpha * x)
+      363 -        if self.fast <= self.slow + self.tolerance:           
+      363 +        if abs(self.fast - self.slow) <= self.tolerance:      
+      364              self.steady += 1
+      365          else:
+      366              self.steady = 0
+
+● Update(smollmer/progressive_distill.py)
+  ⎿  Added 7 lines, removed 3 lines
+      315  class CommitGate:
+      316      """Decide when to commit the next weight per group.
+      317  
+      318 -    Fires when (a) fast-EMA hasn't outrun slow-EMA for `patien
+          -ce` consecutive                                               
+      319 -    steps (loss is stable) AND (b) fast_ema − L_T < gap_thresh
+          -old; OR when                                                  
+      320 -    step_in_round >= max_round_steps (safety cap).            
+      318 +    Fires when (a) the fast and slow EMAs have converged withi
+          +n `tolerance`                                                 
+      319 +    for `patience` consecutive steps (loss is genuinely flat —
+          + neither                                                      
+      320 +    actively dropping nor rising) AND (b) fast_ema − L_T < gap
+          +_threshold;                                                   
+      321 +    OR when step_in_round >= max_round_steps (safety cap). Not
+          +e: a                                                          
+      322 +    *dropping* loss has fast EMA below slow EMA, which fails t
+          +he two-sided                                                  
+      323 +    convergence check — we don't commit while the model is sti
+          +ll                                                            
+      324 +    recovering.                                               
+      325  
+      326      When (a) holds but (b) doesn't: keep training. We don't wa
+           nt to commit
+      327      while the loss gap is still large — that's the user's expl
+           icit preference,
+
+● Done. Two-sided convergence check now in place, with docstring updated to
+  reflect it. One side-effect to expect on the resumed run: rounds will tend to
+  be longer (gate now waits for true plateau, not "drop counts as stable"), so
+  the --commit-max-round-steps 2000 safety cap may matter more. Saved steady
+  counter from before the fix will harmlessly reset on the first mismatch under
+  the new rule.
+
+✻ Churned for 18s
+
+❯ for the commit memory usage, what drives the extra? Would it be possible to   
+  e.g. offload some memory to CPU during the commit process?                    
+
+● Walking through select_and_commit_one_per_group and what's resident vs
+  transient during commit:
+
+  Resident on GPU (not commit-specific):
+  - Model weights: ~540 MB (fp32 with autocast none; was 270 MB at fp16)
+  - CAdamW opt state (exp_avg + exp_avg_sq, fp32): ~1.08 GB
+  - frozen_mask (bool, 1 B/elem) + frozen_target (int8, 1 B/elem) on the 105 M
+  quantized params: ~210 MB total
+  - best_snapshot: already on CPU via snapshot_to_cpu, so 0
+
+  Transient inside commit (per QLinear, sequentially):
+  At line 227-241 we allocate four same-shape fp32 tensors per module:
+  - w = weight.detach().float() — fp32 copy of weight
+  - target from compute_commit_targets(...).float()
+  - q_err = (w - target).abs()
+  - score = where(fm, ...)
+
+  Biggest QLinear in SmolLM2-135M is down_proj at 576×1536 = 884K params, so
+  peak transient is ~14 MB. Iterated across 210 modules so peak is bounded, but
+  the allocate/free cycle leaves the caching allocator with mixed-size holes —
+  that's the fragmentation that bit you.
+
+  Commit is @torch.no_grad, so at commit time gradients are already freed.
+  Activations too (forward/backward done for that step). What's NOT being used
+  during commit:
+  - exp_avg_sq (only exp_avg is read, for the momentum penalty — and only when
+  momentum_weight != 0, which is currently 0 for us)
+  - All of opt.state is unused with momentum_weight=0
+
+  So real offload opportunities, ordered by win-per-disruption:
+
+  1. Per-QLinear empty_cache() inside the commit loop — small patch, prevents
+  the fragmentation buildup across 210 modules. No I/O cost.
+  2. Use fp16 intermediates inside commit if latent is fp16 — drop the .float()
+  casts. Halves transient. Safe for argmin (precision irrelevant for relative
+  ordering of |w−target|). Doesn't help now because latent is fp32 in
+  autocast=none mode.
+  3. Park exp_avg_sq to CPU during commit when momentum_weight==0 (always
+  currently) — ~540 MB win, but it's only worth doing if we don't need to also
+  park exp_avg. Round-trip cost: ~540 MB at PCIe ≈ 0.5 s on a typical PCIe 4.0
+  x16 — negligible per round.
+  4. Park frozen_mask/frozen_target permanently on CPU, ship to GPU only inside
+  zero_frozen_grad/enforce_frozen/select_and_commit_one_per_group. ~210 MB
+  permanent win, but every training step pays a 210 MB shuttle. That's ~0.2
+  s/step at PCIe 4.0 — would dominate the step time. Bad trade unless we really
+  need the memory.
+
+  My pick: do (1) cheap and unconditional, plus (3) gated on momentum_weight==0.
+   That's ~540 MB freed for the duration of the commit, no precision impact, ~1
+  s overhead per round. Want me to wire those up?
+
+✻ Cogitated for 41s
+
+❯ yes to 1                                                                      
+  is 2 always safe?                                                             
+  maybe only do 3 if we see that the GPU memory won't be enough?                
+  4 no, but I do wonder why it takes 210MB when I'd expect it to only be a      
+  single bit per weight?                                                        
+
+● (2) Always safe? Pretty much, yes — with one nuance.
+
+  The math: w ∈ [-1, 1], target ∈ {-c, 0, +c} ⊆ [-c, c], so q_err = |w - target|
+   ∈ [0, 1+c] ≈ [0, 1.85]. fp16 has 11-bit mantissa → absolute precision ~0.001
+  in this range. We're doing argmin per group (typically 64 elements), so what
+  matters is relative ordering, not absolute value. Two near-tied weights might
+  swap order in fp16, but the eventual committed pattern is identical (every
+  weight gets committed eventually). The greedy order within a round shifts
+  marginally; no directional bias.
+
+  The nuance: when latent_dtype == fp16, dropping .float() keeps it fp16 (good).
+   When latent_dtype == fp32 (our current autocast none mode), dropping .float()
+   keeps it fp32 (no change, also good). So the cleanest version is "just remove
+   .float()" — it adapts to whatever the latent is.
+
+  Currently we're in fp32 latent mode, so this saves nothing right now. Worth
+  queuing for when we go back to bf16/fp16 latent.
+
+  (3) Defer. With (1) in place we'll see how tight the budget is. If we OOM
+  again, that's the next lever.
+
+  (4) The bool myth. PyTorch stores torch.bool as 1 byte per element, not 1 bit.
+   Same for torch.int8. So frozen_mask (bool) over 105M params = 105 MB, plus
+  frozen_target (int8) = another 105 MB, total ~210 MB.
+
+  To get true bit-packing we'd need to roll our own: store 8 mask bits per
+  uint8, do bitwise ops for read/write. ~13 MB instead of 105 MB. But indexing
+  ops (fm[rr, cc], score.where(fm, ...)) want byte tensors, so every hot path
+  would need an unpack + repack. The plumbing is large and the wins are bounded
+  — not worth it unless memory gets really tight.
+
+  Wiring up (1) now.
+
+  Read 1 file (ctrl+o to expand)
+
+● Update(smollmer/progressive_distill.py)
+  ⎿  Added 7 lines
+      272          n_neg += int((signs == -1).sum())
+      273          n_zero_ += int((signs == 0).sum())
+      274          n_pos += int((signs == 1).sum())
+      275 +        # Release this module's fp32 temporaries before moving
+          + on; otherwise                                                
+      276 +        # the caching allocator accumulates mixed-size holes a
+          +cross 210                                                     
+      277 +        # QLinears, leaving no contiguous block for the next b
+          +ackward.                                                      
+      278 +        del w, target, q_err, score, score_g, finite, idx_in_g
+          +roup                                                          
+      279 +        del group_idx, flat_in, row_idx, rr, cc, targets_chose
+          +n, q_err_chosen                                               
+      280 +        if torch.cuda.is_available() and m.weight.is_cuda:    
+      281 +            torch.cuda.empty_cache()                          
+      282      stats = {
+      283          "q_err_mean": (sum_q_err / max(1, sum_q_err_count)),
+      284          "frac_neg": n_neg / max(1, n_committed),
+
+● Update(smollmer/progressive_distill.py)
+  ⎿  Added 1 line
+      277          # QLinears, leaving no contiguous block for the next b
+           ackward.
+      278          del w, target, q_err, score, score_g, finite, idx_in_g
+           roup
+      279          del group_idx, flat_in, row_idx, rr, cc, targets_chose
+           n, q_err_chosen
+      280 +        del signs                                             
+      281          if torch.cuda.is_available() and m.weight.is_cuda:
+      282              torch.cuda.empty_cache()
+      283      stats = {
+
+● Per-QLinear del + empty_cache() wired in at the end of each module's commit
+  body. Combined with the post-commit-block empty_cache() you already have,
+  fragmentation should be bounded both within the loop and after it.
+
+  Re-run ./run.sh. If memory still gets tight, (3) — parking exp_avg_sq to CPU
+  during commit when momentum_weight==0 — is the next ~540 MB available.
+
+✻ Brewed for 44s
+
+※ recap: Goal: recover Run D progressive distillation toward ternary SmolLM2-135M. We patched two memory fixes (per-QLinear del+empty_cache during commit, plus bs=1/grad-accum=16 in fp32 mode) and tightened the commit gate to a two-sided plateau check. Next: re-run ./run.sh.
+
+❯ /loop 3h do a qualitative analysis of the run by looking at TB and running    
+chat samples                                                                    
+
+● User answered Claude's questions:
+  ⎿  · This loop stops when you close this session. Set it up as a cloud 
+     schedule instead so it keeps running? → This session only
+
+● CronCreate(7 */3 * * *: do a qualitative analysis of the run by looking at TB
+            and r…)  ⎿  Scheduled a3020e50 (Every 3 hours at :07)
+
+● Scheduled: every 3 hours at HH:07 (cron 7 */3 * * *), recurring, job ID
+  a3020e50. Auto-expires after 7 days; CronDelete a3020e50 to cancel sooner.
+
+  Now running the first iteration. Looking at TB scalars, the latest log.txt
+  entries, and pulling chat samples from the current checkpoint.
+
+  Listed 1 directory (ctrl+o to expand)
+
+● Bash(ls /home/wmertens/Projects/smollmer/tb/"1778594380 prog CAdamW lr3e-4
+      wu400 c0.85 zf0.38 gap0.10 mspr50 p50"/; echo ---; ps aux | grep -i
+      progressive_distill |…)
+  ⎿  events.out.tfevents.1778659309.wmertens-nixos.661615.0
+     ---
+     wmertens  661615 99.8  2.0 25857224 315708 pts/4 Sl+  10:01  17:32 pyt
+     … +7 lines (ctrl+o to expand)
+
+● Bash(cd /home/wmertens/Projects/smollmer && export LD_LIBRARY_PATH=/run/opengl
+      -driver/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH} && .venv/bin/python
+      <<'PY'
+      from tensor…)
+  ⎿  tags: ['cfg/c', 'cfg/L_T', 'cfg/group_size', 'loss/step', 'loss/ema',
+     'loss/gap', 'lr', 'progressive/committed_frac', 'progressive/round', '
+     progressive/step_in_round', 'progressive/barrier', 'progressive/loss_e
+     … +20 lines (ctrl+o to expand)
+  ⎿  Shell cwd was reset to /home/wmertens/Projects/smollmer/smollmer
+
+  Searched for 1 pattern, read 2 files (ctrl+o to expand)
+
+● Bash(cd /home/wmertens/Projects/smollmer && export LD_LIBRARY_PATH=/run/opengl
+      -driver/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH} && .venv/bin/python
+      <<'PY'
+      from tensor…)
+  ⎿  grad_norm                                  n= 103  first=(4010, 0.1395
+     )  last=(5030, 0.6296)
+     progressive/barrier                        n= 103  first=(4010, 0.0)
+     … +16 lines (ctrl+o to expand)
+  ⎿  Shell cwd was reset to /home/wmertens/Projects/smollmer/smollmer
+
+● Bash(cd /home/wmertens/Projects/smollmer && export LD_LIBRARY_PATH=/run/opengl
+      -driver/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH} && .venv/bin/python
+      <<'PY'
+      from tensor…)
+  ⎿  round trajectory (where it changes):
+       step=4010  round=35
+       step=4608  round=36
+     … +425 lines (ctrl+o to expand)
+  ⎿  Shell cwd was reset to /home/wmertens/Projects/smollmer/smollmer
+
+  Searched for 2 patterns (ctrl+o to expand)
+
+● Training is going well — recovered past the bf16-NaN cliff, two commits since
+  the latest disk snapshot (round 35 → 37), EMA fast 1.67 vs L_T 1.6348 (gap
+  closing). Let me try a chat sample from the on-disk state (last write at
+  23:40, step 4000) on CPU so GPU stays clear.
+
+● Bash(df -h /tmp; ls -la /tmp/smollmer_chat_*.safetensors 2>/dev/null;
+      nvidia-smi --query-gpu=memory.free,memory.used --format=csv 2>/dev/null)
+  ⎿  Filesystem      Size  Used Avail Use% Mounted on
+     /dev/nvme0n1p3  853G  833G   20G  98% /
+     memory.free [MiB], memory.used [MiB]
+     11 MiB, 5765 MiB
+
+● Bash(cd /home/wmertens/Projects/smollmer && export LD_LIBRARY_PATH=/run/opengl
+      -driver/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH} && timeout 180
+      .venv/bin/python -m smo…)
+  ⎿  [load] smollmer/ckpts.prog-D-lr3e-4-mspr50/interrupted.pt
+     [load]   step=4000, schedule.alpha=0.0000
+     [build] arch skeleton (group_size=64)
+     … +11 lines (ctrl+o to expand)
+  ⎿  Shell cwd was reset to /home/wmertens/Projects/smollmer/smollmer
+
+● Bash(cd /home/wmertens/Projects/smollmer && export LD_LIBRARY_PATH=/run/opengl
+      -driver/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH} && timeout 240
+      .venv/bin/python -m smo…)
+  ⎿  [load] /tmp/smollmer_chat_step4000.safetensors on cpu/float32 (group_s
+     ize=64)
+     Loading weights:   0%|          | 0/272 [00:00<?, ?it/s]Loading weight
+     … +23 lines (ctrl+o to expand)
+  ⎿  Shell cwd was reset to /home/wmertens/Projects/smollmer/smollmer
+
+● Quantitative (TB, since last on-disk ckpt at step 4000):
+
+  ┌────────────────────────┬─────────┬─────────┬──────────────────────────┐
+  │         metric         │  step   │  step   │        direction         │
+  │                        │  4010   │  5030   │                          │
+  ├────────────────────────┼─────────┼─────────┼──────────────────────────┤
+  │ loss/ema               │ 1.737   │ 1.698   │ dropping                 │
+  ├────────────────────────┼─────────┼─────────┼──────────────────────────┤
+  │ loss/gap (fast - L_T)  │ 0.097   │ 0.073   │ closing                  │
+  ├────────────────────────┼─────────┼─────────┼──────────────────────────┤
+  │ progressive/round      │ 35      │ 37      │ +2 commits               │
+  ├────────────────────────┼─────────┼─────────┼──────────────────────────┤
+  │ committed_frac         │ 0.547   │ 0.578   │ +3.1% of weights frozen  │
+  ├────────────────────────┼─────────┼─────────┼──────────────────────────┤
+  │ grad_norm              │ 0.14    │ 0.63    │ healthy                  │
+  ├────────────────────────┼─────────┼─────────┼──────────────────────────┤
+  │ barrier /              │ 0       │ 0       │ no weights pinned to     │
+  │ saturation_frac        │         │         │ [-1,1] edge              │
+  ├────────────────────────┼─────────┼─────────┼──────────────────────────┤
+  │ weights/flip_rate      │ 0.001   │ 0.003   │ settling, not thrashing  │
+  └────────────────────────┴─────────┴─────────┴──────────────────────────┘
+
+  The two-sided gate is doing what we wanted: rounds 36 (gap 0.0485) and 37 (gap
+   0.0494) both fired under the 0.05 threshold, on genuine flat-EMA convergence
+  (not on the dropping branch). No bf16 NaNs, no OOMs since the per-QLinear
+  empty_cache.
+
+  Qualitative (chat from on-disk step 4000, ~55% committed, CPU fp32, α=0):
+
+  - "The capital of France is" → Paris ✓, then hallucinated stats ("population
+  55 million", "1.48 billion"). Grammar intact.
+  - "Once upon a time" → coherent story-mode, mild word repetition ("colorful,
+  colorful").
+  - "def fibonacci(n):" → not fibonacci; produces syntactically broken Python
+  with circular calls — small-model failure mode, not collapse.
+  - "The three laws of robotics" → bullets degenerate to "A robotic arm is a
+  robotic arm." Repetition is the dominant failure.
+
+  Verdict: training is on a recovery trajectory. The on-disk weights (step 4000,
+   round 36) still show small-model fluency with the expected repetition tax.
+  With 7 more commit rounds expected before the next /loop firing (rate ~4.5
+  s/step → ~2400 steps in 3h), we'll have a fresh ckpt at step ≥6000 and can
+  compare chat quality side-by-side. No intervention needed.
+
+  Next firing at HH:07 (cron 7 */3 * * *).
+
+✻ Cogitated for 3m 47s
+
+❯ can you write a script that does all these checks, and then call that next    
+  time?                                                                         
+
+● Write(check_run.sh)
+  ⎿  Wrote 106 lines to check_run.sh
+       2 # Qualitative + quantitative check on a progressive-distill run.
+       3 # Usage: check_run.sh [ckpt_dir]
+         .   Defaults to most-recently-modified smollmer/ckpts.prog-* dir
+       5 # Reads TB scalars, dumps the on-disk interrupted.pt to a temp s
+         afetensors,
+         eport. a fixed set of chat prompts on CPU, prints a structured r
+       7 set -euo pipefail
+       9 cd /home/wmertens/Projects/smollmer
+      10 export LD_LIBRARY_PATH=/run/opengl-driver/lib${LD_LIBRARY_PATH:+
+         :$LD_LIBRARY_PATH}
+     … +110 lines (ctrl+o to expand)
+
+● Bash(chmod +x /home/wmertens/Projects/smollmer/check_run.sh && ls -la
+      /home/wmertens/Projects/smollmer/check_run.sh)
+  ⎿  -rwxr-xr-x 1 wmertens users 3711 May 13 11:44 /home/wmertens/Projects/
+     smollmer/check_run.sh
+
+● Bash(/home/wmertens/Projects/smollmer/check_run.sh 2>&1 | head -80)  ⎿  ==========================================================
+     Progressive run check: smollmer/ckpts.prog-D-lr3e-4-mspr50
+     ckpt mtime: 2026-05-12 23:40:30.094938183 +0200
+     … +80 lines (ctrl+o to expand)
+  ⎿  (timeout 7m)
+
+● Script works. Now swapping the cron prompt to call it.
+
+● CronDelete(a3020e50)
+  ⎿  Cancelled a3020e50
+
+● CronCreate(7 */3 * * *: Run the qualitative-analysis script and report
+            findings con…)
+  ⎿  Scheduled c2aa8cbd (Every 3 hours at :07)
+
+● Done. Cron a3020e50 deleted; new job c2aa8cbd (still HH:07, every 3h) now
+  calls /home/wmertens/Projects/smollmer/check_run.sh and asks for a concise
+  report. Script defaults to the most recently modified ckpts.prog-* dir so
+  it'll track whichever run is active.
+
+✻ Baked for 1m 58s
+
+※ recap: Goal: progressive ternary distill of SmolLM2-135M; Run D resumed in fp32 after bf16 NaN, recovering past the regression with two new commits (round 37, EMA 1.66 vs L_T 1.63). Next: wait for the 3-hourly check_run.sh report.
+
+❯ can you update the distill output to include the global step, and can you     
+  verify that it's still writing the interrupted.pt every 1000 steps?           
+
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+● Verification: --checkpoint-every defaults to 2000, not 1000, and run.sh
+  doesn't override it. Confirming from the log: the only [ckpt] entry today is
+  at step 4000 (mtime 23:40 last night). Current expected next ckpt is step
+  6000.
+
+  So: it's writing every 2000 steps, not 1000. If you want 1000, that needs
+  explicit --checkpoint-every 1000 in run.sh (or a default change).
+
+  Adding step=... to the progress-bar postfix now:
+
+● Update(smollmer/progressive_distill.py)
+  ⎿  Added 1 line
+      787              if global_step % args.log_every == 0:
+      788                  cf = total_committed_fraction(model)
+      789                  pbar.set_postfix({
+      790 +                    "step": global_step,                      
+      791                      "loss": f"{step_loss:.4f}",
+      792                      "ema": f"{ctrl.ema:.4f}" if ctrl.ema else 
+           "—",
+      793                      "round": f"{round_idx}/{group_size}",
+
+● Both changes only take effect on the next restart of the training process. The
+   currently-running PID 661615 will keep using checkpoint-every=2000 and no
+  step in postfix. Want me to:
+
+  (a) Add --checkpoint-every 1000 to run.sh (next restart picks it up), or
+  (b) Change the default to 1000 in progressive_distill.py (cleaner — every run
+  gets it), or
+  (c) Both?
+
+  And: SIGINT the current process now to pick up these changes immediately, or
+  wait until it hits step 6000 naturally?
+
+✻ Cogitated for 34s
+
+❯ change the default                                                            
+
+● Update(smollmer/progressive_distill.py)
+  ⎿  Added 1 line, removed 1 line
+      446      ap.add_argument("--ema-warmup", type=int, default=500)
+      447      ap.add_argument("--plateau-threshold", type=float, default
+           =1e-3)
+      448      ap.add_argument("--soft-hist-every", type=int, default=200
+           )
+      449 -    ap.add_argument("--checkpoint-every", type=int, default=20
+          -00)                                                           
+      449 +    ap.add_argument("--checkpoint-every", type=int, default=10
+          +00)                                                           
+      450      ap.add_argument("--tb-dir", type=Path, default=None)
+      451      ap.add_argument("--run-name", type=str, default=None)
+      452  
+
+● Default is now 1000. Takes effect on the next restart — the in-flight process
+  is still on 2000 and will write at step 6000 next.
+
+✻ Worked for 8s
+
+❯ I did ctrl-c on the running run.sh and it didn't write the interrupted.pt?    
+
+  Searched for 1 pattern, read 2 files (ctrl+o to expand)
+
+● Bash(ls -la
+      /home/wmertens/Projects/smollmer/smollmer/ckpts.prog-D-lr3e-4-mspr50/;
+      echo ---; ps aux | grep -i progressive_distill | grep -v grep; echo ---;
+      tr '\r' '…)
+  ⎿  total 2570329
+     drwxr-xr-x  2 wmertens users          0 May 13 11:54 .
+     drwxr-xr-x 29 wmertens users          0 May 13 11:58 ..
+     … +42 lines (ctrl+o to expand)
+
+● Found it. The bug is in the pipeline + handler interaction. Sequence:
+
+  1. python … | tee -a log.txt puts both in the same foreground process group.
+  2. Ctrl-C sends SIGINT to the whole group.
+  3. tee has no custom handler → dies immediately.
+  4. Python's handler fires, sets _INTERRUPT["flag"] = True, then calls
+  print("\n[!] SIGINT — …", flush=True) (distill.py:49). But stdout's other end
+  (tee) is dead → BrokenPipeError raised inside the signal handler.
+  5. The exception propagates out of the signal handler and lands wherever
+  Python's main thread was. The save-on-flag check at progressive_distill.py:867
+   never runs.
+
+  Confirmed by the log tail: the old run's last line is a normal progress update
+   (no [!] SIGINT message, no [!] saved …), then immediately the new [build]
+  line from the restart appears — the python process died abruptly, no save.
+
+  Two fixes; I'd do both:
+
+  (A) Use process substitution in run.sh so tee isn't in the foreground process
+  group. Ctrl-C only goes to python; tee sees EOF naturally and finishes
+  cleanly.
+  python -u -m smollmer.progressive_distill … > >(tee -a "$LOG") 2>&1
+
+  (B) Harden the signal handler in distill.py so a failed print can never abort
+  the save. Even with (A), it's a one-line robustness fix:
+  def handler(signum, frame):
+      if _INTERRUPT["flag"]:
+          try: print("\n[!!] second SIGINT — hard exit, no save", flush=True)
+          except Exception: pass
+          sys.exit(130)
+      _INTERRUPT["flag"] = True   # set FIRST so a print failure can't lose it
+      try: print("\n[!] SIGINT — finishing current step, then saving …",
+  flush=True)
+      except Exception: pass
+
+  Want me to apply both?
+
+✻ Sautéed for 1m 26s
+
+❯ yes and put a comment in run.sh to explain                                    
+
+● Update(smollmer/distill.py)
+  ⎿  Added 13 lines, removed 3 lines
+      42  
+      43  def _install_sigint_handler() -> None:
+      44      def handler(signum, frame):
+      45 +        # Flag is set BEFORE any I/O so a broken-pipe print can
+         +'t lose the                                                    
+      46 +        # save signal — happens when stdout is piped to a tee t
+         +hat died of                                                    
+      47 +        # the same SIGINT (same foreground process group). All 
+         +prints in                                                      
+      48 +        # this handler are wrapped to make signal delivery best
+         +-effort.                                                       
+      49          if _INTERRUPT["flag"]:
+      46 -            print("\n[!!] second SIGINT — hard exit, no save", 
+         -flush=True)                                                    
+      50 +            try:                                               
+      51 +                print("\n[!!] second SIGINT — hard exit, no sav
+         +e", flush=True)                                                
+      52 +            except Exception:                                  
+      53 +                pass                                           
+      54              sys.exit(130)
+      55          _INTERRUPT["flag"] = True
+      49 -        print("\n[!] SIGINT — finishing current step, then savi
+         -ng resume state. "                                             
+      50 -              "Press Ctrl-C again to hard-exit.", flush=True)  
+      56 +        try:                                                   
+      57 +            print("\n[!] SIGINT — finishing current step, then 
+         +saving resume "                                                
+      58 +                  "state. Press Ctrl-C again to hard-exit.", fl
+         +ush=True)                                                      
+      59 +        except Exception:                                      
+      60 +            pass                                               
+      61      signal.signal(signal.SIGINT, handler)
+      62  
+      63  
+  Read 1 file (ctrl+o to expand)
+
+● Update(smollmer/ckpts.prog-D-lr3e-4-mspr50/run.sh)
+  ⎿  Added 9 lines, removed 1 line
+      12  TB_DIR=smollmer/tb
+      13  LOG="$CKPT_DIR/log.txt"
+      14  
+      15 +# Use process substitution (`> >(tee -a "$LOG")`) instead of a 
+         +pipeline                                                       
+      16 +# (`| tee -a "$LOG"`) so Ctrl-C does NOT hit `tee`. In a pipeli
+         +ne, both                                                       
+      17 +# tee and python are in the foreground process group; Ctrl-C ki
+         +lls tee                                                        
+      18 +# first, which then makes python's next stdout write raise Brok
+         +enPipeError                                                    
+      19 +# — including the print inside the SIGINT handler — preventing 
+         +the                                                            
+      20 +# graceful save of interrupted.pt. Process substitution runs te
+         +e                                                              
+      21 +# independently of the foreground group, so Ctrl-C only goes to
+         + python                                                        
+      22 +# and tee exits cleanly on EOF after python finishes saving.   
+      23  exec python -u -m smollmer.progressive_distill \
+      24    --cache-dir smollmer/cache \
+      25    --out "$CKPT_DIR" \
+     ...
+      29    --autocast-dtype none \
+      30    --batch-size 1 \
+      31    --grad-accum 16 \
+      24 -  2>&1 | tee -a "$LOG"                                         
+      32 +  > >(tee -a "$LOG") 2>&1                                      
+
+● Both applied. Note: the in-flight process (PID 766483) was started before
+  these changes, so its handler still has the bug and run.sh still has the
+  pipeline. The fix takes effect on the next restart.
+
+✻ Cogitated for 25s
+
+※ recap: Goal: distill SmolLM2-135M to ternary via progressive clamping. Current task: Run D is resuming in fp32 to recover past a bf16 NaN, EMA dropping from 1.74 toward L_T=1.6348. Next: let it run; the 3h cron at HH:07 calls check_run.sh.
+
+❯ btw when I ctrl-c now, the sigint handler prints twice, why?                  
+
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+● Why: DataLoader(num_workers=1) forks a worker process. The fork inherits the
+  SIGINT handler. Ctrl-C goes to the whole foreground process group, so both the
+   main process and the worker run the handler — two prints. (Only the main's
+  _INTERRUPT["flag"] matters for saving; the worker's flag set is harmless but
+  its print is noise.)
+
+  Cleanest fix: install a worker_init_fn that resets SIGINT to default in
+  workers, so only the main process's handler runs.
+
+● Update(smollmer/progressive_distill.py)
+  ⎿  Added 9 lines, removed 1 line
+      599  
+      600      ds = ShardedDataset(args.cache_dir, seed=args.seed,
+      601                          start_skip=samples_consumed)
+      602 +    def _worker_init(_worker_id: int) -> None:                
+      603 +        # Workers inherit the main process's SIGINT handler vi
+          +a fork, which                                                 
+      604 +        # causes the handler's print to fire once per worker o
+          +n Ctrl-C.                                                     
+      605 +        # Reset to default in workers; only the main process s
+          +hould handle.                                                 
+      606 +        import signal as _sig                                 
+      607 +        _sig.signal(_sig.SIGINT, _sig.SIG_DFL)                
+      608 +                                                              
+      609      dl = DataLoader(ds, batch_size=args.batch_size,
+      610                      num_workers=args.num_workers,
+      611                      pin_memory=(args.device.startswith("cuda")
+           ),
+      605 -                    drop_last=True)                           
+      612 +                    drop_last=True,                           
+      613 +                    worker_init_fn=_worker_init)              
+      614      it = iter(dl)
+      615      autocast_dtype = {"bfloat16": torch.bfloat16,
+      616                        "float16": torch.float16,
+
+● Worker SIGINT handler now resets to default in DataLoader workers. Effective
+  on next restart. After that, Ctrl-C will print once and save once.
+
+✻ Brewed for 25s
+
+※ recap: Resuming a SmolLM2-135M progressive ternary distill run that crashed; latest run is in-flight (PID 766483) with EMA recovering past 1.67 and 37/64 rounds committed. Next: wait for the next checkpoint or restart to pick up the SIGINT and dataloader fixes.
+
+✻ Running scheduled task (May 13 12:37pm)
+
+● Bash(/home/wmertens/Projects/smollmer/check_run.sh 2>&1 | tail -120)
+  ⎿  ==========================================================
+     Progressive run check: smollmer/ckpts.prog-D-lr3e-4-mspr50
+     ckpt mtime: 2026-05-13 12:13:23.808624713 +0200
+     … +41 lines (ctrl+o to expand)
+  ⎿  (timeout 7m)
+
+● Check ran but missed the TB scalars — run.sh now sets --tb-dir smollmer/tb
+  (changed earlier), but check_run.sh was looking at tb/* relative to the repo
+  root. The chat samples still went through fine, but the TB section is empty.
+
+  A few quick observations from what we do have:
+
+  Quantitative (from saved ckpt only — no TB this run):
+  - step 4108, round 35, cf=0.5469 (no new commits since the on-disk state — the
+   run was restarted with SIGINT and has been training again since 11:58)
+  - ctrl ema 1.734, gate steady=83 already, step_in_round=224 — close to commit
+  (needs gap<0.05 AND two-sided convergence)
+  - best still ema=1.6222 @ step 2085
+
+  Qualitative (chat from step 4108, ~55% committed):
+  - Capital of France → starts on-topic ("Paris... Mediterranean Sea... 23 miles
+   north of the Mediterranean Sea" — geographically nonsensical but
+  grammatically fluent)
+  - Story → coherent setup, then invents a "parent-to-child-of-the-way" phrase
+  - def fibonacci → 4-term recursion with unbalanced brackets, no return —
+  small-model code failure
+  - Three laws → not the Asimov laws, generic statements, less repetition than
+  last check
+  - Slight improvement vs step-4000 sample: less degenerate repetition ("A
+  robotic arm is a robotic arm" pattern gone). Coherence about the same.
+
+  Let me fix the TB glob so the next check actually shows the trend.
+
+● Update(check_run.sh)
+  ⎿  Added 7 lines, removed 1 line
+      51  $PY <<'PY'
+      52  from tensorboard.backend.event_processing.event_accumulator imp
+          ort EventAccumulator
+      53  import glob, os
+      54 -runs = sorted(glob.glob("tb/*/events.out.tfevents.*"), key=os.p
+         -ath.getmtime)                                                  
+      54 +# Search both legacy ('tb/...') and current ('smollmer/tb/...')
+         + locations                                                     
+      55 +runs = sorted(                                                 
+      56 +    glob.glob("tb/*/events.out.tfevents.*")                    
+      57 +    + glob.glob("smollmer/tb/*/events.out.tfevents.*"),        
+      58 +    key=os.path.getmtime,                                      
+      59 +)                                                              
+      60  if not runs:
+      61      print("no TB events found"); raise SystemExit
+      62 +print(f"# TB events: {runs[-1]}")                              
+      63  ea = EventAccumulator(runs[-1], size_guidance={'scalars': 0})
+      64  ea.Reload()
+      65  tags = ea.Tags()['scalars']
+
+● Fixed check_run.sh to also look in smollmer/tb/*. Next firing at HH:07 will
+  include the TB trend section. Cron c2aa8cbd remains active.
+
+✻ Cooked for 1m 46s
+
+※ recap: Distilling SmolLM2-135M to ternary via progressive per-group clamping; Run D is resuming in fp32 (recovering from a bf16-NaN cliff) at step ~4100, round 35, with a recurring 3h /loop check via check_run.sh. Next: wait for the next checkpoint and check whether commits resume past round 37.
+
+❯ ran out of memory again :(                                                    
+                                                                                
+  progressive: 1030it [1:38:36,  5.74s/it, step=5130, loss=1.7812, ema=1.7428,  
+  round=37/64, cf=0.578, in_round=104, lr=3.00e-04]                             
+  Traceback (most recent call last):                                            
+    File "<frozen runpy>", line 198, in _run_module_as_main                     
+    File "<frozen runpy>", line 88, in _run_code                                
+    File "/home/wmertens/Projects/smollmer/smollmer/progressive_distill.py",    
+  line 919, in <module>                                                         
+      main()                                                                    
+    File "/home/wmertens/Projects/smollmer/smollmer/progressive_distill.py",    
+  line 721, in main                                                             
+      (args.barrier_coef * bl).backward()                                       
+    File "/home/wmertens/Projects/smollmer/.venv/lib/python3.12/site-packages/t 
+  orch/_tensor.py", line 631, in backward                                       
+      torch.autograd.backward(                                                  
+    File "/home/wmertens/Projects/smollmer/.venv/lib/python3.12/site-packages/t 
+  orch/autograd/__init__.py", line 381, in backward                             
+      _engine_run_backward(                                                     
+    File "/home/wmertens/Projects/smollmer/.venv/lib/python3.12/site-packages/t 
+  orch/autograd/graph.py", line 869, in _engine_run_backward                    
+      return Variable._execution_engine.run_backward(  # Calls into the C++     
+  engine to run the backward pass                                               
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ 
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^                                                  
+  torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 20.00 MiB. GPU  
+  0 has a total capacity of 5.64 GiB of which 20.25 MiB is free. Including      
+  non-PyTorch memory, this process has 5.60 GiB memory in use. Of the allocated 
+   memory 5.38 GiB is allocated by PyTorch, and 115.38 MiB is reserved by       
+  PyTorch but unallocated. If reserved but unallocated memory is large try      
+  setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid             
+  fragmentation.  See documentation for Memory Management                       
+  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage 
+  -with-pytorch-cuda-alloc-conf)                                                
+
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+● progressive/barrier has been 0.0 throughout the run — no weights exceed [-1,
+  1]. So the barrier backward is allocating a large fp32 autograd graph (one
+  fp32 copy per QLinear weight × 210 modules + clamp_min saved-state, easily ~1
+  GB peak) for a zero gradient. That's almost certainly what's tipping you over
+  the 5.6 GiB budget right now.
+
+  Cheapest fix: short-circuit the barrier when no weight crosses 1. Quick
+  no-grad probe; only build the graph + backward if there's actually something
+  to push.
+
+● Update(smollmer/progressive_distill.py)
+  ⎿  Added 15 lines, removed 5 lines
+      716                  running_n += 1
+      717  
+      718              # --- barrier loss (one backward, no grad_accum sc
+           aling) ---
+      719 +            # Short-circuit when no weight crosses |w|=1: the 
+          +autograd graph                                                
+      720 +            # for barrier_loss holds ~1 GB of fp32 copies of e
+          +very QLinear                                                  
+      721 +            # weight, which is wasted memory when the barrier 
+          +is inactive.                                                  
+      722 +            barrier_val = 0.0                                 
+      723              if args.barrier_coef > 0:
+      720 -                bl = barrier_loss(model)                      
+      721 -                (args.barrier_coef * bl).backward()           
+      722 -                barrier_val = float(bl.detach())              
+      723 -            else:                                             
+      724 -                barrier_val = 0.0                             
+      724 +                with torch.no_grad():                         
+      725 +                    excess_max = 0.0                          
+      726 +                    for m in model.modules():                 
+      727 +                        if not isinstance(m, QLinear):        
+      728 +                            continue                          
+      729 +                        excess_max = max(excess_max,          
+      730 +                                         float(m.weight.abs().
+          +max()))                                                       
+      731 +                if excess_max > 1.0:                          
+      732 +                    bl = barrier_loss(model)                  
+      733 +                    (args.barrier_coef * bl).backward()       
+      734 +                    barrier_val = float(bl.detach())          
+      735  
+      736              # --- mask out frozen-slot grads BEFORE clip + ste
+           p ---
+      737              zero_frozen_grad(model)
+
+● The patch needs a restart to take effect (in-flight process already crashed
+  anyway). After restart, every step will be a no-grad scan + skip when
+  excess_max ≤ 1. The scan is cheap (~210 .abs().max() calls).
+
+  If it still OOMs after this, the next levers are:
+  - Drop back to --autocast-dtype bfloat16 (the model may have stabilized enough
+   since the resume that it no longer NaNs — would halve activation memory)
+  - Move exp_avg_sq to CPU during forward/backward (saves ~540 MB resident, ~0.5
+   s PCIe shuttle per opt step)
+  - AdamW8bit (bigger refactor)
+
+  Restart with ./run.sh when ready.
+
+✻ Churned for 1m 19s
+
+※ recap: Goal is progressive ternary distillation of SmolLM2-135M; current task is keeping the resumed Run D alive on a 5.6 GiB GPU. Next action: restart `./run.sh` to pick up the barrier short-circuit and see if the OOM is gone.
+
+❯ actually, I think we're picking the +-1 locations badly. Instead of being     
+  "almost 1" we should pick them in the middle of the +-1 band. I'm just not    
+  sure if we should put them at +-66, or look at the distribution and put them  
+  on the mean or median of their band?                                          
+● Right, c=0.85 was somewhat arbitrary — chose "near the wall, leave a sliver of
+   barrier headroom." Putting the codepoint in the band's center of mass is a
+  sharper choice: it minimizes commit-time q_err per weight, which is what
+  actually translates to loss damage.
+
+  The numbers favor your intuition. With target_zero_frac=0.38 and Gaussian-ish
+  |w|, the positive band is roughly [0.45, 1.0]; mean is around 0.65-0.70 for a
+  half-normal, median around 0.65. So 2/3 isn't a magic constant — it's where 
+  data-driven mean lands for SmolLM2-shaped distributions.
+
+  Mean vs median: for L2 commit-damage (squared q_err), mean is optimal. Median
+  is more robust to outliers, but our weights are bounded by the barrier (no
+  real outliers), so mean wins on principle.
+
+  Fixed vs per-(row, group): the band shape varies per group. A scalar c=0.66
+  captures the global mean; per-(row, group) c_{r,g} = mean(|w| over the band)
+  captures each group's actual center. Cost: c becomes a tensor of shape [out_f,
+   n_groups] instead of a scalar — touches rescale_for_leeway, enforce_frozen,
+  compute_commit_targets, select_and_commit_one_per_group. ~30-50 lines of
+  changes.
+
+  Symmetry constraint: c_pos = c_neg = c_{r,g} (same magnitude). If you want
+  different positive and negative codepoints, you'd break per-(row, group)
+  scales — that's a much bigger redesign. The clean version uses symmetric
+  per-group magnitudes.
+
+  Important caveat about timing: the in-flight Run D has 37 rounds of commits at
+   c=0.85. Changing c mid-flight is a no-go — already-committed weights are
+  pinned at ±0.85 and would map to wrong deploy values. So this is for the next
+  run, not a hot patch.
+
+  Three concrete paths:
+
+  (a) Scalar c=2/3 in a fresh run. Tiny patch (one default change). Captures
+  most of the benefit, no per-(row, group) machinery.
+
+  (b) Per-(row, group) c_{r,g} = mean(|w| over band) at init. Bigger patch but
+  tighter fit, and the mean is a one-shot init-time computation (free at
+  runtime).
+
+  (c) Combine: scalar c (=2/3) for simplicity, AND warm-start the next run from
+  the step-2085 best_snapshot (the EMA-1.62 state). Tests c=2/3 against the same
+   data trajectory.
+
+  My pick is (c) — it isolates "did the c-change help?" because the starting
+  weights are identical to where Run D was healthiest. (b) is cleaner long-term
+  but more code; worth doing after (c) tells us c=2/3 actually beats c=0.85.
+
+  Which direction?
+
+✻ Cogitated for 1m 4s
+
+❯ ok let's do c for a while.                                                    
+  Also, maybe we can just drop the barrier force and just clamp at -1,1. The    
+  natural distribution and wd already pull the weights inwards                  
+
+● Both make sense. Let me wire them in.
+
+  Searched for 3 patterns, read 1 file (ctrl+o to expand)
+
+● Update(smollmer/progressive_distill.py)
+  ⎿  Added 16 lines, removed 6 lines
+      451      ap.add_argument("--run-name", type=str, default=None)
+      452  
+      453      # ---- progressive-specific ----
+      454 -    ap.add_argument("--c", type=float, default=0.85,          
+      454 +    ap.add_argument("--c", type=float, default=2.0 / 3.0,     
+      455                      help="Leeway codepoint magnitude. Codebook
+            in latent "
+      456 -                         "space is {-c, 0, +c}; weights live i
+          -n roughly "                                                   
+      457 -                         "[-1, 1] with c giving headroom to th
+          -e soft barrier. "                                             
+      458 -                         "0.85 ≈ 18%% headroom.")             
+      459 -    ap.add_argument("--barrier-coef", type=float, default=1e-4
+          -,                                                             
+      456 +                         "space is {-c, 0, +c}; weights live i
+          +n [-1, 1] "                                                   
+      457 +                         "(hard-clamped post-step). 2/3 ≈ 0.66
+          +7 puts the "                                                  
+      458 +                         "codepoint near the center of mass of
+          + the |w|-band "                                               
+      459 +                         "above the target_zero_frac cutoff fo
+          +r Gaussian-ish "                                              
+      460 +                         "weight distributions — minimizes com
+          +mit q_err on "                                                
+      461 +                         "average. Lower (e.g. 0.5) pushes cod
+          +epoints further "                                             
+      462 +                         "from the [-1, 1] edge; higher (e.g. 
+          +0.85) leaves "                                                
+      463 +                         "more soft-barrier headroom but infla
+          +tes commit "                                                  
+      464 +                         "q_err.")                            
+      465 +    ap.add_argument("--barrier-coef", type=float, default=0.0,
+      466                      help="Coefficient on the relu(|w|−1)² soft
+            barrier loss. "
+      461 -                         "Small — only nudges outliers back in
+          -side [-1, 1].")                                               
+      467 +                         "Default 0: we rely on hard clamp_(-1
+          +, 1) after each "                                             
+      468 +                         "opt.step instead — natural weight di
+          +stribution and "                                              
+      469 +                         "weight decay pull weights inward; th
+          +e soft barrier "                                              
+      470 +                         "added ~1 GB of fp32 autograd graph f
+          +or negligible "                                               
+      471 +                         "benefit. Set >0 to re-enable the sof
+          +t form.")                                                     
+      472      ap.add_argument("--target-zero-frac", type=float, default=
+           0.38,
+      473                      help="Fraction of weights per (row, group)
+            targeting 0 "
+      474                           "(the rest target ±c). Per-group |w|-
+           quantile cutoff. "
+
+● clamp_qlinear_weights is already wired in (line 745). So we already have the
+  hard clamp. I've now also:
+  - Set --c default to 2/3
+  - Set --barrier-coef default to 0
+
+  Both with updated help text describing the new model.
+
+  Now for the Run E warm-start. The question is whether best_snapshot (step
+  2085, ~25% committed at c=0.85) is the right starting point given we're
+  changing c.
+
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+● Math for the warm-start: the latents in best_snapshot are in [-0.85, +0.85]
+  (since Run D applied rescale_for_leeway(c=0.85) at init), with the committed
+  weights pinned at ±0.85. If we load that and continue with c=2/3, those
+  previously-committed weights would be at ±0.85 latent (outside the new
+  codebook) — commit q_err would be huge.
+
+  Fix: at extract time, apply a one-shot rescale from c_old=0.85 to c_new=2/3 —
+  w *= c_new/c_old, s *= c_old/c_new. Forward unchanged. Committed weights at
+  ±0.85 become ±0.667 = exactly the new codepoint, and unfrozen latents shrink
+  proportionally.
+
+● Write(extract_best_for_run_e.py)
+  ⎿  Wrote 77 lines to extract_best_for_run_e.py
+         tents from best_snapshot from a Run D interrupted.pt, rescale la
+       2 c_old (Run D's c) to c_new (Run E's c), strip progressive buffer
+         s, and save
+       4 as a safetensors warm-start for progressive_distill --resume.
+       5 Math: per QLinear,
+       6     w_new = w_old * (c_new / c_old)
+       8 so forward = (w_new * s_new) is unchanged. Committed slots that 
+         were at
+       9 ±c_old in latent are now at ±c_new exactly.
+      10 """
+     … +77 lines (ctrl+o to expand)
+
+● Bash(cd /home/wmertens/Projects/smollmer && export LD_LIBRARY_PATH=/run/opengl
+      -driver/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH} && mkdir -p
+      smollmer/ckpts.prog-E-c0.6…)
+  ⎿  [load] smollmer/ckpts.prog-D-lr3e-4-mspr50/interrupted.pt
+     [load] best_step=2085 best_ema=1.6221946775798197
+     [rescale] c_old=0.85  c_new=0.6666666666666666  w *= 0.7843  s *= 1.27
+     … +4 lines (ctrl+o to expand)
+
+● Write(smollmer/ckpts.prog-E-c0.667/run.sh)
+  ⎿  Wrote 35 lines to smollmer/ckpts.prog-E-c0.667/run.sh
+       2 # Run E: progressive distillation with c=2/3 (codepoint at band 
+         center-of-mass)
+         n D's barrier off (hard clamp_(-1, 1) only). Warm-starts from Ru
+       4 # best_snapshot at step 2085 (ema=1.622), rescaled from c_old=0.
+       5 # c_new=2/3 so previously-committed weights land exactly on the 
+         new codepoint.
+       7 # Logs (append) to log.txt in this dir.
+       8 # Process substitution avoids the SIGINT-kills-tee-broken-pipe b
+       9 # python signal handler is now robust either way.
+      10 set -euo pipefail
+     … +31 lines (ctrl+o to expand)
+
+● Bash(chmod +x
+      /home/wmertens/Projects/smollmer/smollmer/ckpts.prog-E-c0.667/run.sh && ls
+       -la /home/wmertens/Projects/smollmer/smollmer/ckpts.prog-E-c0.667/)
+  ⎿  total 441718
+     drwxr-xr-x  2 wmertens users         0 May 13 14:51 .
+     drwxr-xr-x 30 wmertens users         0 May 13 14:51 ..
+     … +3 lines (ctrl+o to expand)
+
+● Run E set up at smollmer/ckpts.prog-E-c0.667/:
+
+  - best_step2085_rescaled.safetensors (452 MB) — Run D's step-2085
+  best_snapshot, latents rescaled w *= 2/3 / 0.85 = 0.7843, scales s *= 1.275.
+  Forward identical to Run D's step-2085. Previously-committed weights now sit
+  exactly at ±2/3 latent. Progressive buffers stripped (frozen_mask/target start
+   at zero — fresh commit schedule).
+  - run.sh — warm-starts from the safetensors, uses the new defaults (c=2/3,
+  barrier off, hard clamp, log every 1000 steps).
+
+  When ready: cd /home/wmertens/Projects/smollmer/smollmer/ckpts.prog-E-c0.667 
+  && ./run.sh.
+
+  Note: the qualitative-analysis cron defaults to the most-recently-modified
+  ckpts.prog-* dir, so once Run E starts writing, the next /loop firing will
+  check Run E automatically.
+
+✻ Churned for 3m 18s
+
+※ recap: Goal: ternarize SmolLM2-135M via progressive distillation. Run D OOM'd on the barrier autograd graph; Run E is staged with c=2/3, barrier off, warm-started from Run D's step-2085 best_snapshot. Next: cd into ckpts.prog-E-c0.667 and start ./run.sh.
+
+❯ I now have 1.5GB free vram - enough to do 2 batches again?                    
+
+● Bash(nvidia-smi --query-gpu=memory.free,memory.used,memory.total --format=csv)
+  ⎿  memory.free [MiB], memory.used [MiB], memory.total [MiB]
+     1591 MiB, 4185 MiB, 6141 MiB
+
+● Quick math check against nvidia-smi:
+
+  - Total: 6.0 GiB
+  - Currently used by other procs: 4.2 GiB
+  - Currently free: 1.6 GiB
+
+  That's the free RIGHT NOW before training starts. Training previously peaked
+  at 5.6 GiB while the GPU had only ~40 MiB used by other procs — so the
+  OS/other-procs footprint has gone up by ~4 GiB since then. Strange unless
+  something else is running now that wasn't before (browser GPU tab, Wayland
+  compositor change, etc.).
+
+  Net for batch=2 vs batch=1 in Run E:
+  - Saved: ~1 GB peak from removing the barrier autograd graph.
+  - Added: ~0.5–1 GB from doubling activation memory.
+
+  So peak should be roughly even or slightly lower than the batch=1 + barrier-on
+   case that was crashing at 5.6 GiB. With ~1.6 GiB free right now, batch=2 has
+  a real chance — but only if the other-proc footprint stays at 4.2 GiB. If you
+  can close whatever's holding the 4.2 GiB before launching, you'd be back to
+  the old "almost all GPU available" regime and batch=2 is clearly safe.
+
+  Recommended: try --batch-size 2 --grad-accum 8 in Run E's run.sh. If it OOMs
+  in the first 100 steps (when allocator is still finding peaks), fall back to
+  1/16. Want me to flip run.sh now?
+
+✻ Cooked for 1m 16s
+
+❯ yes flip it                                                                   
+
+● Update(smollmer/ckpts.prog-E-c0.667/run.sh)
+  ⎿  Added 2 lines, removed 2 lines
+      30    --lr 3e-4 \
+      31    --min-steps-per-round 50 \
+      32    --autocast-dtype none \
+      33 -  --batch-size 1 \                                             
+      34 -  --grad-accum 16 \                                            
+      33 +  --batch-size 2 \                                             
+      34 +  --grad-accum 8 \                                             
+      35    > >(tee -a "$LOG") 2>&1
+
+● Done. Same effective batch (16), half the gradient-accum steps per opt update.
+   Launch with cd smollmer/ckpts.prog-E-c0.667 && ./run.sh.
+
+✻ Baked for 7s
+※ recap: Goal: progressive ternary distillation of SmolLM2-135M. Run E is set up — c=2/3, barrier replaced by hard clamp, warm-started from Run D's step-2085 best_snapshot (ema 1.622), batch-size 2. Next: launch `smollmer/ckpts.prog-E-c0.667/run.sh`.
+
+✻ Running scheduled task (May 13 3:37pm)
+
+● Bash(/home/wmertens/Projects/smollmer/check_run.sh 2>&1 | tail -120)
+  ⎿  no interrupted.pt in smollmer/ckpts.prog-E-c0.667
+
+● Bash(/home/wmertens/Projects/smollmer/check_run.sh
+      smollmer/ckpts.prog-D-lr3e-4-mspr50 2>&1 | tail -100)
+  ⎿  Interrupted · What should Claude do instead?
+
+❯ sigint save failed                                                            
+                                                                                
+  progressive: 490it [45:20,  5.95s/it, step=490, loss=1.6458, ema=1.6691,      
+  round=0/64, cf=0.000, in_round=290, lr=3.00e-04]^C                            
+  [!] SIGINT — finishing current step, then saving resume state. Press Ctrl-C   
+  again to hard-exit.                                                           
+  progressive: 490it [46:15,  5.67s/it, step=490, loss=1.6458, ema=1.6691,      
+  round=0/64, cf=0.000, in_round=290, lr=3.00e-04]                              
+  Traceback (most recent call last):                                            
+    File "<frozen runpy>", line 198, in _run_module_as_main                     
+    File "<frozen runpy>", line 88, in _run_code                                
+    File "/home/wmertens/Projects/smollmer/smollmer/progressive_distill.py",    
+  line 939, in <module>                                                         
+      main()                                                                    
+    File "/home/wmertens/Projects/smollmer/smollmer/progressive_distill.py",    
+  line 725, in main                                                             
+      running += loss.item()                                                    
+                 ^^^^^^^^^^^                                                    
+    File "/home/wmertens/Projects/smollmer/.venv/lib/python3.12/site-packages/t 
+  orch/utils/data/_utils/signal_handling.py", line 73, in handler               
+      _error_if_any_worker_fails()                                              
+  RuntimeError: DataLoader worker (pid 930824) is killed by signal: Interrupt.  
+
+● The worker fix (SIG_DFL) was wrong — it makes the worker die on SIGINT, which
+  pytorch's DataLoader detects on the next batch fetch (or any loss.item) and
+  raises RuntimeError, killing the main process before it reaches the save
+  check.
+
+  The fix is SIG_IGN (ignore) in the worker — silent and alive, so the main
+  process can do its work and then shut down cleanly. Let me also add a
+  finally-save so any future exception that gets past the gate is still
+  recoverable.
+
+● Update(smollmer/progressive_distill.py)
+  ⎿  Added 7 lines, removed 2 lines
+      612      def _worker_init(_worker_id: int) -> None:
+      613          # Workers inherit the main process's SIGINT handler vi
+           a fork, which
+      614          # causes the handler's print to fire once per worker o
+           n Ctrl-C.
+      615 -        # Reset to default in workers; only the main process s
+          -hould handle.                                                 
+      615 +        # IGNORE (not DEFAULT) in workers: SIG_DFL would kill 
+          +the worker on                                                 
+      616 +        # Ctrl-C, and the main process's next loss.item()/batc
+          +h fetch would                                                 
+      617 +        # raise "DataLoader worker is killed by signal" before
+          + reaching the                                                 
+      618 +        # save check — losing the resume save we wanted. SIG_I
+          +GN keeps the                                                  
+      619 +        # worker alive and silent; main shuts it down cleanly 
+          +via the                                                       
+      620 +        # gate-flag save path.                                
+      621          import signal as _sig
+      617 -        _sig.signal(_sig.SIGINT, _sig.SIG_DFL)                
+      622 +        _sig.signal(_sig.SIGINT, _sig.SIG_IGN)                
+      623  
+      624      dl = DataLoader(ds, batch_size=args.batch_size,
+      625                      num_workers=args.num_workers,
+
+  Read 1 file (ctrl+o to expand)
+
+● Update(smollmer/progressive_distill.py)
+  ⎿  Added 19 lines
+      910                  pbar.close()
+      911                  print(f"[!] saved {interrupted_path}")
+      912                  sys.exit(0)
+      913 +    except BaseException as e:                                
+      914 +        # Best-effort save on any unexpected exit (KeyboardInt
+          +errupt,                                                       
+      915 +        # DataLoader worker death, OOM, etc.) so we don't lose
+          + progress.                                                    
+      916 +        # Re-raise after save unless this is a clean interrupt
+          +.                                                             
+      917 +        try:                                                  
+      918 +            prog_state = {"round_idx": round_idx,             
+      919 +                          "gate": gate.state_dict(),          
+      920 +                          "type": "progressive"}              
+      921 +            samples_at_save = (global_step                    
+      922 +                               * args.grad_accum * args.batch_
+          +size)                                                         
+      923 +            save_resume(interrupted_path, model, opt, global_s
+          +tep,                                                          
+      924 +                        best_snapshot, ctrl.state_dict(), run_
+          +name,                                                         
+      925 +                        samples_consumed=samples_at_save,     
+      926 +                        soft_state=prog_state)                
+      927 +            print(f"[!] emergency save → {interrupted_path} " 
+      928 +                  f"(reason: {type(e).__name__})", flush=True)
+      929 +        except Exception as save_err:                         
+      930 +            print(f"[!!] emergency save failed: {save_err}", f
+          +lush=True)                                                    
+      931 +        raise                                                 
+      932      finally:
+      933          pbar.close()
+      934  
+
+● Two fixes in place:
+
+  1. Worker SIGINT → SIG_IGN (not SIG_DFL). Worker stays alive but silent on
+  Ctrl-C; main does the save.
+  2. except BaseException around the loop — emergency save on any unexpected
+  exit (worker death, OOM, KeyboardInterrupt that doesn't reach the gate), then
+  re-raise. Belt-and-braces.
+
+  Unfortunately the step-490 state of Run E is gone (no save happened).
+  Restarting ./run.sh will warm-start again from the rescaled best_step2085 —
+  losing ~50 min of progress, but now SIGINT will actually save.
+
+  Also worth noting from the brief Run E session before the crash: ema 1.6691 at
+   step 490 with gap 0.034 — below the 0.05 commit threshold. No commits yet
+  because the new strict two-sided gate sees the EMA still actively dropping
+  (fast < slow). That's the intended behavior; it just takes longer to find a
+  true plateau. Round 0 is expected for a while as the rescaled weights settle
+  into the new c=2/3 codebook.
+
+✻ Baked for 1m 0s
+
+❯ anyway, the run looked good, so let's do the clean implementation of the      
+  value of c determination                                                      
+
+● Let me read the relevant pieces to plan the refactor.
+
+  Searched for 2 patterns, read 1 file (ctrl+o to expand)
+
+● The simpler/cleaner design lands here: don't rescale at init — just remember 
+  c_{r,g} per group, use it at commit and at deploy. The hard clamp keeps
+  latents in [-1, 1]; commits snap to ±c_{r,g}; deploy fold divides by c_{r,g}
+  per group. No "leeway rescale" step needed.
+
+  This is actually better than my earlier sketch — with a global rescale by c,
+  the band weights end up at mean ≈ c² (not c), so q_err is worse than no
+  rescale. Skipping the rescale and just remembering c per group gives q_err ≈ 0
+   on average.
+
+  Let me implement.
+
+● Update(smollmer/progressive_distill.py)
+  ⎿  Added 68 lines, removed 7 lines
+      60  # =============================================================
+          ===============
+      61  # Per-QLinear progressive state
+      62  # =============================================================
+          ===============
+      63 -# Two persistent buffers per QLinear (so they ride along in sta
+         -te_dict and                                                    
+      63 +# Three persistent buffers per QLinear (so they ride along in s
+         +tate_dict and                                                  
+      64  # resume Just Works):
+      65 -#   frozen_mask   : bool[out, in]  — True for committed slots  
+      66 -#   frozen_target : int8[out, in]  — sign of the committed valu
+         -e (-1/0/+1)                                                    
+      65 +#   frozen_mask   : bool[out, in]            — True for committ
+         +ed slots                                                       
+      66 +#   frozen_target : int8[out, in]            — sign of committe
+         +d value (-1/0/+1)                                              
+      67 +#   codepoint_c   : fp32[out, n_groups]      — codepoint magnit
+         +ude per (row,group)                                            
+      68  #
+      68 -# The actual latent value at a frozen slot is `frozen_target * 
+         -c`. We don't                                                   
+      69 -# store c per-module because it's a training hyperparameter (sa
+         -me for every                                                   
+      70 -# module in a run).                                            
+      69 +# The latent value at a frozen slot is `frozen_target[r, c] * c
+         +odepoint_c[r, g]`                                              
+      70 +# where g = c // group_size. c_{r,g} is data-driven: at init we
+         + set it to the                                                 
+      71 +# mean of |w| over the band weights (|w| above the quantile bou
+         +ndary) in each                                                 
+      72 +# (row, group). That choice minimizes commit q_err on average —
+         + the band                                                      
+      73 +# weights are centered on the codepoint, not crowded against th
+         +e |w|=1 edge.                                                  
+      74  
+      72 -def attach_progressive_buffers(model: torch.nn.Module) -> int: 
+      75 +def attach_progressive_buffers(model: torch.nn.Module,         
+      76 +                               default_c: float = 2.0 / 3.0) ->
+         + int:                                                          
+      77      n = 0
+      78      for m in model.modules():
+      79          if not isinstance(m, QLinear):
+     ...
+       89                  torch.zeros_like(m.weight, dtype=torch.int8),
+       90                  persistent=True,
+       91              )
+       92 +        if not hasattr(m, "codepoint_c"):                     
+       93 +            out_f = m.weight.shape[0]                         
+       94 +            m.register_buffer(                                
+       95 +                "codepoint_c",                                
+       96 +                torch.full((out_f, m.n_groups), default_c,    
+       97 +                           dtype=torch.float32, device=m.weigh
+          +t.device),                                                    
+       98 +                persistent=True,                              
+       99 +            )                                                 
+      100          n += 1
+      101      return n
+      102  
+      103  
+      104  @torch.no_grad()
+      105 +def compute_per_group_c(model: torch.nn.Module,               
+      106 +                        target_zero_frac: float | None,       
+      107 +                        fallback_c: float) -> dict[str, float]
+          +:                                                             
+      108 +    """Compute c_{r,g} = mean(|w| over band) per (row, group),
+          + where the band                                               
+      109 +    is defined by |w| > quantile(target_zero_frac). Writes int
+          +o m.codepoint_c.                                              
+      110 +    Returns aggregate stats."""                               
+      111 +    all_c = []                                                
+      112 +    for m in model.modules():                                 
+      113 +        if not isinstance(m, QLinear):                        
+      114 +            continue                                          
+      115 +        out_f = m.weight.shape[0]                             
+      116 +        gs, ng = m.group_size, m.n_groups                     
+      117 +        w = m.weight.detach().float()                         
+      118 +        abs_wb = w.view(out_f, ng, gs).abs()                  
+      119 +        if target_zero_frac is not None and 0.0 < target_zero_
+          +frac < 1.0:                                                   
+      120 +            cutoff = abs_wb.quantile(float(target_zero_frac), 
+      121 +                                     dim=-1, keepdim=True)    
+      122 +            is_band = abs_wb > cutoff                         
+      123 +        else:                                                 
+      124 +            is_band = abs_wb >= 0.5                           
+      125 +        band_sum = (abs_wb * is_band.float()).sum(dim=-1)     
+          +   # [out, ng]                                                
+      126 +        band_count = is_band.float().sum(dim=-1)              
+          +    # [out, ng]                                               
+      127 +        c_rg = band_sum / band_count.clamp_min(1.0)           
+      128 +        c_rg = torch.where(band_count > 0, c_rg,              
+      129 +                           torch.full_like(c_rg, fallback_c)) 
+      130 +        m.codepoint_c.copy_(c_rg.to(m.codepoint_c.dtype))     
+      131 +        all_c.append(c_rg.flatten())                          
+      132 +    if not all_c:                                             
+      133 +        return {"mean": 0.0, "min": 0.0, "max": 0.0, "p50": 0.
+          +0}                                                            
+      134 +    cat = torch.cat(all_c)                                    
+      135 +    return {                                                  
+      136 +        "mean": float(cat.mean()),                            
+      137 +        "min": float(cat.min()),                              
+      138 +        "max": float(cat.max()),                              
+      139 +        "p50": float(cat.median()),                           
+      140 +    }                                                         
+      141 +                                                              
+      142 +                                                              
+      143 +def _c_per_element(m: QLinear) -> torch.Tensor:               
+      144 +    """Broadcast codepoint_c [out, ng] → [out, in] for per-ele
+          +ment ops."""                                                  
+      145 +    out_f = m.weight.shape[0]                                 
+      146 +    gs, ng = m.group_size, m.n_groups                         
+      147 +    return (m.codepoint_c.unsqueeze(-1)                       
+      148 +            .expand(out_f, ng, gs)                            
+      149 +            .reshape(out_f, out_f * 0 + ng * gs)              
+      150 +            .to(m.weight.dtype))                              
+      151 +                                                              
+      152 +                                                              
+      153 +@torch.no_grad()                                              
+      154  def rescale_for_leeway(model: torch.nn.Module, c: float) -> in
+           t:
+      155      """Math-preserving: w *= c, s /= c per QLinear, so the lar
+           gest-magnitude
+      156      weight per (row, group) sits at exactly ±c after init (it 
+           was at ±1
+
+● Update(smollmer/progressive_distill.py)
+  ⎿  Added 2 lines, removed 2 lines
+      142  
+      143  def _c_per_element(m: QLinear) -> torch.Tensor:
+      144      """Broadcast codepoint_c [out, ng] → [out, in] for per-ele
+           ment ops."""
+      145 -    out_f = m.weight.shape[0]                                 
+      145 +    out_f, in_f = m.weight.shape                              
+      146      gs, ng = m.group_size, m.n_groups
+      147      return (m.codepoint_c.unsqueeze(-1)
+      148              .expand(out_f, ng, gs)
+      149 -            .reshape(out_f, out_f * 0 + ng * gs)              
+      149 +            .reshape(out_f, in_f)                             
+      150              .to(m.weight.dtype))
+      151  
+      152  
+
+● Now update enforce_frozen, compute_commit_targets,
+  select_and_commit_one_per_group, the deploy fold, and the main init.
+
+● Update(smollmer/progressive_distill.py)
+  ⎿  Added 6 lines, removed 25 lines
+      151  
+      152  
+      153  @torch.no_grad()
+      154 -def rescale_for_leeway(model: torch.nn.Module, c: float) -> in
+          -t:                                                            
+      155 -    """Math-preserving: w *= c, s /= c per QLinear, so the lar
+          -gest-magnitude                                                
+      156 -    weight per (row, group) sits at exactly ±c after init (it 
+          -was at ±1                                                     
+      157 -    courtesy of build_student's scale = max(|w|)). Forward out
+          -put is                                                        
+      158 -    unchanged byte-for-byte."""                               
+      159 -    if c == 1.0:                                              
+      160 -        return 0                                              
+      161 -    n = 0                                                     
+      154 +def enforce_frozen(model: torch.nn.Module) -> None:           
+      155 +    """Overwrite committed slots with their target value `froz
+          +en_target *                                                   
+      156 +    codepoint_c[r, g]` in latent space. Call after every opt.s
+          +tep() so                                                      
+      157 +    weight decay / clamp / autocast drift can't move them.""" 
+      158      for m in model.modules():
+      159          if not isinstance(m, QLinear):
+      160              continue
+      165 -        m.weight.data.mul_(c)                                 
+      166 -        m.scales.data.div_(c)                                 
+      167 -        m.invalidate_q_cache()                                
+      168 -        n += 1                                                
+      169 -    return n                                                  
+      170 -                                                              
+      171 -                                                              
+      172 -@torch.no_grad()                                              
+      173 -def enforce_frozen(model: torch.nn.Module, c: float) -> None: 
+      174 -    """Overwrite committed slots with their target value, in l
+          -atent space.                                                  
+      175 -    Call after every opt.step() so weight decay / barrier / au
+          -tocast drift                                                  
+      176 -    can't move them."""                                       
+      177 -    for m in model.modules():                                 
+      178 -        if not isinstance(m, QLinear):                        
+      179 -            continue                                          
+      161          if not bool(m.frozen_mask.any()):
+      162              continue
+      182 -        target_val = m.frozen_target.to(m.weight.dtype) * c   
+      183 -        # In-place: only write the slots we need to overwrite.
+      163 +        c_elem = _c_per_element(m)                            
+      164 +        target_val = m.frozen_target.to(m.weight.dtype) * c_el
+          +em                                                            
+      165          m.weight.data[m.frozen_mask] = target_val[m.frozen_mas
+           k]
+      166          m.invalidate_q_cache()
+      167  
+
+● Update(smollmer/progressive_distill.py)
+  ⎿  Added 8 lines, removed 11 lines
+      208  # ============================================================
+           ================
+      209  
+      210  @torch.no_grad()
+      211 -def compute_commit_targets(m: QLinear, c: float,              
+      211 +def compute_commit_targets(m: QLinear,                        
+      212                             target_zero_frac: float | None) -> 
+           torch.Tensor:
+      213 -    """Per-element target ∈ {-c, 0, +c}, in m.weight's dtype. 
+      213 +    """Per-element target ∈ {-c_{r,g}, 0, +c_{r,g}}, in m.weig
+          +ht's dtype.                                                   
+      214 +    c_{r,g} comes from m.codepoint_c (data-driven, one per (ro
+          +w, group)).                                                   
+      215  
+      215 -    target_zero_frac=None → fixed c/2 boundary (uniform-distri
+          -bution                                                        
+      216 -    natural split): |w| < c/2 → 0, else sign(w)·c. Over-zeros 
+          -heavily                                                       
+      217 -    for Gaussian-ish weights (~91% zero observed on Run A).   
+      218 -                                                              
+      216 +    target_zero_frac=None → fixed 0.5 boundary on |w|.        
+      217      target_zero_frac ∈ (0, 1) → per-(row, group) |w|-quantile 
+           cutoff.
+      220 -    Below the cutoff → 0, above → sign(w)·c. By construction, 
+          -exactly                                                       
+      221 -    target_zero_frac of weights per group classify as 0. Match
+          -es the                                                        
+      222 -    nearest_ternary_quantile approach in qlinear.py.          
+      218 +    Below cutoff → 0, above → sign(w)·c_{r,g}.                
+      219      """
+      220      out_f = m.weight.shape[0]
+      221      gs, ng = m.group_size, m.n_groups
+     ...
+      227                                   dim=-1, keepdim=True)
+      228          is_zero = abs_wb <= cutoff
+      229      else:
+      234 -        is_zero = abs_wb < 0.5 * c                            
+      230 +        is_zero = abs_wb < 0.5                                
+      231 +    c_b = m.codepoint_c.unsqueeze(-1).expand(out_f, ng, gs).fl
+          +oat()                                                         
+      232      target_b = torch.where(is_zero, torch.zeros_like(wb),
+      236 -                           torch.sign(wb) * c)                
+      233 +                           torch.sign(wb) * c_b)              
+      234      return target_b.view(out_f, -1).to(m.weight.dtype)
+      235  
+      236  
+
+● Update(smollmer/progressive_distill.py)
+  ⎿  Removed 1 line
+      238  def select_and_commit_one_per_group(
+      239      model: torch.nn.Module,
+      240      opt: torch.optim.Optimizer,
+      241 -    c: float,                                                 
+      241      momentum_weight: float,
+      242      target_zero_frac: float | None,
+      243  ) -> tuple[int, dict[str, float]]:
+
+● Update(smollmer/progressive_distill.py)
+  ⎿  Added 1 line, removed 1 line
+      264          gs, ng = m.group_size, m.n_groups
+      265          w = m.weight.detach().float()
+      266          fm = m.frozen_mask
+      267 -        target = compute_commit_targets(m, c, target_zero_frac
+          -).float()                                                     
+      267 +        target = compute_commit_targets(m, target_zero_frac).f
+          +loat()                                                        
+      268          q_err = (w - target).abs()
+      269          # Momentum penalty (Lion / AdamW both store 'exp_avg')
+           .
+      270          mst = state.get(m.weight, None)
+
+● Now update the call sites in main():
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+● Update(smollmer/progressive_distill.py)
+  ⎿  Added 13 lines, removed 6 lines
+      578      embed_init = (_embed.weight.detach().clone()
+      579                    if _embed is not None else None)
+      580  
+      581 -    # ---- Soft mode at α=0 (forward = identity), attach buffe
+          -rs, rescale ----                                              
+      581 +    # ---- Soft mode at α=0 (forward = identity), attach buffe
+          +rs, fit c ----                                                
+      582 +    # codepoint_c is per (row, group). Fresh start: compute fr
+          +om data.                                                      
+      583 +    # Resume: state_dict load below restores the saved tensor.
+      584      set_soft_mode(model, alpha=0.0, target_zero_frac=None)
+      583 -    n_buf = attach_progressive_buffers(model)                 
+      584 -    n_resc = rescale_for_leeway(model, args.c) if fresh_start 
+          -else 0                                                        
+      585 -    print(f"[progressive] c={args.c}; soft mode α=0; "        
+      586 -          f"{n_buf} QLinears w/ progressive buffers; "        
+      587 -          f"rescaled {n_resc} (fresh_start={fresh_start})")   
+      585 +    n_buf = attach_progressive_buffers(model, default_c=args.c
+          +)                                                             
+      586 +    if fresh_start:                                           
+      587 +        tzf = (args.target_zero_frac                          
+      588 +               if 0.0 < args.target_zero_frac < 1.0 else None)
+      589 +        cstats = compute_per_group_c(model, tzf, fallback_c=ar
+          +gs.c)                                                         
+      590 +        print(f"[progressive] codepoint_c: mean={cstats['mean'
+          +]:.4f} "                                                      
+      591 +              f"min={cstats['min']:.4f} max={cstats['max']:.4f
+          +} "                                                           
+      592 +              f"p50={cstats['p50']:.4f}")                     
+      593 +    print(f"[progressive] soft mode α=0; {n_buf} QLinears w/ p
+          +rogressive "                                                  
+      594 +          f"buffers; fresh_start={fresh_start}")              
+      595  
+      596      # ---- Optimizer (same param-group split as distill.py) --
+           --
+      597      scale_lr_mult = (args.scale_lr_mult if args.scale_lr_mult 
+           is not None
+
+● Update(smollmer/progressive_distill.py)
+  ⎿  Added 2 lines, removed 2 lines
+      801                  grad_norm = float(torch.nn.utils.clip_grad_nor
+           m_(
+      802                      model.parameters(), args.max_grad_norm))
+      803              opt.step()
+      804 -            enforce_frozen(model, args.c)        # undo wd / b
+          -arrier on frozen                                              
+      804 +            enforce_frozen(model)        # undo wd / barrier o
+          +n frozen                                                      
+      805              clamp_qlinear_weights(model)          # keep unfro
+           zen in [-1, 1]
+      806              opt.zero_grad(set_to_none=True)
+      807              global_step += 1
+     ...
+      827                              st = opt.state.get(p, {})
+      828                              if "exp_avg" in st:
+      829                                  st["exp_avg"].mul_(args.post_c
+           ommit_momentum_damp)
+      830 -                    enforce_frozen(model, args.c)  # re-pin af
+          -ter damp                                                      
+      830 +                    enforce_frozen(model)  # re-pin after damp
+      831                      if args.device.startswith("cuda"):
+      832                          torch.cuda.empty_cache()
+      833                      round_idx += 1
+
+  Read 1 file (ctrl+o to expand)
+
+● Update(smollmer/progressive_distill.py)
+  ⎿  Added 1 line, removed 1 line
+      821                      tzf = (args.target_zero_frac
+      822                             if 0.0 < args.target_zero_frac < 1.
+           0 else None)
+      823                      n_c, sel_stats = select_and_commit_one_per
+           _group(
+      824 -                        model, opt, args.c, args.momentum_weig
+          -ht, tzf)                                                      
+      824 +                        model, opt, args.momentum_weight, tzf)
+      825                      if args.post_commit_momentum_damp != 1.0:
+      826                          for p in model.parameters():
+      827                              st = opt.state.get(p, {})
+
+  Read 1 file (ctrl+o to expand)
+
+● Update(smollmer/progressive_distill.py)
+  ⎿  Added 6 lines, removed 3 lines
+      977      finally:
+      978          pbar.close()
+      979  
+      980 -    # ---- Done: fold c into scales (math-preserving) → codebo
+          -ok {-1, 0, +1} ----                                           
+      980 +    # ---- Done: fold c_{r,g} into scales (math-preserving) → 
+          +codebook {-1,0,+1} ----                                       
+      981 +    # Per-group: w /= c_{r,g}, s *= c_{r,g}. Committed slots a
+          +t ±c_{r,g}                                                    
+      982 +    # latent become ±1 in deploy form; scales absorb the magni
+          +tude.                                                         
+      983      print(f"[progressive] complete after {global_step} steps; 
+           "
+      984            f"committed_frac={total_committed_fraction(model):.4
+           f}")
+      985      with torch.no_grad():
+      986          for m in model.modules():
+      987              if not isinstance(m, QLinear):
+      988                  continue
+      987 -            m.weight.data.div_(args.c)                        
+      988 -            m.scales.data.mul_(args.c)                        
+      989 +            c_elem = _c_per_element(m)                        
+      990 +            m.weight.data.div_(c_elem)                        
+      991 +            m.scales.data.mul_(m.codepoint_c.to(m.scales.dtype
+          +))                                                            
+      992              m.invalidate_q_cache()
+      993      out_ckpt = args.out / "stage_progressive.safetensors"
+      994      save_checkpoint(model, out_ckpt, args.model, args.scale_gr
+           oup_size,
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+● Update(smollmer/progressive_distill.py)
+  ⎿  Added 9 lines, removed 10 lines
+      490  
+      491      # ---- progressive-specific ----
+      492      ap.add_argument("--c", type=float, default=2.0 / 3.0,
+      493 -                    help="Leeway codepoint magnitude. Codebook
+          - in latent "                                                  
+      494 -                         "space is {-c, 0, +c}; weights live i
+          -n [-1, 1] "                                                   
+      495 -                         "(hard-clamped post-step). 2/3 ≈ 0.66
+          -7 puts the "                                                  
+      496 -                         "codepoint near the center of mass of
+          - the |w|-band "                                               
+      497 -                         "above the target_zero_frac cutoff fo
+          -r Gaussian-ish "                                              
+      498 -                         "weight distributions — minimizes com
+          -mit q_err on "                                                
+      499 -                         "average. Lower (e.g. 0.5) pushes cod
+          -epoints further "                                             
+      500 -                         "from the [-1, 1] edge; higher (e.g. 
+          -0.85) leaves "                                                
+      501 -                         "more soft-barrier headroom but infla
+          -tes commit "                                                  
+      502 -                         "q_err.")                            
+      493 +                    help="Fallback scalar codepoint magnitude.
+          + Actual "                                                     
+      494 +                         "codepoint c_{r,g} is per-(row, group
+          +), computed "                                                 
+      495 +                         "at init as mean(|w| over band) — min
+          +imizes commit "                                               
+      496 +                         "q_err on average. This flag only mat
+          +ters as a "                                                   
+      497 +                         "fallback for empty bands (target_zer
+          +o_frac=1.0) "                                                 
+      498 +                         "or as the buffer's pre-load default 
+          +before resume "                                               
+      499 +                         "state_dict overwrites it. 2/3 ≈ 0.66
+          +7 is roughly "                                                
+      500 +                         "where mean(|w| over band) lands for 
+          +SmolLM2-shape "                                               
+      501 +                         "Gaussian-ish weight distributions.")
+      502      ap.add_argument("--barrier-coef", type=float, default=0.0,
+      503                      help="Coefficient on the relu(|w|−1)² soft
+            barrier loss. "
+      504                           "Default 0: we rely on hard clamp_(-1
+           , 1) after each "
+
+● Bash(.venv/bin/python -c "from smollmer import progressive_distill" 2>&1 |
+      tail -10)
+  ⎿  (No output)
+
+● Bash(.venv/bin/python -c "
+      from smollmer import progressive_distill as pd…)
+  ⎿  Error: undefined is not an object (evaluating 'H.replace')
+
+● Bash(export LD_LIBRARY_PATH=/run/opengl-driver/lib${LD_LIBRARY_PATH:+:$LD_LIBR
+      ARY_PATH} && .venv/bin/python -c "
+      from smollmer import progressive_distill as pd…)
+  ⎿  enforce_frozen: (model: 'torch.nn.Module') -> 'None'
+     compute_commit_targets: (m: 'QLinear', target_zero_frac: 'float | None
+     ') -> 'torch.Tensor'
+     … +8 lines (ctrl+o to expand)
+
+● Refactor done. Verified:
+  - rescale_for_leeway removed (no init rescale needed under the new scheme).
+  - enforce_frozen(model), compute_commit_targets(m, tzf),
+  select_and_commit_one_per_group(model, opt, mw, tzf) — all c-args dropped, use
+   m.codepoint_c internally.
+  - attach_progressive_buffers(model, default_c) — registers codepoint_c buffer
+  alongside frozen_mask/frozen_target.
+  - compute_per_group_c(model, tzf, fallback_c) — new helper, computes c_{r,g} =
+   mean(|w| over band) and writes to buffer; called only on fresh_start.
+  - Deploy fold uses _c_per_element(m) to broadcast per-group c.
+  - --c is now a fallback scalar (empty bands, pre-load default).
+
+  The new scheme is materially simpler than what we had: no init rescale.
+  Latents start in [-1, 1] (Bonsai's natural scale), the hard clamp keeps them
+  there, and at deploy we fold c_{r,g} into the scales. The data-driven c puts
+  commit targets exactly at the band's center of mass — expected mean q_err is
+  ~0 for band weights at commit time (instead of c*(1-c) ≈ 0.13 under c=0.85 or
+  0.22 under the old c=2/3 rescale scheme).
+
+  Want me to set up ckpts.prog-F-pergroup-c/ with a fresh-start run.sh (no
+  warm-start — we want raw weights for clean per-group c)?
+
+✻ Baked for 4m 18s
+
+※ recap: Goal: distill SmolLM2-135M to ternary weights via progressive blockwise commits. Just refactored to per-(row, group) data-driven codepoint c_{r,g} = mean of |w| band. Next: set up Run F with a fresh-start run.sh in ckpts.prog-F-pergroup-c/.
+
+❯ yes                                                                           
+
+● Bash(mkdir -p
+      /home/wmertens/Projects/smollmer/smollmer/ckpts.prog-F-pergroup-c)
+  ⎿  Done
+
+● Write(smollmer/ckpts.prog-F-pergroup-c/run.sh)
+  ⎿  Wrote 34 lines to smollmer/ckpts.prog-F-pergroup-c/run.sh
+       2 # Run F: clean per-(row, group) codepoint c. At init we compute
+       3 # c_{r,g} = mean(|w| over band weights) per group and store it i
+       4 # QLinear's codepoint_c buffer; commits snap to ±c_{r,g}; deploy
+          fold
+         n Bonsai'sby c_{r,g} per group. No init rescale — latents stay i
+       6 # natural [-1, 1] range under hard clamp_(-1, 1).
+       8 # Fresh start (no --resume): we want raw quantized weights so th
+         e
+         ff ata-driven c is computed off the original distribution, not o
+      10 # previously-rescaled latent space.
+     … +29 lines (ctrl+o to expand)
+
+● Bash(chmod +x
+      /home/wmertens/Projects/smollmer/smollmer/ckpts.prog-F-pergroup-c/run.sh
+      && ls -la
+      /home/wmertens/Projects/smollmer/smollmer/ckpts.prog-F-pergroup-c/)
+  ⎿  total 2
+     drwxr-xr-x  2 wmertens users    0 May 13 15:56 .
+     drwxr-xr-x 31 wmertens users    0 May 13 15:55 ..
+     -rwxr-xr-x  1 wmertens users 1167 May 13 15:56 run.sh
+
+● Run F set up at smollmer/ckpts.prog-F-pergroup-c/run.sh. Fresh start (no
+  --resume), batch=2/grad-accum=8 (kept from Run E since you have the VRAM
+  headroom). At init you should see a [progressive] codepoint_c: mean=… min=… 
+  max=… line — that's the per-group c distribution; expect mean around 0.65-0.70
+   if SmolLM2's weights are Gaussian-ish.
+
+  Launch: cd smollmer/ckpts.prog-F-pergroup-c && ./run.sh.
+
+✻ Cogitated for 22s
+
+※ recap: We're distilling SmolLM2-135M to ternary weights via progressive commits, and just finished refactoring to data-driven per-(row, group) codepoint c. Next: launch Run F from `smollmer/ckpts.prog-F-pergroup-c/run.sh` to test it.
+
+❯ looks like now it's still double saving?                                      
+                                                                                
+  progressive: 90it [07:06,  4.99s/it, step=90, loss=1.6539, ema=1.6505,        
+  round=0/64, cf=0.000, in_round=0, lr=3.00e-04]^C                              
+  [!] SIGINT — finishing current step, then saving resume state. Press Ctrl-C   
+  again to hard-exit.                                                           
+  progressive: 90it [07:50,  5.23s/it, step=90, loss=1.6539, ema=1.6505,        
+  round=0/64, cf=0.000, in_round=0, lr=3.00e-04]                                
+  [!] saved smollmer/ckpts.prog-F-pergroup-c/interrupted.pt                     
+  [!] emergency save → smollmer/ckpts.prog-F-pergroup-c/interrupted.pt (reason: 
+   SystemExit)                                                                  
+● The gate's sys.exit(0) raises SystemExit, which is a BaseException, which my
+  except BaseException catches → second save. Fix:
+
+● Update(smollmer/progressive_distill.py)
+  ⎿  Added 4 lines, removed 1 line
+      954                  pbar.close()
+      955                  print(f"[!] saved {interrupted_path}")
+      956                  sys.exit(0)
+      957 +    except SystemExit:                                        
+      958 +        # The gate-flag SIGINT path calls sys.exit(0) AFTER it
+          +s own save                                                    
+      959 +        # completes. Skip the emergency-save branch so we don'
+          +t save twice.                                                 
+      960 +        raise                                                 
+      961      except BaseException as e:
+      962          # Best-effort save on any unexpected exit (KeyboardInt
+           errupt,
+      963          # DataLoader worker death, OOM, etc.) so we don't lose
+            progress.
+      960 -        # Re-raise after save unless this is a clean interrupt
+          -.                                                             
+      964          try:
+      965              prog_state = {"round_idx": round_idx,
+      966                            "gate": gate.state_dict(),
+
+● Fixed. SIGINT save still runs cleanly; emergency save only triggers for real
+  exceptions (DataLoader worker death, OOM, etc.) that don't go through the
+  gate. Effective on next restart.
+
+✻ Churned for 17s
+
+❯ seems the resume hits out of memory again. Is there anything that's taking    
+  more during resume?                                                           
+  ⎿  Interrupted · What should Claude do instead?
+
+❯ seems the resume hits out of memory again. Is there anything that's taking    
+  more during resume?                                                           
+                                                                                
+  [progressive] L_T = 1.6348                                                    
+  [tb] smollmer/tb/1778680600 prog CAdamW c_per_group noball lr3e-4 mspr50      
+  wu400                                                                         
+  progressive: 0it [00:00, ?it/s][!] emergency save →                           
+  smollmer/ckpts.prog-F-pergroup-c/interrupted.pt (reason: OutOfMemoryError)    
+  progressive: 0it [00:12, ?it/s]                                               
+  Traceback (most recent call last):                                            
+    File "<frozen runpy>", line 198, in _run_module_as_main                     
+    File "<frozen runpy>", line 88, in _run_code                                
+    File "/home/wmertens/Projects/smollmer/smollmer/progressive_distill.py",    
+  line 1013, in <module>                                                        
+      main()                                                                    
+    File "/home/wmertens/Projects/smollmer/smollmer/progressive_distill.py",    
+  line 773, in main                                                             
+      (loss / args.grad_accum).backward()                                       
+    File "/home/wmertens/Projects/smollmer/.venv/lib/python3.12/site-packages/t 
+  orch/_tensor.py", line 631, in backward                                       
+      torch.autograd.backward(                                                  
+    File "/home/wmertens/Projects/smollmer/.venv/lib/python3.12/site-packages/t 
+  orch/autograd/__init__.py", line 381, in backward                             
+      _engine_run_backward(                                                     
+    File "/home/wmertens/Projects/smollmer/.venv/lib/python3.12/site-packages/t 
+  orch/autograd/graph.py", line 869, in _engine_run_backward                    
+      return Variable._execution_engine.run_backward(  # Calls into the C++     
+  engine to run the backward pass                                               
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ 
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^                                                  
+  torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 192.00 MiB. GPU 
+   0 has a total capacity of 5.64 GiB of which 56.25 MiB is free. Including     
+  non-PyTorch memory, this process has 5.57 GiB memory in use. Of the allocated 
+   memory 5.34 GiB is allocated by PyTorch, and 118.29 MiB is reserved by       
+  PyTorch but unallocated. If reserved but unallocated memory is large try      
+  setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid             
+  fragmentation.  See documentation for Memory Management                       
+  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage 
+  -with-pytorch-cuda-alloc-conf)                                                
+
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+● Yes — torch.load(..., map_location=args.device) loads everything to GPU on
+  resume, including:
+
+  - interrupted_state["model"]: ~540 MB extra GPU copy held until
+  interrupted_state is freed
+  - interrupted_state["opt"]: ~1.08 GB (gets re-referenced by
+  opt.load_state_dict but the dict's references stick around)
+  - interrupted_state["best_snapshot"]: ~540 MB — shouldn't be on GPU at all
+  (it's only used for snapshotting, normally lives on CPU)
+
+  So on first-resume step, we have roughly 2 GB of redundant GPU state that
+  fresh-start doesn't. Then the backward tries to allocate 192 MB and can't.
+
+  Fix: load to CPU, let load_state_dict do the device transfer for the bits that
+   actually need to be on GPU.
+
+● Update(smollmer/progressive_distill.py)
+  ⎿  Added 13 lines, removed 1 line
+      629                f"(meta={resume_meta}, missing={len(miss)}, "
+      630                f"unexpected={len(unexp)})")
+      631      elif interrupted_path.exists():
+      632 +        # Load to CPU first to avoid ~2 GB of redundant GPU al
+          +locations:                                                    
+      633 +        # the loaded state dict and best_snapshot get held as 
+          +long as                                                       
+      634 +        # `interrupted_state` is in scope. model.load_state_di
+          +ct and                                                        
+      635 +        # opt.load_state_dict both move tensors to the right d
+          +evice                                                         
+      636 +        # (matching the model's params), so the GPU-resident c
+          +opy is                                                        
+      637 +        # only created where needed.                          
+      638          interrupted_state = torch.load(str(interrupted_path),
+      633 -                                       map_location=args.devic
+          -e,                                                            
+      639 +                                       map_location="cpu",    
+      640                                         weights_only=False)
+      641          model.load_state_dict(interrupted_state["model"], stri
+           ct=False)
+      642 +        # Drop the loaded model dict — its data is now in the 
+          +model's                                                       
+      643 +        # parameters; no need to keep a CPU duplicate.        
+      644 +        del interrupted_state["model"]                        
+      645          opt.load_state_dict(interrupted_state["opt"])
+      646 +        del interrupted_state["opt"]                          
+      647          global_step = int(interrupted_state.get("next_step", 0
+           ))
+      648          samples_consumed = int(interrupted_state.get(
+      649              "samples_consumed",
+      650              global_step * args.grad_accum * args.batch_size))
+      651          prog = interrupted_state.get("soft_state") or {}
+      652          round_idx = int(prog.get("round_idx", 0))
+      653 +        if torch.cuda.is_available() and args.device.startswit
+          +h("cuda"):                                                    
+      654 +            torch.cuda.empty_cache()                          
+      655          print(f"[resume] {interrupted_path} at step {global_st
+           ep}, "
+      656                f"round {round_idx}, "
+      657                f"committed_frac={total_committed_fraction(model
+           ):.4f}")
+
+● Should free ~1.5 GB on resume:
+  - del interrupted_state["model"] (after model load): -0.5 GB
+  - Opt state now lands directly on GPU via opt.load_state_dict (which
+  device-migrates) without a redundant interrupted_state["opt"] GPU copy: -1.0
+  GB
+  - best_snapshot stays on CPU: -0.5 GB
+
+  The emergency save fired at the first OOM, so the in-flight state at step 90
+  was preserved. Restart ./run.sh and it'll resume from there with the new
+  memory-lighter load path.
+
+✻ Cogitated for 1m 13s
+
+※ recap: Goal: distill SmolLM2-135M to ternary via progressive per-(row, group) commits. Just finished the clean per-group c_{r,g} implementation; Run F is set up with a fresh start. Next: launch ./run.sh in ckpts.prog-F-pergroup-c/ (resume now lighter on VRAM).
+
+❯ so now each iteration takes 5s instead of 1.5s in earlier distillation        
+  attempts. What contributes to that?                                           
+
+● Dominant factor: fp32 vs bf16 (~2-3×). On Ampere/Lovelace, tensor cores run
+  bf16 at 2× fp32 throughput. With gradient checkpointing on, the backward
+  re-runs the forward, so the bf16 advantage compounds — total per-step work is
+  roughly 2 forwards + 1 backward, all hitting fp32 instead of bf16. That maps
+  cleanly onto your 5/1.5 ≈ 3.3× slowdown.
+
+  Secondary contributors (each small, but they add up):
+
+  1. _c_per_element allocates ~400 MB transient per step in enforce_frozen. The
+  .expand → .reshape → .to(dtype) pattern creates a same-shape-as-weight tensor
+  for every QLinear, every step. Under the old scalar c, this was a 1-element
+  multiplication. Allocator pressure on a 5.6 GiB GPU isn't free.
+  2. clamp_qlinear_weights + zero_frozen_grad + enforce_frozen iterate over 210
+  modules per step. Each is cheap (~10 ms total), but at 5 s/step that's still
+  ~0.5% overhead — not the issue, just noting.
+  3. del+empty_cache per-QLinear in select_and_commit_one_per_group — only fires
+   at commits (rare), so not per-step. Free.
+  4. Latent dtype = fp32 (because --autocast-dtype none chose fp32 latent at
+  line 497). Memory + speed cost on every read.
+
+  The big win available: try --autocast-dtype bfloat16 again on Run F. The
+  original NaN was on Run D's degraded resume state. Run F started from a fresh
+  quantize_in_place — weights are well-conditioned. With per-group c giving
+  better commit targets, the optimization landscape is also cleaner. Expected
+  outcome: ~3× speedup, more memory headroom (could even bump batch size
+  further), and stability probably fine because we're not on a regressed
+  trajectory.
+
+  Smaller wins if you keep fp32:
+  - Cache the _c_per_element result inside QLinear as a buffer, only invalidate
+  on codepoint_c change. Saves the 400 MB per-step allocation. ~10-15 line
+  patch.
+  - Use bf16 latent + fp32 autocast: less common but latent_dtype can be
+  decoupled from autocast_dtype with a one-line change.
+
+  Want me to wire up the bf16 retry? Easy revert if NaN comes back.
+
+✻ Churned for 41s
+
+❯ implement both small wins                                                     
+
+● Update(smollmer/progressive_distill.py)
+  ⎿  Added 34 lines, removed 3 lines
+      154  def enforce_frozen(model: torch.nn.Module) -> None:
+      155      """Overwrite committed slots with their target value `froz
+           en_target *
+      156      codepoint_c[r, g]` in latent space. Call after every opt.s
+           tep() so
+      157 -    weight decay / clamp / autocast drift can't move them.""" 
+      157 +    weight decay / clamp / autocast drift can't move them.    
+      158 +                                                              
+      159 +    Caches the broadcasted-to-weight-shape c_elem tensor on th
+          +e module as                                                   
+      160 +    a non-persistent attribute (`_c_elem`). The .reshape under
+          +neath the                                                     
+      161 +    broadcast forces a ~weight-sized copy; caching saves that 
+          +allocation                                                    
+      162 +    every step. Rebuild lazily if shape/dtype/device drifts (h
+          +andles                                                        
+      163 +    --latent-dtype changes and resume-into-different-dtype).  
+      164 +    """                                                       
+      165      for m in model.modules():
+      166          if not isinstance(m, QLinear):
+      167              continue
+      168          if not bool(m.frozen_mask.any()):
+      169              continue
+      163 -        c_elem = _c_per_element(m)                            
+      164 -        target_val = m.frozen_target.to(m.weight.dtype) * c_el
+          -em                                                            
+      170 +        cache = getattr(m, "_c_elem", None)                   
+      171 +        if (cache is None                                     
+      172 +                or cache.shape != m.weight.shape              
+      173 +                or cache.dtype != m.weight.dtype              
+      174 +                or cache.device != m.weight.device):          
+      175 +            out_f, in_f = m.weight.shape                      
+      176 +            m._c_elem = (m.codepoint_c.unsqueeze(-1)          
+      177 +                         .expand(out_f, m.n_groups, m.group_si
+          +ze)                                                           
+      178 +                         .reshape(out_f, in_f)                
+      179 +                         .to(m.weight.dtype)                  
+      180 +                         .contiguous())                       
+      181 +        target_val = m.frozen_target.to(m.weight.dtype) * m._c
+          +_elem                                                         
+      182          m.weight.data[m.frozen_mask] = target_val[m.frozen_mas
+           k]
+      183          m.invalidate_q_cache()
+      184  
+      185  
+      186 +def invalidate_c_elem_cache(model: torch.nn.Module) -> None:  
+      187 +    """Force rebuild of the per-element codepoint cache (e.g.,
+          + after                                                        
+      188 +    compute_per_group_c writes to codepoint_c, or after a stat
+          +e_dict load                                                   
+      189 +    that touched it)."""                                      
+      190 +    for m in model.modules():                                 
+      191 +        if not isinstance(m, QLinear):                        
+      192 +            continue                                          
+      193 +        if hasattr(m, "_c_elem"):                             
+      194 +            try:                                              
+      195 +                del m._c_elem                                 
+      196 +            except AttributeError:                            
+      197 +                pass                                          
+      198 +                                                              
+      199 +                                                              
+      200  @torch.no_grad()
+      201  def zero_frozen_grad(model: torch.nn.Module) -> None:
+      202      """Zero the gradient at frozen slots, after backward, befo
+           re opt.step.
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+● Update(smollmer/progressive_distill.py)
+  ⎿  Added 1 line
+      617          tzf = (args.target_zero_frac
+      618                 if 0.0 < args.target_zero_frac < 1.0 else None)
+      619          cstats = compute_per_group_c(model, tzf, fallback_c=ar
+           gs.c)
+      620 +        invalidate_c_elem_cache(model)                        
+      621          print(f"[progressive] codepoint_c: mean={cstats['mean'
+           ]:.4f} "
+      622                f"min={cstats['min']:.4f} max={cstats['max']:.4f
+           } "
+      623                f"p50={cstats['p50']:.4f}")
+
+  Read 1 file (ctrl+o to expand)
+
+● Update(smollmer/progressive_distill.py)
+  ⎿  Added 1 line
+      657              resume_meta = f.metadata() or {}
+      658          sd = load_file(str(args.resume))
+      659          miss, unexp = model.load_state_dict(sd, strict=False)
+      660 +        invalidate_c_elem_cache(model)                        
+      661          print(f"[resume] warm-start from {args.resume.name} "
+      662                f"(meta={resume_meta}, missing={len(miss)}, "
+      663                f"unexpected={len(unexp)})")
+
+● Update(smollmer/progressive_distill.py)
+  ⎿  Added 1 line
+      672                                         map_location="cpu",
+      673                                         weights_only=False)
+      674          model.load_state_dict(interrupted_state["model"], stri
+           ct=False)
+      675 +        invalidate_c_elem_cache(model)                        
+      676          # Drop the loaded model dict — its data is now in the 
+           model's
+      677          # parameters; no need to keep a CPU duplicate.
+      678          del interrupted_state["model"]
+
+● Win 1 done. Now win 2 — decouple latent dtype from autocast.
+
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+● Update(smollmer/progressive_distill.py)
+  ⎿  Added 8 lines
+      509      ap.add_argument("--device", default="cuda" if torch.cuda.i
+           s_available() else "cpu")
+      510      ap.add_argument("--autocast-dtype", default="bfloat16",
+      511                      choices=["bfloat16", "float16", "none"])
+      512 +    ap.add_argument("--latent-dtype", default="auto",         
+      513 +                    choices=["auto", "float32", "float16", "bf
+          +loat16"],                                                     
+      514 +                    help="QLinear latent weight storage dtype.
+          + 'auto' "                                                     
+      515 +                         "couples to --autocast-dtype: fp32 wh
+          +en autocast "                                                 
+      516 +                         "is 'none', else fp16. Set explicitly
+          + to decouple "                                                
+      517 +                         "(e.g. --autocast-dtype none --latent
+          +-dtype "                                                      
+      518 +                         "bfloat16 = fp32 forward for stabilit
+          +y with bf16 "                                                 
+      519 +                         "latent storage to save ~270 MB).")  
+      520      ap.add_argument("--grad-checkpointing",
+      521                      action=argparse.BooleanOptionalAction, def
+           ault=True)
+      522      ap.add_argument("--seed", type=int, default=0)
+
+● Update(smollmer/progressive_distill.py)  ⎿  Added 7 lines, removed 2 lines
+      592      _install_sigint_handler()
+      593  
+      594      # ---- Build student ----
+      595 -    latent_dtype = (torch.float32 if args.autocast_dtype == "n
+          -one"                                                          
+      596 -                    else torch.float16)                       
+      595 +    latent_dtype = {                                          
+      596 +        "auto": (torch.float32 if args.autocast_dtype == "none
+          +"                                                             
+      597 +                 else torch.float16),                         
+      598 +        "float32": torch.float32,                             
+      599 +        "float16": torch.float16,                             
+      600 +        "bfloat16": torch.bfloat16,                           
+      601 +    }[args.latent_dtype]                                      
+      602      interrupted_path = args.out / "interrupted.pt"
+      603      fresh_start = args.resume is None and not interrupted_path
+           .exists()
+      604      do_permute = args.permute and fresh_start
+
+● Bash(export LD_LIBRARY_PATH=/run/opengl-driver/lib${LD_LIBRARY_PATH:+:$LD_LIBR
+      ARY_PATH} && .venv/bin/python -c "
+      from smollmer import progressive_distill as pd…)
+  ⎿  enforce_frozen: (model: 'torch.nn.Module') -> 'None'
+     invalidate_c_elem_cache: (model: 'torch.nn.Module') -> 'None'
+
+● Both done.
+
+  Win 1 — _c_per_element cached per-QLinear in _c_elem (non-persistent
+  attribute, no checkpoint bloat). Lazy rebuild on shape/dtype/device mismatch,
+  and explicit invalidate_c_elem_cache(model) after the three places that mutate
+   codepoint_c:
+  - compute_per_group_c at init
+  - safetensors --resume state-dict load
+  - interrupted.pt state-dict load
+
+  Saves the ~420 MB .reshape allocation every step. The frozen_target * _c_elem
+  multiplication still allocates a same-shape tensor, but that's now the only
+  one — and the previous overhead came from doing this twice.
+
+  Win 2 — new --latent-dtype {auto,float32,float16,bfloat16} flag, default auto
+  keeps old behavior. With --autocast-dtype none --latent-dtype bfloat16 you get
+   fp32 forward (stable) + bf16 latent storage (270 MB freed, half the
+  latent-read bandwidth).
+
+  To use both: add --latent-dtype bfloat16 to Run F's run.sh if you want to try
+  it. The cache rebuilds automatically when latent dtype changes on resume.
+
+✻ Worked for 7m 24s
+
+❯ please add it                                                                 
+
+● Update(smollmer/ckpts.prog-F-pergroup-c/run.sh)
+  ⎿  Added 1 line
+      29    --lr 3e-4 \
+      30    --min-steps-per-round 50 \
+      31    --autocast-dtype none \
+      32 +  --latent-dtype bfloat16 \                                    
+      33    --batch-size 2 \
+      34    --grad-accum 8 \
+      35    "${@}" \
+
+● Added. One subtle note: the resume from interrupted.pt will load the previous
+  fp32 latents into the new bf16 destination, casting on the way. That's a
+  one-time precision step (23-bit → 7-bit mantissa) on the latent values from
+  step 90. For ternary distillation it's tolerable, but if you'd rather start
+  clean with bf16-native init, rm 
+  smollmer/ckpts.prog-F-pergroup-c/interrupted.pt before launching — losing the
+  90 steps is cheap.
+
+✻ Brewed for 13s
+
+❯ what do you think of thi: For the most-frequent caller (enforce_frozen):      
+  stash frozen_target * codepoint_c as a precomputed frozen_value buffer,       
+  invalidated only when frozen_mask grows (at commit time). Then enforce_frozen 
+   is just                                                                      
+      weight[fm] = frozen_value[fm] — no per-step multiply at all.              
+
+● That's better than the cache I just put in. The multiplication can be
+  precomputed at commit time and stored as a [out, in] buffer that's zero at
+  unfrozen slots, target-value at frozen ones. Same resident memory as _c_elem,
+  but enforce_frozen becomes a single indexed copy — no per-step multiply at
+  all. And the per-commit update is sparse (just the newly added slots).
+
+  Replacing the _c_elem cache with _frozen_value:
+
+● Update(smollmer/progressive_distill.py)
+  ⎿  Added 29 lines, removed 22 lines
+      151  
+      152  
+      153  @torch.no_grad()
+      154 +def _build_frozen_value(m: QLinear) -> torch.Tensor:          
+      155 +    """Materialize the full-shape `frozen_target * codepoint_c
+          +[r, g]`                                                       
+      156 +    tensor in weight dtype. Zero at unfrozen slots (since     
+      157 +    frozen_target=0 there). Used at init/resume to populate th
+          +e cache;                                                      
+      158 +    subsequent updates happen incrementally at commit time."""
+      159 +    out_f, in_f = m.weight.shape                              
+      160 +    c_elem = (m.codepoint_c.unsqueeze(-1)                     
+      161 +              .expand(out_f, m.n_groups, m.group_size)        
+      162 +              .reshape(out_f, in_f)                           
+      163 +              .to(m.weight.dtype))                            
+      164 +    return (m.frozen_target.to(m.weight.dtype) * c_elem).conti
+          +guous()                                                       
+      165 +                                                              
+      166 +                                                              
+      167 +@torch.no_grad()                                              
+      168  def enforce_frozen(model: torch.nn.Module) -> None:
+      155 -    """Overwrite committed slots with their target value `froz
+          -en_target *                                                   
+      156 -    codepoint_c[r, g]` in latent space. Call after every opt.s
+          -tep() so                                                      
+      157 -    weight decay / clamp / autocast drift can't move them.    
+      169 +    """Overwrite committed slots with their precomputed target
+          + value.                                                       
+      170  
+      159 -    Caches the broadcasted-to-weight-shape c_elem tensor on th
+          -e module as                                                   
+      160 -    a non-persistent attribute (`_c_elem`). The .reshape under
+          -neath the                                                     
+      161 -    broadcast forces a ~weight-sized copy; caching saves that 
+          -allocation                                                    
+      162 -    every step. Rebuild lazily if shape/dtype/device drifts (h
+          -andles                                                        
+      163 -    --latent-dtype changes and resume-into-different-dtype).  
+      171 +    `_frozen_value` is a non-persistent per-QLinear cache of  
+      172 +    `frozen_target * codepoint_c[r, g]`, populated at init/res
+          +ume and                                                       
+      173 +    incrementally updated at commit time. Per step this is a s
+          +ingle                                                         
+      174 +    indexed copy — no broadcast, no multiply, no per-step allo
+          +cations.                                                      
+      175 +    Rebuilt lazily if shape/dtype/device drifts (handles --lat
+          +ent-dtype                                                     
+      176 +    changes and resume-into-different-dtype).                 
+      177      """
+      178      for m in model.modules():
+      179          if not isinstance(m, QLinear):
+      180              continue
+      181          if not bool(m.frozen_mask.any()):
+      182              continue
+      170 -        cache = getattr(m, "_c_elem", None)                   
+      183 +        cache = getattr(m, "_frozen_value", None)             
+      184          if (cache is None
+      185                  or cache.shape != m.weight.shape
+      186                  or cache.dtype != m.weight.dtype
+      187                  or cache.device != m.weight.device):
+      175 -            out_f, in_f = m.weight.shape                      
+      176 -            m._c_elem = (m.codepoint_c.unsqueeze(-1)          
+      177 -                         .expand(out_f, m.n_groups, m.group_si
+          -ze)                                                           
+      178 -                         .reshape(out_f, in_f)                
+      179 -                         .to(m.weight.dtype)                  
+      180 -                         .contiguous())                       
+      181 -        target_val = m.frozen_target.to(m.weight.dtype) * m._c
+          -_elem                                                         
+      182 -        m.weight.data[m.frozen_mask] = target_val[m.frozen_mas
+          -k]                                                            
+      188 +            m._frozen_value = _build_frozen_value(m)          
+      189 +        m.weight.data[m.frozen_mask] = m._frozen_value[m.froze
+          +n_mask]                                                       
+      190          m.invalidate_q_cache()
+      191  
+      192  
+      186 -def invalidate_c_elem_cache(model: torch.nn.Module) -> None:  
+      187 -    """Force rebuild of the per-element codepoint cache (e.g.,
+          - after                                                        
+      193 +def invalidate_frozen_value_cache(model: torch.nn.Module) -> N
+          +one:                                                          
+      194 +    """Force rebuild of the precomputed frozen-value cache (e.
+          +g., after                                                     
+      195      compute_per_group_c writes to codepoint_c, or after a stat
+           e_dict load
+      189 -    that touched it)."""                                      
+      196 +    that touched codepoint_c / frozen_target / frozen_mask).""
+          +"                                                             
+      197      for m in model.modules():
+      198          if not isinstance(m, QLinear):
+      199              continue
+      193 -        if hasattr(m, "_c_elem"):                             
+      200 +        if hasattr(m, "_frozen_value"):                       
+      201              try:
+      195 -                del m._c_elem                                 
+      202 +                del m._frozen_value                           
+      203              except AttributeError:
+      204                  pass
+      205  
+
+● Now update commit-time to incrementally update the cache, and rename the
+  invalidate calls.
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+● Update(smollmer/progressive_distill.py)
+  ⎿  Added 3 lines, removed 3 lines
+      637          tzf = (args.target_zero_frac
+      638                 if 0.0 < args.target_zero_frac < 1.0 else None)
+      639          cstats = compute_per_group_c(model, tzf, fallback_c=ar
+           gs.c)
+      640 -        invalidate_c_elem_cache(model)                        
+      640 +        invalidate_frozen_value_cache(model)                  
+      641          print(f"[progressive] codepoint_c: mean={cstats['mean'
+           ]:.4f} "
+      642                f"min={cstats['min']:.4f} max={cstats['max']:.4f
+           } "
+      643                f"p50={cstats['p50']:.4f}")
+     ...
+      677              resume_meta = f.metadata() or {}
+      678          sd = load_file(str(args.resume))
+      679          miss, unexp = model.load_state_dict(sd, strict=False)
+      680 -        invalidate_c_elem_cache(model)                        
+      680 +        invalidate_frozen_value_cache(model)                  
+      681          print(f"[resume] warm-start from {args.resume.name} "
+      682                f"(meta={resume_meta}, missing={len(miss)}, "
+      683                f"unexpected={len(unexp)})")
+     ...
+      692                                         map_location="cpu",
+      693                                         weights_only=False)
+      694          model.load_state_dict(interrupted_state["model"], stri
+           ct=False)
+      695 -        invalidate_c_elem_cache(model)                        
+      695 +        invalidate_frozen_value_cache(model)                  
+      696          # Drop the loaded model dict — its data is now in the 
+           model's
+      697          # parameters; no need to keep a CPU duplicate.
+      698          del interrupted_state["model"]
+
+● Now wire the incremental update at commit time:
+
+  Read 1 file (ctrl+o to expand)
+
+● Update(smollmer/progressive_distill.py)
+  ⎿  Added 5 lines
+      337          signs[targets_chosen < 0] = -1
+      338          m.frozen_target[rr, cc] = signs
+      339          m.frozen_mask[rr, cc] = True
+      340 +        # Incrementally update the precomputed frozen-value ca
+          +che at the                                                    
+      341 +        # new commit slots. targets_chosen is already sign(w) 
+          +* c_{r,g}                                                     
+      342 +        # in float; cast to weight dtype matches _frozen_value
+          +'s dtype.                                                     
+      343 +        if hasattr(m, "_frozen_value"):                       
+      344 +            m._frozen_value[rr, cc] = targets_chosen.to(m._fro
+          +zen_value.dtype)                                              
+      345          m.invalidate_q_cache()
+      346          if mst is not None:
+      347              for key in ("exp_avg", "exp_avg_sq"):
+
+● Bash(export LD_LIBRARY_PATH=/run/opengl-driver/lib${LD_LIBRARY_PATH:+:$LD_LIBR
+      ARY_PATH} && .venv/bin/python -c "
+      from smollmer import progressive_distill as pd…)
+  ⎿  enforce_frozen: (model: 'torch.nn.Module') -> 'None'
+     invalidate_frozen_value_cache: (model: 'torch.nn.Module') -> 'None'
+     _build_frozen_value: (m: 'QLinear') -> 'torch.Tensor'
+
+● Done. Per-step enforce_frozen is now:
+  m.weight.data[m.frozen_mask] = m._frozen_value[m.frozen_mask]
+  Indexed-copy only; no broadcast, no multiply, no per-step alloc. Total
+  per-step savings vs. pre-cache:
+  - ~420 MB allocation (.reshape of _c_per_element): gone.
+  - ~420 MB allocation (the multiplication result): gone.
+
+  Cache lifecycle:
+  - Init: lazy build on first enforce_frozen call after compute_per_group_c (or
+  invalidation forces rebuild on next call).
+  - Per commit: sparse update m._frozen_value[rr, cc] = targets_chosen — only
+  the newly committed slots touched.
+  - Resume / dtype change: cache mismatch detected, full rebuild via
+  _build_frozen_value (still one allocation, but only at the boundary, not per
+  step).
+
+  Effective on next restart.
+
+✻ Baked for 1m 47s
+
+❯ Traceback (most recent call last):                                            
+    File "<frozen runpy>", line 198, in _run_module_as_main                     
+    File "<frozen runpy>", line 88, in _run_code                                
+    File "/home/wmertens/Projects/smollmer/smollmer/progressive_distill.py",    
+  line 1084, in <module>                                                        
+      main()                                                                    
+    File "/home/wmertens/Projects/smollmer/smollmer/progressive_distill.py",    
+  line 837, in main                                                             
+      out = model(tokens)                                                       
+            ^^^^^^^^^^^^^                                                       
+    File "/home/wmertens/Projects/smollmer/.venv/lib/python3.12/site-packages/t 
+  orch/nn/modules/module.py", line 1779, in _wrapped_call_impl                  
+      return self._call_impl(*args, **kwargs)                                   
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^                                   
+    File "/home/wmertens/Projects/smollmer/.venv/lib/python3.12/site-packages/t 
+  orch/nn/modules/module.py", line 1790, in _call_impl                          
+      return forward_call(*args, **kwargs)                                      
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^                                      
+    File "/home/wmertens/Projects/smollmer/.venv/lib/python3.12/site-packages/t 
+  ransformers/utils/generic.py", line 900, in wrapper                           
+      output = func(self, *args, **kwargs)                                      
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^                                      
+    File "/home/wmertens/Projects/smollmer/.venv/lib/python3.12/site-packages/t 
+  ransformers/models/llama/modeling_llama.py", line 474, in forward             
+      outputs: BaseModelOutputWithPast = self.model(                            
+                                         ^^^^^^^^^^^                            
+    File "/home/wmertens/Projects/smollmer/.venv/lib/python3.12/site-packages/t 
+  orch/nn/modules/module.py", line 1779, in _wrapped_call_impl                  
+      return self._call_impl(*args, **kwargs)                                   
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^                                   
+    File "/home/wmertens/Projects/smollmer/.venv/lib/python3.12/site-packages/t 
+  orch/nn/modules/module.py", line 1790, in _call_impl                          
+      return forward_call(*args, **kwargs)                                      
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^                                      
+    File "/home/wmertens/Projects/smollmer/.venv/lib/python3.12/site-packages/t 
+  ransformers/utils/generic.py", line 976, in wrapper                           
+      output = func(self, *args, **kwargs)                                      
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^                                      
+    File "/home/wmertens/Projects/smollmer/.venv/lib/python3.12/site-packages/t 
+  ransformers/utils/output_capturing.py", line 248, in wrapper                  
+      outputs = func(self, *args, **kwargs)                                     
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^                                     
+    File "/home/wmertens/Projects/smollmer/.venv/lib/python3.12/site-packages/t 
+  ransformers/models/llama/modeling_llama.py", line 411, in forward             
+      hidden_states = decoder_layer(                                            
+                      ^^^^^^^^^^^^^^                                            
+    File "/home/wmertens/Projects/smollmer/.venv/lib/python3.12/site-packages/t 
+  ransformers/modeling_layers.py", line 92, in __call__                         
+      return self._gradient_checkpointing_func(partial(super().__call__,        
+  **kwargs), *args)                                                             
+                                                                                
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ 
+    File "/home/wmertens/Projects/smollmer/.venv/lib/python3.12/site-packages/t 
+  orch/_compile.py", line 54, in inner                                          
+      return disable_fn(*args, **kwargs)                                        
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^                                        
+    File "/home/wmertens/Projects/smollmer/.venv/lib/python3.12/site-packages/t 
+  orch/_dynamo/eval_frame.py", line 1263, in _fn                                
+      return fn(*args, **kwargs)                                                
+             ^^^^^^^^^^^^^^^^^^^                                                
+    File "/home/wmertens/Projects/smollmer/.venv/lib/python3.12/site-packages/t 
+  orch/utils/checkpoint.py", line 512, in checkpoint                            
+      ret = function(*args, **kwargs)                                           
+            ^^^^^^^^^^^^^^^^^^^^^^^^^                                           
+    File "/home/wmertens/Projects/smollmer/.venv/lib/python3.12/site-packages/t 
+  orch/nn/modules/module.py", line 1779, in _wrapped_call_impl                  
+      return self._call_impl(*args, **kwargs)                                   
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^                                   
+    File "/home/wmertens/Projects/smollmer/.venv/lib/python3.12/site-packages/t 
+  orch/nn/modules/module.py", line 1790, in _call_impl                          
+      return forward_call(*args, **kwargs)                                      
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^                                      
+    File "/home/wmertens/Projects/smollmer/.venv/lib/python3.12/site-packages/t 
+  ransformers/models/llama/modeling_llama.py", line 316, in forward             
+      hidden_states, _ = self.self_attn(                                        
+                         ^^^^^^^^^^^^^^^                                        
+    File "/home/wmertens/Projects/smollmer/.venv/lib/python3.12/site-packages/t 
+  orch/nn/modules/module.py", line 1779, in _wrapped_call_impl                  
+      return self._call_impl(*args, **kwargs)                                   
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^                                   
+    File "/home/wmertens/Projects/smollmer/.venv/lib/python3.12/site-packages/t 
+  orch/nn/modules/module.py", line 1790, in _call_impl                          
+      return forward_call(*args, **kwargs)                                      
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^                                      
+    File "/home/wmertens/Projects/smollmer/.venv/lib/python3.12/site-packages/t 
+  ransformers/models/llama/modeling_llama.py", line 262, in forward             
+      query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 
+   2)                                                                           
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^                                 
+    File "/home/wmertens/Projects/smollmer/.venv/lib/python3.12/site-packages/t 
+  orch/nn/modules/module.py", line 1779, in _wrapped_call_impl                  
+      return self._call_impl(*args, **kwargs)                                   
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^                                   
+    File "/home/wmertens/Projects/smollmer/.venv/lib/python3.12/site-packages/t 
+  orch/nn/modules/module.py", line 1790, in _call_impl                          
+      return forward_call(*args, **kwargs)                                      
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^                                      
+    File "/home/wmertens/Projects/smollmer/smollmer/qlinear.py", line 235, in   
+  forward                                                                       
+      y = F.linear(x, w_scaled)                                                 
+          ^^^^^^^^^^^^^^^^^^^^^                                                 
+  RuntimeError: expected mat1 and mat2 to have the same dtype, but got: float   
+  != c10::BFloat16                                                              
+
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+● Issue: F.linear requires matching dtypes. With --latent-dtype bfloat16 
+  --autocast-dtype none, w_scaled ends up bf16 (q_blocks bf16 × scales cast to
+  bf16) but x is fp32. Fix: upcast the scaled weight to x's dtype at the
+  F.linear call. .to(dtype=x.dtype) is a no-op when dtypes already match, so
+  other configurations stay unaffected.
+
+● Update(smollmer/qlinear.py)
+  ⎿  Added 4 lines, removed 1 line
+      232          q_blocks = q_ste.view(self.out_features, self.n_groups
+           , self.group_size)
+      233          scales_b = self.scales.unsqueeze(-1).to(q_blocks.dtype
+           )
+      234          w_scaled = (q_blocks * scales_b).view(self.out_feature
+           s, self.in_features)
+      235 -        y = F.linear(x, w_scaled)                             
+      235 +        # F.linear requires matching dtypes; outside autocast 
+          +(or with                                                      
+      236 +        # latent-dtype != activation dtype) we have to align. 
+          +.to() is a                                                    
+      237 +        # no-op when dtypes already match.                    
+      238 +        y = F.linear(x, w_scaled.to(dtype=x.dtype))           
+      239          if self.bias is not None:
+      240              y = y + self.bias
+      241          return y
+
+● Actually, hold up — I should flag a concern with --latent-dtype bfloat16 
+  --autocast-dtype none for training:
+
+  The optimizer produces fp32 updates (~3e-7 for lr=3e-4 × typical gradient
+  1e-3). bf16's mantissa is 7 bits, giving relative precision of ~1e-3. So at
+  latent values around 0.1, the smallest representable change is ~1e-4. Most 
+  opt.step updates will round to zero — the latent silently stops moving even
+  though gradients are flowing.
+
+  This is the classic mixed-precision training problem AMP solves with fp32
+  master weights + autocast in the forward/backward. The combo "fp32 forward +
+  bf16 storage" works for inference but breaks training updates.
+
+  Real options:
+  1. --latent-dtype auto --autocast-dtype none (current Run F default before
+  this change): fp32 latent, fp32 forward. Stable, no update loss. Slow ~5
+  s/iter.
+  2. --latent-dtype float16 --autocast-dtype bfloat16 (or similar): bf16
+  autocast for fast forward/backward, fp16 latent. Works as proper AMP. Fast but
+   Run D had NaN.
+  3. --latent-dtype auto --autocast-dtype bfloat16: fp16 latent + bf16 autocast.
+   Same caveat as #2.
+
+  For Run F, I'd revert to no --latent-dtype flag (auto → fp32 latent) and
+  accept the 5 s/iter for stability. The win-1 cache (_frozen_value) is still
+  active and saves the 400 MB/step alloc — that's the real per-step speedup. The
+   latent-dtype flag is most useful for inference runs (chat.py with bf16 latent
+   on a small GPU).
+
+  Want me to revert the run.sh?
+
+✻ Churned for 1m 32s
+❯ yes revert                                                                    
+
+● Update(smollmer/ckpts.prog-F-pergroup-c/run.sh)
+  ⎿  Removed 1 line
+      29    --lr 3e-4 \
+      30    --min-steps-per-round 50 \
+      31    --autocast-dtype none \
+      32 -  --latent-dtype bfloat16 \                                    
+      32    --batch-size 2 \
+      33    --grad-accum 8 \
+      34    "${@}" \
+
+● Reverted. Win 2's flag stays in the codebase (still useful for inference), Win
+   1's _frozen_value cache is the active per-step speedup for Run F. Restart
+  ./run.sh.
+
+✻ Cogitated for 15s
+
+❯ /usage 
+  ⎿  Status dialog dismissed
+
+※ recap: Goal: distill SmolLM2-135M to ternary via per-(row, group) progressive commits. Run F is configured with the clean per-group c implementation and the `_frozen_value` per-step cache. Next: restart `./run.sh` in `smollmer/ckpts.prog-F-pergroup-c/`.
+
+✻ Running scheduled task (May 13 6:37pm)
+
+● Bash(/home/wmertens/Projects/smollmer/check_run.sh 2>&1 | tail -120)
+  ⎿  ==========================================================
+     Progressive run check: smollmer/ckpts.prog-F-pergroup-c
+     ckpt mtime: 2026-05-13 17:37:27.667428308 +0200
+     … +86 lines (ctrl+o to expand)
+  ⎿  (timeout 7m)
+
+● Run F is going really well.
+
+  Quantitative (step 1000, 4 commits done):
+  - loss/ema 1.69, best EMA 1.622 @ step 779 — already below L_T=1.6348 with
+  only ~6% of weights committed
+  - Per-commit q_err_mean: 0.0035 → 0.0070 → 0.0102 → 0.0133 — ~50× lower than 
+  Run D's 0.4 (the predicted benefit of per-group c centered on band mean)
+  - Target distribution: 0.25 / 0.50 / 0.25 (neg/zero/pos) — matches Bonsai's
+  natural split, vs Run D's degenerate 0.50/0.01/0.50
+  - saturation_frac=0.0145, barrier=0, weights/flip_rate=0.0005 — model is calm,
+   no weights pinned, no thrashing
+  - Round transitions: warmup ended at step 390; rounds 1-4 at steps
+  843/893/1091/1651 — average ~400 steps/round under the strict two-sided gate
+
+  Qualitative (chat from step-1000 ckpt, 6.25% committed):
+  - "Capital of France" → Paris (correct!), continues with plausible-if-loose
+  French government context. No more "Mediterranean coast Paris."
+  - Story → coherent Lucy/Max narrative with a social-media plot beat.
+  Naturalistic.
+  - def fibonacci(n): → recognizable Fibonacci shape — has n==0 → 0, n==1 → 1,
+  recursive call (the recursive function name is buggy but the pattern is
+  right).
+  - "Three laws of robotics" → varied bullets about robot programming; the 
+  repetition collapse is gone (vs Run D's "A robotic arm is a robotic arm"
+  loop).
+
+  The per-group c choice is doing exactly what we hoped: commits are nearly free
+   in loss terms (q_err ~50× lower), and the model holds together qualitatively
+  even as commits accumulate. ETA to round 64 at current pace: ~35h.
+
+✻ Brewed for 1m 34s
+
+✻ Running scheduled task (May 13 9:37pm)
+
+● Bash(/home/wmertens/Projects/smollmer/check_run.sh 2>&1 | tail -130)
+  ⎿  ==========================================================
+     Progressive run check: smollmer/ckpts.prog-F-pergroup-c
+     ckpt mtime: 2026-05-13 21:11:49.155670422 +0200
+     … +84 lines (ctrl+o to expand)
+  ⎿  (timeout 7m)
+
+● Quantitative (step 2320, round 9, 14% committed):
+  - loss/ema 1.672, fluctuating in 1.65–1.69 band; gap occasionally negative
+  (below L_T)
+  - Best EMA still 1.622 @ step 779 — early-run minimum hasn't been beaten in
+  ~1500 steps despite 9 commits
+  - q_err_mean ramping: 0.003 → 0.024 → 0.028 → 0.031 across rounds 1→9. Still
+  tiny in absolute terms, but rising (expected — least-damaging weights commit
+  first)
+  - Target distribution holding clean 0.25 / 0.50 / 0.25 through all commits
+  - Rounds 6→7→8→9 fired in just 126 steps (avg 42, at or below the 50-step
+  floor) — gate is finding the new equilibrium fast; commits are barely
+  perturbing the model
+  - saturation_frac 0.014, near_boundary 0.135, barrier 0, flip_rate ~0.0006 —
+  calm, no pathologies
+  - grad_norm ticking up slightly (0.17 → 0.24); not concerning yet
+
+  Qualitative (chat from step-2000 ckpt, 9.4% committed):
+  - "Capital of France" → degenerates into "The capital of France is the capital
+   of the country" loop. Regression vs step-1000.
+  - Story → coherent narrative about a girl learning about biodiversity.
+  Naturalistic, varied.
+  - def fibonacci(n): → no real Fibonacci; prints a not-quite-Fibonacci-looking
+  list. Regression vs step-1000.
+  - Three laws → closest to Asimov yet: "Robots must obey human instructions" +
+  sense/act + interact. Improvement.
+
+  Mixed picture: some prompts improving, others showing repetition collapse. The
+   repetition pattern hits factual prompts hardest (France) while
+  creative/narrative prompts hold up. That's typical of small distilled models —
+   factual recall is the first thing to go as bits get squeezed out.
+
+  Nothing actionable yet; the model is healthy and committing cleanly. Worth
+  watching whether loss/ema ever beats 1.622 — if it stalls indefinitely above
+  the step-779 mark, we'd want to consider rolling back to best_snapshot and
+  changing something (lr decay, slower commit cadence). For now, let it run.
+
+✻ Baked for 1m 37s
+
+※ recap: Goal: ternarize SmolLM2-135M via progressive distillation. Run F (per-group c, hard clamp, fp32) is healthy at step ~2320, round 9/64, 14% committed, best EMA 1.622 from step 779. Next: let it keep running and watch whether EMA ever beats 1.622.
+
+✻ Running scheduled task (May 14 12:37am)
+
+● Bash(/home/wmertens/Projects/smollmer/check_run.sh 2>&1 | tail -130)
+  ⎿  ==========================================================
+     Progressive run check: smollmer/ckpts.prog-F-pergroup-c
+     ckpt mtime: 2026-05-13 23:55:10.719921322 +0200
+     … +85 lines (ctrl+o to expand)
+  ⎿  (timeout 7m)
+
+● Quantitative (step 4520, round 17, 26.6% committed):
+  - loss/ema 1.667, fluctuating 1.64–1.68
+  - Best EMA improved to 1.6012 @ step 2088 (was 1.622 @ step 779 last check) —
+  model crossed the previous floor by 0.02 nats. Healthy.
+  - 17 commits done; q_err_mean climbing 0.049 → 0.052 → 0.056 → 0.059. Still
+  small absolute values.
+  - Recent rounds: 10→11→12→13→14→15→16→17 at steps
+  2569/2750/3057/3493/3801/3922/4187/4479. Average ~270 steps/round; commit pace
+   slowing as expected.
+  - Target distribution holding 0.25 / 0.49 / 0.26 (clean Bonsai-style split).
+  - saturation_frac 0.011 (down from 0.014), near_boundary 0.131 (from 0.135) —
+  latents slowly drifting inward as commits stabilize them.
+  - barrier=0, flip_rate~0.0006, grad_norm 0.1–0.3. No pathologies.
+
+  Qualitative (chat from step-4000 ckpt, 25% committed):
+  - "Capital of France" → "Paris is home to the French National Assembly..."
+  starts factually, devolves into a "National Institute of X" template list.
+  Better than step-2000's tight loop, but heavy templating.
+  - Story → coherent Lily/Max + "Mountain of Light" narrative. Solid.
+  - def fibonacci(n): → not Fibonacci; produces two duplicate buggy function
+  definitions. Regression vs step-1000's recognizable shape.
+  - "Three laws of robotics" → catastrophic output: just 1) + whitespace.
+  Degenerate.
+
+  Mixed: narrative and quasi-factual recall holding up; code synthesis and
+  specific-fact recall (Asimov) degrading. The Asimov output is the worst we've
+  seen — could be a sampling-noise blip or the start of capability collapse on
+  rare-token completions. Single-sample-per-prompt is noisy; I'd watch the next
+  iteration before reacting.
+
+  Run is healthy on metrics. ETA at current pace (~270 steps/round, ~5 s/step)
+  for remaining 47 rounds: ~17 hours.
+
+✻ Worked for 1m 32s
+
+✻ Running scheduled task (May 14 3:37am)
+
+● Bash(/home/wmertens/Projects/smollmer/check_run.sh 2>&1 | tail -130)
+  ⎿  ==========================================================
+     Progressive run check: smollmer/ckpts.prog-F-pergroup-c
+     ckpt mtime: 2026-05-14 02:36:25.894370878 +0200
+     … +89 lines (ctrl+o to expand)
+  ⎿  (timeout 7m)
+
+● Quantitative (step 6750, round 28, 43.75% committed):
+  - loss/ema 1.626 (down from 1.667 last check) — slow EMA 1.646, fast 1.687
+  - Best EMA still 1.6012 @ step 2088 — not beaten yet, but live EMA is hovering
+   close to the floor
+  - Recent q_err_mean climbing 0.084 → 0.098 across rounds 24-28. Growing
+  steadily as expected.
+  - Round pace accelerated: 8 rounds in 1441 steps (avg ~180 steps/round vs ~270
+   last check)
+  - loss/gap regularly dips negative (-0.034, -0.025) — model briefly
+  outperforming L_T between commits
+  - Target distribution holding 0.26 / 0.48 / 0.26 (slight drift from 0.50 zero
+  → 0.48; non-zero share inching up)
+  - saturation_frac 0.009 (was 0.011), near_boundary 0.115 (was 0.131) — latents
+   continuing to settle inward
+  - barrier=0, flip_rate 0.0004, grad_norm 0.1–0.3. No pathologies.
+
+  Qualitative (chat from step-6000 ckpt, 37.5% committed):
+  - "Capital of France" → talks about France encyclopedia-style ("second largest
+   in EU... 5th in OECD"). Factually wrong, but coherent and no repetition loop.
+   Recovery from step-4000.
+  - Story → coherent friend-group cooking narrative with the invented "Frosty
+  Waffles." Creative.
+  - def fibonacci(n): → almost Fibonacci: if n==0: return 1; if n==1: return 1; 
+  return 1 + fib(n-1) — has base cases and recursive structure, off-by-one on
+  the recursion. Major recovery from step-4000's duplicate buggy defs.
+  - "Three laws of robotics" → invents Newton's laws of motion ("law of
+  inertia... law of acceleration") instead of Asimov. Coherent, wrong content —
+  confirms last check's Asimov collapse was sampling noise, not capability loss.
+
+  Net: structurally healthier than step-4000. Repetition loops are gone, code
+  shape is recovering, story-mode prompts holding. Factual recall keeps
+  degrading (Asimov → Newton, Paris → wrong geography). That trajectory is what
+  we'd expect from a 135M model losing bit-precision; the architecture has more
+  "shape" than "facts" at 44% committed. ETA at the current ~180-step pace for
+  remaining 36 rounds: ~9 hours.
+
+✻ Brewed for 1m 34s
+
+※ recap: Goal: distill SmolLM2-135M to Bonsai-style ternary via progressive per-(row,group) commits. Run F is stable at step 6750, round 28 of 64 (43.75% committed), best EMA 1.6012. Next: let it run; check again in ~3h.
+✻ Running scheduled task (May 14 6:37am)
+
+● Bash(/home/wmertens/Projects/smollmer/check_run.sh 2>&1 | tail -130)
+  ⎿  ==========================================================
+     Progressive run check: smollmer/ckpts.prog-F-pergroup-c
+     ckpt mtime: 2026-05-14 05:17:38.723050552 +0200
+     … +88 lines (ctrl+o to expand)
+  ⎿  (timeout 7m)
+
+● Quantitative (step 8990, round 40, 62.5% committed):
+  - loss/ema 1.660 (vs 1.626 last check) — climbing slightly. Slow EMA 1.674,
+  fast 1.661.
+  - Best EMA still 1.6012 @ step 2088 — hasn't been beaten in ~7000 steps
+  (concerning).
+  - q_err_mean per commit: 0.125 → 0.130 → 0.134 → 0.137 across rounds 37-40 —
+  ~2.5× round-17 levels.
+  - Target distribution drifted: 0.28 / 0.44 / 0.28 (from 0.25/0.50/0.25 at
+  round 1). Zero share down 6 pp; the "easy" zeros got committed first, harder
+  ones remaining.
+  - Round pace slowed back to ~254 steps/round (was 180 last check). Rounds
+  33-40 over steps 7121-8904.
+  - saturation_frac 0.0064, near_boundary 0.096 (continuing inward drift,
+  healthy)
+  - One flip_rate spike at step 8910 (0.0050 vs steady 0.0003) — single-event,
+  no follow-through, gate's steady resets show some bouncing
+  - barrier=0, grad_norm 0.1–0.3. No pathologies.
+
+  Qualitative (chat from step-8000 ckpt, 62.5% committed):
+  - "Capital of France" → "Paris" correct, then drifts into false claim
+  ("capital of the EU") and loops on "largest metropolitan in the
+  French-speaking..." Mixed.
+  - Story → coherent Misha/Alex go birdwatching in Toulon. Solid narrative.
+  - def fibonacci(n): → garbage: def fib(i): return i*i; return n + arbitrary
+  print. Regression vs step-6000's almost-Fibonacci.
+  - "Three laws of robotics" → coherent paragraph defining what robotics is (not
+   Asimov), then self-repeats the definition. Decent prose, wrong target.
+
+  Net read: capacity for narrative coherence is holding well at 62% committed,
+  factual recall continues degrading, and code-shape recall has regressed from
+  the step-6000 peak. The flat best-EMA at 1.6012 since step 2088 says further
+  commits haven't unlocked any new optimum — we're absorbing them without
+  disaster, but not improving past the early floor either.
+
+  ETA: 24 rounds × ~254 steps × 5 s ≈ 8.5h to round 64.
+
+  Worth noting if the trend continues: at full commit, the model may be
+  permanently stuck around live-EMA 1.65-1.70. Whether that's "good enough for
+  ternary" we'll see at the deploy fold and chat eval, but the best-EMA stall is
+   a soft warning that the schedule may be slightly too aggressive in the back
+  half. Nothing to act on yet.
+
+✻ Baked for 1m 40s
+
+❯ /remote-control 
+  ⎿  Remote Control connecting…
+
+  /remote-control is active · Code in CLI or at https://claude.ai/code/session_013mnjS27iFFU6tPANkjVW5h
+
+✻ Running scheduled task (May 14 9:37am)
+
+● Bash(/home/wmertens/Projects/smollmer/check_run.sh 2>&1 | tail -130)
+  ⎿  ==========================================================
+     Progressive run check: smollmer/ckpts.prog-F-pergroup-c
+     ckpt mtime: 2026-05-14 09:36:18.176370674 +0200
+     … +90 lines (ctrl+o to expand)
+  ⎿  (timeout 7m)
+
+● Quantitative (step 11010, round 49, 76.6% committed):
+  - loss/ema 1.687 (up from 1.660 last check). Slow EMA 1.707, fast 1.683 — fast
+   now below slow, indicating mid-round improvement
+  - Best EMA still 1.6012 @ step 2088 — locked for ~9000 steps. The late commits
+   aren't unlocking new optima.
+  - q_err_mean climbing 0.16 → 0.17 → 0.175 across rounds 46-49
+  - Target distribution drifted further: 0.37 / 0.26 / 0.37 at round 49 (from
+  0.25/0.50/0.25 at round 1) — the "easy zeros" got committed first, the
+  remainder are mostly non-zero
+  - Round pace ~211 steps/round. Rounds 42-49 over steps 9139-10830.
+  - saturation_frac 0.005, near_boundary 0.098, flip_rate 0.0001 (very settled)
+  - One grad_norm spike to 0.72 at step 10980; cleared next step. Single event.
+
+  Qualitative (chat from step-11000 ckpt, 76.6% committed):
+  - "Capital of France" → "Paris" correct, then invents "west bank of the River
+  Aulon" + recursive geography. Partial repetition pattern reemerging.
+  - Story → Timmy/Zoe travel narrative, coherent.
+  - def fibonacci(n): → completely broken: if n%2==0: return 0; else: return 1; 
+  else: return 2; else: return 3... chain of bogus else clauses. Syntactically
+  invalid. Worst code output yet.
+  - "Three laws of robotics" → invents weird mechanics ("three types of
+  muscles", "avoid using electricity"). Grammar intact, content nonsense.
+
+  Trend confirms: narrative holds, code recall has collapsed, factual recall
+  mostly gone. Best-EMA lockout for 9k+ steps is the strongest signal that the
+  late half of the schedule is just absorbing commits without progress. Not
+  breaking things — but not earning anything either.
+
+  ETA: 15 rounds × ~211 steps × 5 s ≈ 4.4h to round 64.
+
+  If you want to try to recover something useful, options after round 64
+  finishes:
+  - Compare chat quality between the step-2088 best_snapshot (only ~7%
+  committed, beat L_T) and the round-64 final state. The best_snapshot is not a
+  deployable ternary checkpoint, but it'd tell us where the quality cliff is.
+  - Continue training in α-curriculum/fixed-c mode from the round-64 checkpoint
+  to see if the locked-in pattern can recover some loss.
+
+  Nothing to act on right now; let it finish.
+
+✻ Sautéed for 1m 41s
+
+※ recap: Distilling SmolLM2-135M to ternary via per-(row,group) progressive clamping; Run F is at round 49/64 (76.6% committed) on track. Next: let it finish the remaining 15 rounds (~4h), then compare chat quality of the final checkpoint vs the step-2088 best_snapshot.
+
+✻ Running scheduled task (May 14 12:37pm)
+
+● Bash(/home/wmertens/Projects/smollmer/check_run.sh 2>&1 | tail -130)
+  ⎿  ==========================================================
+     Progressive run check: smollmer/ckpts.prog-F-pergroup-c
+     ckpt mtime: 2026-05-14 11:06:33.215702199 +0200
+     … +88 lines (ctrl+o to expand)
+  ⎿  (timeout 7m)
+
+● Quantitative (step 12990, round 57, 89% committed):
+  - loss/ema 1.687 (vs 1.687 last check — flat). Slow EMA 1.685, fast 1.687.
+  - Best EMA still 1.6012 @ step 2088 — locked for ~11000 steps.
+  - q_err_mean climbing more sharply: 0.197 → 0.200 → 0.218 across rounds 55-57.
+  - Target distribution drifted hard: 0.45 / 0.10 / 0.45 at round 57 (from
+  0.25/0.50/0.25 at round 1). The zero share has collapsed — most remaining
+  unfrozen weights have meaningful magnitudes that don't want to be 0.
+  - Round pace ~188 steps/round (rounds 50-57 in 1510 steps). Slightly faster.
+  - saturation_frac 0.004, near_boundary 0.117 (uptick from 0.098), flip_rate 
+  0.0001.
+  - One commit fired at gap=0.0498 — right at the threshold wire; gate is being
+  honest.
+
+  Qualitative (chat from step-12000 ckpt, 87.5% committed):
+  - "Capital of France" → "Paris" correct, plausible-but-fabricated stats
+  ("population 100 million", "114,800 sq km"). Mild repetition. Better factual
+  shape than step-11000.
+  - Story → coherent Alex/Golden-Rule narrative. Holds.
+  - def fibonacci(n): → return n * 1 + print(f"Fibolio" * 1) + Q&A template
+  boilerplate. Code synthesis fully collapsed.
+  - "Three laws of robotics" → "1. Science 2. Technology 3. Ethics", then "The
+  first law is: The second law is: The third law is: The fourth law of robotics
+  is:" — list-form degenerate, no content.
+
+  Summary: clear gradient across categories — narrative (good) > factual on
+  famous entities (mostly) > obscure factual (gone) > code synthesis (broken) >
+  specific named knowledge like Asimov (gone). Consistent with a 135M ternary
+  model running out of bits for fine-grained recall.
+
+  Round pace and metrics are healthy, no crashes. ETA: 7 rounds × ~188 steps × 5
+   s ≈ 1.8h to round 64.
+
+✻ Churned for 2m 23s
+
+✻ Running scheduled task (May 14 4:37pm)
+
+● Bash(/home/wmertens/Projects/smollmer/check_run.sh 2>&1 | tail -130)
+  ⎿  ==========================================================
+     Progressive run check: smollmer/ckpts.prog-F-pergroup-c
+     ckpt mtime: 2026-05-14 13:27:16.799024067 +0200
+     … +57 lines (ctrl+o to expand)
+  ⎿  (timeout 7m)
+
+● Quantitative (step 13600, round 59, 92.2% committed):
+  - loss/ema 1.660 — actually down from 1.687 last check; fast ≈ slow ≈ 1.66,
+  gate steady climbing
+  - Best EMA still 1.6012 @ step 2088 — locked since round 0
+  - q_err_mean jumped harder: 0.218 → 0.231 → 0.254 at rounds 57→58→59. The
+  remaining weights are the hardest.
+  - Target distribution 0.47 / 0.07 / 0.46 at round 59 — only 7% of recent
+  commits go to zero; the natural zeros are exhausted.
+  - A [resume] at step 13598 means the run was interrupted between step 13000
+  and 13598 and restarted cleanly (gate state + step_in_round preserved). TB
+  events file is fresh (only n=1 reading in current scalars) — that's why this
+  snapshot shows so little time-series.
+  - saturation_frac 0.005, near_boundary 0.123, flip_rate 0.0000 (essentially
+  zero — model is locked in)
+
+  Qualitative (chat from step-13598 ckpt, 92.2% committed):
+  - "Capital of France" → complete factual collapse: outputs "St.",
+  "Saint-Jean-Lager-lau", "Dres-Ceris", and a recursive "the city of / the city
+  of" pattern. Paris is gone. Striking regression vs step-12000 where Paris was
+  correct.
+  - Story → coherent Lily/Max teacher-Mr.-Johnson narrative. Narrative still 
+  holding.
+  - def fibonacci(n): → syntactically broken (def calculate fib(n) with a space
+  in the function name, print(f'FACT', 5)). Garbage.
+  - "Three laws of robotics" → coherent prose defining what a robot is, with
+  repetition pattern ("The robot can be programmed... The robot is...") —
+  slightly better shape than step-12000 but still wrong content.
+
+  The pattern is now clear: the last ~10% of commits are where named-entity 
+  recall lives. Between step-12000 (87.5%) and step-13598 (92.2%), "Paris" went
+  from correct to broken. Code synthesis and Asimov-laws had already collapsed
+  earlier; the France prompt was the last factual hold-out.
+
+  ETA: 5 rounds × ~200 steps × 5 s ≈ 1.4h to round 64.
+
+  Once the run finishes, the deploy fold runs and stage_progressive.safetensors
+  will be written — that's the actual ternary checkpoint to compare against the
+  step-2088 best_snapshot (~7% committed but EMA below L_T). Useful A/B to
+  quantify the late-half quality cost.
+
+✻ Sautéed for 2m 22s
+
+※ recap: Distilling SmolLM2-135M to ternary via progressive per-(row, group) clamping; Run F is at round 59/64, 92% committed, finishing in roughly 1.4 hours. Next action: wait for round 64 and inspect the final stage_progressive.safetensors against the step-2088 best_snapshot.
+
+❯ /remote-control 
+  ⎿  Remote Control disconnected.
+
+❯ /remote-control 
+  ⎿  Remote Control connecting…
+
+  /remote-control is active · Code in CLI or at https://claude.ai/code/session_01QujpwJ2L6tPHyymte7VToX
+
+✻ Running scheduled task (May 14 6:37pm)
+● Bash(/home/wmertens/Projects/smollmer/check_run.sh 2>&1 | tail -130)
+  ⎿  ==========================================================
+     Progressive run check: smollmer/ckpts.prog-F-pergroup-c
+     ckpt mtime: 2026-05-14 18:23:05.164720558 +0200
+     … +85 lines (ctrl+o to expand)
+  ⎿  (timeout 7m)
+
+● Quantitative (step 15190, round 63, 98.4% committed):
+  - loss/ema jumped to 1.887 (vs 1.660 last check) — significant climb in the
+  last ~1600 steps
+  - loss/gap 0.13–0.20 (well above the 0.05 commit threshold) — gate is not
+  firing within rounds now; it commits when the gap briefly dips, then loss
+  climbs again
+  - Fast EMA 1.778, slow 1.870 — fast below slow, model is recovering mid-round,
+   just not all the way
+  - Best EMA still 1.6012 @ step 2088 — locked since the second round
+  - q_err_mean: 0.309 → 0.309 → 0.340 across rounds 61-63
+  - Target distribution 0.50 / 0.01 / 0.50 at round 63 — zero share basically
+  exhausted; the last weights all have meaningful magnitudes
+  - Round pace ~262 steps. Rounds 59-63 over steps 13600-14911.
+  - saturation_frac 0.003, near_boundary 0.136 (uptick), flip_rate 0.0002
+  (slight rise from 0.0000)
+
+  Qualitative (chat from step-15000 ckpt, 98.4% committed):
+  - "Capital of France" → fabricated history: "Saint Inémont", "Sin Tôle de
+  Poigny", "Vie-VELTSe (French: Vaulte)", "In 1524". Hallucinatory
+  French-historical mashup with malformed words.
+  - Story → narrative now breaking: "Daisy and Daisy-F happen", "their little
+  ones", verb agreement off. The narrative anchor that held through 92% is
+  starting to crack.
+  - def fibonacci(n): → lambda salad ending in f**n * * * * * * * asterisk loop.
+   Worst code output yet.
+  - "Three laws of robotics" → mostly coherent prose around "law of robotics is
+  an idea", but with (1) To know what is a law / (2) To know what is a law / (3)
+   To know what is a law triple-repeat scaffolding.
+
+  This is the cliff. Between 92% and 98% committed, the model has lost most
+  remaining structure: factual recall fully hallucinatory, narrative (the last
+  good prompt category) now showing grammar breakage. Live EMA up ~0.22 nats
+  from last check.
+
+  ETA: ~1 round × 262 steps × 5 s ≈ 22 min to round 64, then the deploy fold +
+  stage_progressive.safetensors write. The final saved ternary checkpoint will
+  be at this quality level (or slightly worse with one more commit).
+
+  When it finishes, the key A/B test is the step-2088 best_snapshot (only ~7%
+  committed, EMA 1.60 — below L_T) vs the final round-64 checkpoint. The
+  best_snapshot isn't deployable as ternary, but comparing chat output between
+  them would isolate exactly how much quality was paid for the bit-squeeze.
+
+✻ Cooked for 1m 41s

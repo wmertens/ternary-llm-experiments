@@ -15,5 +15,6 @@ runs/
 wandb/
 *.safetensors
 *.bin
+*.log
 
 .DS_Store
