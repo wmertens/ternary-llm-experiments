@@ -11,6 +11,7 @@ dependencies = [
     "tqdm>=4.66",
     "numpy>=1.26",
     "tensorboard>=2.16",
+    "datasets>=4.8.5",
 ]
 
 [project.optional-dependencies]

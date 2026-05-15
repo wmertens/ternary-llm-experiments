@@ -58,19 +58,22 @@ from .teacher_floor import load_or_compute as load_teacher_floor
 
 
 # ============================================================================
-# Per-QLinear progressive state
+# Per-QLinear progressive state (progressive QAT)
 # ============================================================================
-# Three persistent buffers per QLinear (so they ride along in state_dict and
+# Two persistent buffers per QLinear (so they ride along in state_dict and
 # resume Just Works):
-#   frozen_mask   : bool[out, in]            — True for committed slots
-#   frozen_target : int8[out, in]            — sign of committed value (-1/0/+1)
-#   codepoint_c   : fp32[out, n_groups]      — codepoint magnitude per (row,group)
+#   qat_mask    : bool[out, in]            — True for promoted (ternarized) slots
+#   codepoint_c : fp32[out, n_groups]      — codepoint magnitude per (row, group)
 #
-# The latent value at a frozen slot is `frozen_target[r, c] * codepoint_c[r, g]`
-# where g = c // group_size. c_{r,g} is data-driven: at init we set it to the
-# mean of |w| over the band weights (|w| above the quantile boundary) in each
-# (row, group). That choice minimizes commit q_err on average — the band
-# weights are centered on the codepoint, not crowded against the |w|=1 edge.
+# Promoted slots use STE-ternarization in the forward: the effective weight at
+# slot (r, c) is sign(w)·c_{r,g} when |w| > c_{r,g}/2, else 0 — but the
+# gradient still flows back to the latent as identity. The latent can drift,
+# and as it crosses c_{r,g}/2 the ternary value flips. This is the key
+# difference from the prior "freeze" design: promotion is not a one-way trap.
+#
+# c_{r,g} is data-driven at init (mean of |w| over the band per group), which
+# minimizes commit-time q_err on average — band weights are centered on the
+# codepoint, not crowded against the |w|=1 edge.
 
 def attach_progressive_buffers(model: torch.nn.Module,
                                default_c: float = 2.0 / 3.0) -> int:
@@ -78,15 +81,10 @@ def attach_progressive_buffers(model: torch.nn.Module,
     for m in model.modules():
         if not isinstance(m, QLinear):
             continue
-        if not hasattr(m, "frozen_mask"):
+        if not hasattr(m, "qat_mask"):
             m.register_buffer(
-                "frozen_mask",
+                "qat_mask",
                 torch.zeros_like(m.weight, dtype=torch.bool),
-                persistent=True,
-            )
-            m.register_buffer(
-                "frozen_target",
-                torch.zeros_like(m.weight, dtype=torch.int8),
                 persistent=True,
             )
         if not hasattr(m, "codepoint_c"):
@@ -140,116 +138,51 @@ def compute_per_group_c(model: torch.nn.Module,
     }
 
 
-def _c_per_element(m: QLinear) -> torch.Tensor:
-    """Broadcast codepoint_c [out, ng] → [out, in] for per-element ops."""
-    out_f, in_f = m.weight.shape
-    gs, ng = m.group_size, m.n_groups
-    return (m.codepoint_c.unsqueeze(-1)
-            .expand(out_f, ng, gs)
-            .reshape(out_f, in_f)
-            .to(m.weight.dtype))
+def first_qlinear_qat_sample(
+    model: torch.nn.Module,
+) -> tuple[str, torch.Tensor] | None:
+    """Like distill.first_qlinear_forward_sample but uses the QAT-effective
+    weight: STE-ternary (±c_{r,g} or 0) at promoted slots, latent
+    elsewhere. The histogram of this is much more interpretable than the
+    raw latent — promoted weights show up as spikes near ±c_{r,g} and 0,
+    so progress through the schedule is visible as the spikes growing."""
+    for name, m in model.named_modules():
+        if not isinstance(m, QLinear):
+            continue
+        if hasattr(m, "qat_mask") and hasattr(m, "codepoint_c"):
+            qw = m._qat_effective_weight()
+        else:
+            qw = m.quantized_weight()
+        return name, qw.detach().flatten().to("cpu")
+    return None
 
 
-@torch.no_grad()
-def _build_frozen_value(m: QLinear) -> torch.Tensor:
-    """Materialize the full-shape `frozen_target * codepoint_c[r, g]`
-    tensor in weight dtype. Zero at unfrozen slots (since
-    frozen_target=0 there). Used at init/resume to populate the cache;
-    subsequent updates happen incrementally at commit time."""
-    out_f, in_f = m.weight.shape
-    c_elem = (m.codepoint_c.unsqueeze(-1)
-              .expand(out_f, m.n_groups, m.group_size)
-              .reshape(out_f, in_f)
-              .to(m.weight.dtype))
-    return (m.frozen_target.to(m.weight.dtype) * c_elem).contiguous()
-
-
-@torch.no_grad()
-def enforce_frozen(model: torch.nn.Module) -> None:
-    """Overwrite committed slots with their precomputed target value.
-
-    `_frozen_value` is a non-persistent per-QLinear cache of
-    `frozen_target * codepoint_c[r, g]`, populated at init/resume and
-    incrementally updated at commit time. Per step this is a single
-    indexed copy — no broadcast, no multiply, no per-step allocations.
-    Rebuilt lazily if shape/dtype/device drifts (handles --latent-dtype
-    changes and resume-into-different-dtype).
-    """
+def invalidate_c_elem_cache(model: torch.nn.Module) -> None:
+    """Force QLinears to rebuild their `_c_elem` cache (codepoint_c
+    broadcast to weight shape) on next forward. Call after init's
+    compute_per_group_c, or after a state_dict load that touched
+    codepoint_c — values changed but shape/dtype didn't, so the lazy
+    cache check inside QLinear.forward wouldn't otherwise rebuild."""
     for m in model.modules():
         if not isinstance(m, QLinear):
             continue
-        if not bool(m.frozen_mask.any()):
-            continue
-        cache = getattr(m, "_frozen_value", None)
-        if (cache is None
-                or cache.shape != m.weight.shape
-                or cache.dtype != m.weight.dtype
-                or cache.device != m.weight.device):
-            m._frozen_value = _build_frozen_value(m)
-        m.weight.data[m.frozen_mask] = m._frozen_value[m.frozen_mask]
-        m.invalidate_q_cache()
-
-
-def invalidate_frozen_value_cache(model: torch.nn.Module) -> None:
-    """Force rebuild of the precomputed frozen-value cache (e.g., after
-    compute_per_group_c writes to codepoint_c, or after a state_dict load
-    that touched codepoint_c / frozen_target / frozen_mask)."""
-    for m in model.modules():
-        if not isinstance(m, QLinear):
-            continue
-        if hasattr(m, "_frozen_value"):
+        if hasattr(m, "_c_elem"):
             try:
-                del m._frozen_value
+                del m._c_elem
             except AttributeError:
                 pass
 
 
-@torch.no_grad()
-def zero_frozen_grad(model: torch.nn.Module) -> None:
-    """Zero the gradient at frozen slots, after backward, before opt.step.
-    Prevents the optimizer from accumulating momentum on locked positions."""
-    for m in model.modules():
-        if not isinstance(m, QLinear):
-            continue
-        if m.weight.grad is None:
-            continue
-        if bool(m.frozen_mask.any()):
-            m.weight.grad.masked_fill_(m.frozen_mask, 0.0)
-
-
-def barrier_loss(model: torch.nn.Module) -> torch.Tensor:
-    """Soft barrier ‖relu(|w|−1)‖² (per-element mean) over UNFROZEN latents
-    only. Smooth everywhere; lets weights live in roughly [-1, 1] with the
-    codepoints ±c sitting comfortably interior. Frozen slots are masked out
-    of the sum (they're at ±c ≤ 1 anyway, so their contribution is 0, but
-    explicit masking makes the gradient route to them exactly zero)."""
-    parts: list[torch.Tensor] = []
-    n_total = 0
-    device = None
-    for m in model.modules():
-        if not isinstance(m, QLinear):
-            continue
-        w = m.weight
-        device = w.device
-        excess = (w.float().abs() - 1.0).clamp_min(0.0)
-        if hasattr(m, "frozen_mask"):
-            excess = excess.masked_fill(m.frozen_mask, 0.0)
-        parts.append((excess * excess).sum())
-        n_total += w.numel()
-    if not parts or n_total == 0:
-        return torch.tensor(0.0, device=device or "cpu")
-    return torch.stack(parts).sum() / n_total
-
-
 # ============================================================================
-# Selection + commit
+# Selection + promotion (progressive QAT)
 # ============================================================================
 
 @torch.no_grad()
 def compute_commit_targets(m: QLinear,
                            target_zero_frac: float | None) -> torch.Tensor:
-    """Per-element target ∈ {-c_{r,g}, 0, +c_{r,g}}, in m.weight's dtype.
-    c_{r,g} comes from m.codepoint_c (data-driven, one per (row, group)).
+    """Per-element ternary target in latent space ∈ {-c_{r,g}, 0, +c_{r,g}}.
+    Used by selection (find weight nearest its target) and by the QAT
+    forward (forward-with-STE at promoted slots).
 
     target_zero_frac=None → fixed 0.5 boundary on |w|.
     target_zero_frac ∈ (0, 1) → per-(row, group) |w|-quantile cutoff.
@@ -273,25 +206,29 @@ def compute_commit_targets(m: QLinear,
 
 
 @torch.no_grad()
-def select_and_commit_one_per_group(
+def select_and_promote_one_per_group(
     model: torch.nn.Module,
     opt: torch.optim.Optimizer,
     momentum_weight: float,
     target_zero_frac: float | None,
 ) -> tuple[int, dict[str, float]]:
-    """For each (row, group) that still has at least one unfrozen weight,
+    """For each (row, group) that still has at least one un-promoted weight,
     pick the weight minimizing
         |w − target(w)|  +  λ_m · |exp_avg| / median(|exp_avg|)
-    where target(w) is the nearest of {-c, 0, +c} under the boundary
-    rule selected by target_zero_frac (quantile if set, else c/2). Snap
-    the chosen weight to its target, mark it frozen, zero its (exp_avg,
-    exp_avg_sq) entries.
+    and add it to qat_mask. The latent is NOT snapped: from now on its
+    forward goes through STE-ternarization (forward = target, backward
+    = identity) so the latent retains gradient flow. As the latent
+    drifts across c_{r,g}/2, the ternary value can flip.
 
-    Returns (n_committed, stats). One commit per non-fully-frozen group
-    per call.
+    Optimizer momentum at the promoted slot is zeroed: the slot's
+    gradient is about to be redirected through STE; old momentum from
+    pre-promotion is no longer meaningful.
+
+    Returns (n_promoted, stats). One promotion per non-fully-promoted
+    group per call.
     """
     state = opt.state
-    n_committed = 0
+    n_promoted = 0
     sum_q_err = 0.0
     sum_q_err_count = 0
     n_neg = n_zero_ = n_pos = 0
@@ -301,10 +238,9 @@ def select_and_commit_one_per_group(
         out_f, in_f = m.weight.shape
         gs, ng = m.group_size, m.n_groups
         w = m.weight.detach().float()
-        fm = m.frozen_mask
+        fm = m.qat_mask
         target = compute_commit_targets(m, target_zero_frac).float()
         q_err = (w - target).abs()
-        # Momentum penalty (Lion / AdamW both store 'exp_avg').
         mst = state.get(m.weight, None)
         if (momentum_weight != 0.0
                 and mst is not None and "exp_avg" in mst):
@@ -313,16 +249,13 @@ def select_and_commit_one_per_group(
             score = q_err + momentum_weight * mom / mscale
         else:
             score = q_err
-        # Frozen slots can't be re-selected.
         score = torch.where(fm, torch.full_like(score, float("inf")), score)
         score_g = score.view(out_f, ng, gs)
-        # Any group with all-inf score is fully frozen; skip it.
-        finite = torch.isfinite(score_g).any(dim=-1)  # [out, ng]
-        idx_in_group = score_g.argmin(dim=-1)         # [out, ng] in [0, gs)
-        # Build the (row, col) coordinates of the chosen weights.
+        finite = torch.isfinite(score_g).any(dim=-1)
+        idx_in_group = score_g.argmin(dim=-1)
         group_idx = (torch.arange(ng, device=w.device)
                      .view(1, -1).expand(out_f, -1))
-        flat_in = group_idx * gs + idx_in_group       # [out, ng] in [0, in_f)
+        flat_in = group_idx * gs + idx_in_group
         row_idx = (torch.arange(out_f, device=w.device)
                    .view(-1, 1).expand(-1, ng))
         rr = row_idx[finite]
@@ -331,31 +264,29 @@ def select_and_commit_one_per_group(
             continue
         targets_chosen = target[rr, cc]
         q_err_chosen = q_err[rr, cc]
-        m.weight.data[rr, cc] = targets_chosen.to(m.weight.dtype)
-        signs = torch.zeros_like(targets_chosen, dtype=torch.int8)
-        signs[targets_chosen > 0] = 1
-        signs[targets_chosen < 0] = -1
-        m.frozen_target[rr, cc] = signs
-        m.frozen_mask[rr, cc] = True
-        # Incrementally update the precomputed frozen-value cache at the
-        # new commit slots. targets_chosen is already sign(w) * c_{r,g}
-        # in float; cast to weight dtype matches _frozen_value's dtype.
-        if hasattr(m, "_frozen_value"):
-            m._frozen_value[rr, cc] = targets_chosen.to(m._frozen_value.dtype)
+        # Promote: set the mask. Do NOT touch m.weight — the latent stays
+        # where it is and continues to receive gradient via STE.
+        m.qat_mask[rr, cc] = True
         m.invalidate_q_cache()
+        # Reset opt-state momentum at the promoted slots: the gradient
+        # at this slot is now identity-via-STE rather than the soft-mode
+        # identity, so the old running averages aren't appropriate.
         if mst is not None:
             for key in ("exp_avg", "exp_avg_sq"):
                 if key in mst:
                     mst[key][rr, cc] = 0.0
-        n_committed += int(rr.numel())
+        # Stats: q_err is the "would-be commit damage" — under freezing
+        # this would be a permanent loss tax; under progressive QAT the
+        # latent can drift to reduce it.
+        signs = torch.zeros_like(targets_chosen, dtype=torch.int8)
+        signs[targets_chosen > 0] = 1
+        signs[targets_chosen < 0] = -1
+        n_promoted += int(rr.numel())
         sum_q_err += float(q_err_chosen.sum())
         sum_q_err_count += int(q_err_chosen.numel())
         n_neg += int((signs == -1).sum())
         n_zero_ += int((signs == 0).sum())
         n_pos += int((signs == 1).sum())
-        # Release this module's fp32 temporaries before moving on; otherwise
-        # the caching allocator accumulates mixed-size holes across 210
-        # QLinears, leaving no contiguous block for the next backward.
         del w, target, q_err, score, score_g, finite, idx_in_group
         del group_idx, flat_in, row_idx, rr, cc, targets_chosen, q_err_chosen
         del signs
@@ -363,28 +294,29 @@ def select_and_commit_one_per_group(
             torch.cuda.empty_cache()
     stats = {
         "q_err_mean": (sum_q_err / max(1, sum_q_err_count)),
-        "frac_neg": n_neg / max(1, n_committed),
-        "frac_zero": n_zero_ / max(1, n_committed),
-        "frac_pos": n_pos / max(1, n_committed),
+        "frac_neg": n_neg / max(1, n_promoted),
+        "frac_zero": n_zero_ / max(1, n_promoted),
+        "frac_pos": n_pos / max(1, n_promoted),
     }
-    return n_committed, stats
+    return n_promoted, stats
 
 
 @torch.no_grad()
 def total_committed_fraction(model: torch.nn.Module) -> float:
-    n_frozen = 0
+    """Fraction of QLinear weights promoted to ternary forward (QAT)."""
+    n_promoted = 0
     n_total = 0
     for m in model.modules():
         if not isinstance(m, QLinear):
             continue
-        n_frozen += int(m.frozen_mask.sum())
+        n_promoted += int(m.qat_mask.sum())
         n_total += m.weight.numel()
-    return n_frozen / max(1, n_total)
+    return n_promoted / max(1, n_total)
 
 
 @torch.no_grad()
 def max_committed_per_group(model: torch.nn.Module) -> int:
-    """Largest count of frozen weights in any single (row, group). When
+    """Largest count of promoted weights in any single (row, group). When
     this equals group_size for every module, the schedule is done."""
     worst = 0
     for m in model.modules():
@@ -392,7 +324,7 @@ def max_committed_per_group(model: torch.nn.Module) -> int:
             continue
         out_f = m.weight.shape[0]
         gs, ng = m.group_size, m.n_groups
-        cnt = m.frozen_mask.view(out_f, ng, gs).sum(dim=-1).max()
+        cnt = m.qat_mask.view(out_f, ng, gs).sum(dim=-1).max()
         worst = max(worst, int(cnt))
     return worst
 
@@ -551,12 +483,10 @@ def main() -> None:
                          "where mean(|w| over band) lands for SmolLM2-shape "
                          "Gaussian-ish weight distributions.")
     ap.add_argument("--barrier-coef", type=float, default=0.0,
-                    help="Coefficient on the relu(|w|−1)² soft barrier loss. "
-                         "Default 0: we rely on hard clamp_(-1, 1) after each "
-                         "opt.step instead — natural weight distribution and "
-                         "weight decay pull weights inward; the soft barrier "
-                         "added ~1 GB of fp32 autograd graph for negligible "
-                         "benefit. Set >0 to re-enable the soft form.")
+                    help="Deprecated. Was: relu(|w|−1)² soft barrier "
+                         "coefficient. Now the hard clamp_(-1, 1) after "
+                         "each opt.step does the job; this flag is a no-op "
+                         "but kept for backward-compat with older run.sh.")
     ap.add_argument("--target-zero-frac", type=float, default=0.38,
                     help="Fraction of weights per (row, group) targeting 0 "
                          "(the rest target ±c). Per-group |w|-quantile cutoff. "
@@ -597,6 +527,16 @@ def main() -> None:
                     help="Multiply ALL exp_avg by this after each commit. "
                          "1.0 = off. <1 cools momentum to prevent "
                          "overshoot after the perturbation.")
+    ap.add_argument("--settle-max-steps", type=int, default=5000,
+                    help="After the final commit round, keep training "
+                         "until the EMAs converge (two-sided), capped at "
+                         "this many steps. Without this, the last commit "
+                         "(usually the biggest perturbation — every "
+                         "remaining weight gets snapped at once across "
+                         "all groups) leaves the model in a degraded "
+                         "post-perturbation state. Run F's final round "
+                         "fired at max_round_steps with q_err=0.4 and "
+                         "the deploy fold captured that bad state.")
 
     args = ap.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
@@ -642,7 +582,7 @@ def main() -> None:
         tzf = (args.target_zero_frac
                if 0.0 < args.target_zero_frac < 1.0 else None)
         cstats = compute_per_group_c(model, tzf, fallback_c=args.c)
-        invalidate_frozen_value_cache(model)
+        invalidate_c_elem_cache(model)
         print(f"[progressive] codepoint_c: mean={cstats['mean']:.4f} "
               f"min={cstats['min']:.4f} max={cstats['max']:.4f} "
               f"p50={cstats['p50']:.4f}")
@@ -682,7 +622,7 @@ def main() -> None:
             resume_meta = f.metadata() or {}
         sd = load_file(str(args.resume))
         miss, unexp = model.load_state_dict(sd, strict=False)
-        invalidate_frozen_value_cache(model)
+        invalidate_c_elem_cache(model)
         print(f"[resume] warm-start from {args.resume.name} "
               f"(meta={resume_meta}, missing={len(miss)}, "
               f"unexpected={len(unexp)})")
@@ -697,7 +637,7 @@ def main() -> None:
                                        map_location="cpu",
                                        weights_only=False)
         model.load_state_dict(interrupted_state["model"], strict=False)
-        invalidate_frozen_value_cache(model)
+        invalidate_c_elem_cache(model)
         # Drop the loaded model dict — its data is now in the model's
         # parameters; no need to keep a CPU duplicate.
         del interrupted_state["model"]
@@ -813,8 +753,10 @@ def main() -> None:
     # data-dependent. With default --lr-floor=1.0 this is moot (flat LR).
     nominal_total = max(1, group_size * args.commit_max_round_steps)
 
+    in_settle = False
+    settle_gate: CommitGate | None = None
     try:
-        while round_idx < group_size:
+        while round_idx < group_size or in_settle:
             cur_lr = lr_at(global_step, nominal_total, args.lr,
                            args.warmup_steps, floor=args.lr_floor)
             for g in opt.param_groups:
@@ -845,62 +787,71 @@ def main() -> None:
                 running += loss.item()
                 running_n += 1
 
-            # --- barrier loss (one backward, no grad_accum scaling) ---
-            # Short-circuit when no weight crosses |w|=1: the autograd graph
-            # for barrier_loss holds ~1 GB of fp32 copies of every QLinear
-            # weight, which is wasted memory when the barrier is inactive.
-            barrier_val = 0.0
-            if args.barrier_coef > 0:
-                with torch.no_grad():
-                    excess_max = 0.0
-                    for m in model.modules():
-                        if not isinstance(m, QLinear):
-                            continue
-                        excess_max = max(excess_max,
-                                         float(m.weight.abs().max()))
-                if excess_max > 1.0:
-                    bl = barrier_loss(model)
-                    (args.barrier_coef * bl).backward()
-                    barrier_val = float(bl.detach())
+            barrier_val = 0.0  # barrier deprecated under hard-clamp scheme
 
-            # --- mask out frozen-slot grads BEFORE clip + step ---
-            zero_frozen_grad(model)
+            # Under progressive QAT, promoted slots use STE — gradient flows
+            # to the latent so the optimizer can keep moving it. No
+            # zero-grad masking at promoted slots; that would defeat the
+            # whole point.
 
             grad_norm = None
             if args.max_grad_norm:
                 grad_norm = float(torch.nn.utils.clip_grad_norm_(
                     model.parameters(), args.max_grad_norm))
             opt.step()
-            enforce_frozen(model)        # undo wd / barrier on frozen
-            clamp_qlinear_weights(model)          # keep unfrozen in [-1, 1]
+            clamp_qlinear_weights(model)  # keep latents in [-1, 1]
             opt.zero_grad(set_to_none=True)
             global_step += 1
 
             step_loss = running / max(1, running_n)
 
-            # --- warmup vs commit gate ---
+            # --- warmup vs commit gate vs settle ---
             if is_warmup:
                 if global_step >= args.warmup_rounds_steps:
                     tqdm.write(f"[warmup] done at step {global_step}; "
                                f"starting commit rounds")
                     gate.reset()
                     is_warmup = False
+            elif in_settle:
+                # Settle phase: train until EMAs converge (two-sided check
+                # in the gate; we pass gap_threshold=inf so any stable
+                # state fires the exit), capped at --settle-max-steps.
+                done, settle_reason = settle_gate.step(step_loss, L_T)
+                if done:
+                    tqdm.write(f"[settle] done at step {global_step}; "
+                               f"reason={settle_reason}")
+                    break
             else:
                 should_commit, reason = gate.step(step_loss, L_T)
                 if should_commit:
                     tzf = (args.target_zero_frac
                            if 0.0 < args.target_zero_frac < 1.0 else None)
-                    n_c, sel_stats = select_and_commit_one_per_group(
+                    n_c, sel_stats = select_and_promote_one_per_group(
                         model, opt, args.momentum_weight, tzf)
                     if args.post_commit_momentum_damp != 1.0:
                         for p in model.parameters():
                             st = opt.state.get(p, {})
                             if "exp_avg" in st:
                                 st["exp_avg"].mul_(args.post_commit_momentum_damp)
-                    enforce_frozen(model)  # re-pin after damp
                     if args.device.startswith("cuda"):
                         torch.cuda.empty_cache()
                     round_idx += 1
+                    if round_idx == group_size:
+                        # Last commit done — enter settle phase to let the
+                        # post-perturbation loss recover before the deploy
+                        # fold captures it. Gate fires on stable EMAs
+                        # regardless of gap (gap_threshold=inf).
+                        in_settle = True
+                        settle_gate = CommitGate(
+                            patience=args.commit_patience,
+                            max_round_steps=args.settle_max_steps,
+                            gap_threshold=float("inf"),
+                            min_steps_per_round=args.min_steps_per_round,
+                            tolerance=args.commit_tolerance,
+                        )
+                        tqdm.write(
+                            f"[settle] entering settle phase at step "
+                            f"{global_step}; cap={args.settle_max_steps} steps")
                     cf = total_committed_fraction(model)
                     mx = max_committed_per_group(model)
                     tqdm.write(
@@ -988,10 +939,10 @@ def main() -> None:
                 running_n = 0
                 pbar.update(args.log_every)
 
-            # --- weight histogram ---
+            # --- weight histogram (QAT-effective weight, not raw latent) ---
             if (args.soft_hist_every > 0
                     and global_step % args.soft_hist_every == 0):
-                hs = first_qlinear_forward_sample(model)
+                hs = first_qlinear_qat_sample(model)
                 if hs is not None:
                     name, w_flat = hs
                     if torch.isfinite(w_flat).all():
@@ -1050,16 +1001,29 @@ def main() -> None:
     finally:
         pbar.close()
 
-    # ---- Done: fold c_{r,g} into scales (math-preserving) → codebook {-1,0,+1} ----
-    # Per-group: w /= c_{r,g}, s *= c_{r,g}. Committed slots at ±c_{r,g}
-    # latent become ±1 in deploy form; scales absorb the magnitude.
+    # ---- Done: snap latents to ternary + fold c into scales → {-1, 0, +1} ----
+    # Per element: target = sign(w)·c_{r,g} if |w| > c_{r,g}/2, else 0.
+    # This matches the STE-ternarization the QAT forward was already using
+    # at promoted slots — math-preserving when every slot was promoted.
+    # Then fold c_{r,g} into the scales: w /= c, s *= c. After the fold
+    # the latent is in {-1, 0, +1} and the scales absorb the codepoint
+    # magnitude — Bonsai's deployment form.
     print(f"[progressive] complete after {global_step} steps; "
           f"committed_frac={total_committed_fraction(model):.4f}")
     with torch.no_grad():
         for m in model.modules():
             if not isinstance(m, QLinear):
                 continue
-            c_elem = _c_per_element(m)
+            out_f, in_f = m.weight.shape
+            c_elem = (m.codepoint_c.unsqueeze(-1)
+                      .expand(out_f, m.n_groups, m.group_size)
+                      .reshape(out_f, in_f)
+                      .to(m.weight.dtype))
+            thresh = c_elem * 0.5
+            target = torch.where(m.weight.abs() > thresh,
+                                 torch.sign(m.weight) * c_elem,
+                                 torch.zeros_like(m.weight))
+            m.weight.data.copy_(target)
             m.weight.data.div_(c_elem)
             m.scales.data.mul_(m.codepoint_c.to(m.scales.dtype))
             m.invalidate_q_cache()

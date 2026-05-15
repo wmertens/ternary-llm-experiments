@@ -225,8 +225,46 @@ class QLinear(nn.Linear):
             self._q_cache = q
         return self.weight + (self._q_cache - self.weight).detach()
 
+    def _qat_effective_weight(self) -> torch.Tensor:
+        """Progressive QAT: per element, blend STE-ternary (at promoted
+        slots) with the latent (elsewhere). The ternary target in latent
+        space is sign(w)·c_{r,g} if |w| > c_{r,g}/2, else 0. STE makes
+        the forward equal to that target while the backward sees identity,
+        so the optimizer keeps moving the latent freely. As the latent
+        crosses c_{r,g}/2 the ternary value flips — promotion is not a
+        one-way trap.
+
+        Lazily caches `_c_elem` (codepoint_c broadcast to weight shape,
+        in weight dtype) on the module; invalidate by deleting attr.
+        """
+        w = self.weight
+        c_elem = getattr(self, "_c_elem", None)
+        if (c_elem is None
+                or c_elem.shape != w.shape
+                or c_elem.dtype != w.dtype
+                or c_elem.device != w.device):
+            out_f, in_f = w.shape
+            self._c_elem = (self.codepoint_c.unsqueeze(-1)
+                            .expand(out_f, self.n_groups, self.group_size)
+                            .reshape(out_f, in_f)
+                            .to(w.dtype)
+                            .contiguous())
+            c_elem = self._c_elem
+        target = torch.where(w.abs() > c_elem * 0.5,
+                             torch.sign(w) * c_elem,
+                             torch.zeros_like(w))
+        # STE: forward = target, backward = identity-on-w
+        w_ste = w + (target - w).detach()
+        return torch.where(self.qat_mask, w_ste, w)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        q_ste = self.quantized_weight()  # [out, in], in [-1, 1]
+        # Progressive-QAT path is active iff the module carries both a
+        # qat_mask and codepoint_c (set up by attach_progressive_buffers).
+        if (hasattr(self, "qat_mask") and hasattr(self, "codepoint_c")
+                and self.qat_mask.any()):
+            q_ste = self._qat_effective_weight()
+        else:
+            q_ste = self.quantized_weight()  # [out, in], in [-1, 1]
         # Apply per-(row, group) scales: expand scales [out, n_groups] to
         # [out, in] by broadcasting along the group's columns.
         q_blocks = q_ste.view(self.out_features, self.n_groups, self.group_size)

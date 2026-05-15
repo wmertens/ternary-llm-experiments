@@ -67,8 +67,47 @@ def main() -> None:
         permute=False,  # ckpt already has permuted weights
     )
     print(f"[build] {n_replaced} QLinear modules; loading state...")
+    # If the ckpt is from progressive QAT, attach codepoint_c + qat_mask
+    # buffers FIRST so they get populated by the state_dict load. Without
+    # this, the freshly built `model` has no such buffers and they'd be
+    # silently dropped as "unexpected" keys.
+    from smollmer.progressive_distill import attach_progressive_buffers
+    has_progressive = any(k.endswith(".codepoint_c") or k.endswith(".qat_mask")
+                          for k in sd.keys())
+    if has_progressive:
+        attach_progressive_buffers(model)
     miss, unexp = model.load_state_dict(sd, strict=False)
-    print(f"[load]   missing={len(miss)} unexpected={len(unexp)}")
+    print(f"[load]   missing={len(miss)} unexpected={len(unexp)} "
+          f"progressive={has_progressive}")
+
+    if has_progressive:
+        # Snap latents to the STE-ternary target at promoted slots,
+        # mirroring what the QAT forward was producing during training.
+        # Unpromoted slots keep their latent (chat will see the actual
+        # mid-training forward). Then drop the qat_mask + codepoint_c
+        # so chat.py / set_levels / etc. see a standard QLinear.
+        with torch.no_grad():
+            for m in model.modules():
+                if not hasattr(m, "qat_mask") or not hasattr(m, "codepoint_c"):
+                    continue
+                out_f, in_f = m.weight.shape
+                c_elem = (m.codepoint_c.unsqueeze(-1)
+                          .expand(out_f, m.n_groups, m.group_size)
+                          .reshape(out_f, in_f)
+                          .to(m.weight.dtype))
+                thresh = c_elem * 0.5
+                target = torch.where(m.weight.abs() > thresh,
+                                     torch.sign(m.weight) * c_elem,
+                                     torch.zeros_like(m.weight))
+                # Only overwrite at promoted slots; keep latent elsewhere.
+                m.weight.data = torch.where(m.qat_mask, target, m.weight.data)
+                m.invalidate_q_cache()
+        n_promoted_modules = sum(
+            1 for m in model.modules()
+            if hasattr(m, "qat_mask") and bool(m.qat_mask.any())
+        )
+        print(f"[qat] snapped latents to STE-ternary at "
+              f"{n_promoted_modules} modules' promoted slots")
 
     if args.deploy and args.force_ternary:
         raise SystemExit("--deploy and --force-ternary are mutually exclusive")
