@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Qualitative + quantitative check on a progressive-distill run.
 # Usage: check_run.sh [ckpt_dir]
-#   Defaults to most-recently-modified smollmer/ckpts.prog-* dir.
+#   Defaults to most-recently-modified smollmer/ckpts.{prog,qat}-* dir.
 # Reads TB scalars, dumps the on-disk interrupted.pt to a temp safetensors,
 # runs a fixed set of chat prompts on CPU, prints a structured report.
 set -euo pipefail
@@ -12,7 +12,7 @@ PY=.venv/bin/python
 
 CKPT_DIR="${1:-}"
 if [[ -z "$CKPT_DIR" ]]; then
-  CKPT_DIR=$(ls -dt smollmer/ckpts.prog-*/ 2>/dev/null | head -1)
+  CKPT_DIR=$(ls -dt smollmer/ckpts.prog-*/ smollmer/ckpts.qat-*/ 2>/dev/null | head -1)
   CKPT_DIR="${CKPT_DIR%/}"
 fi
 if [[ -z "$CKPT_DIR" || ! -d "$CKPT_DIR" ]]; then
@@ -74,7 +74,11 @@ for t in ('loss/ema','loss/gap','progressive/round','progressive/committed_frac'
           'progressive/loss_ema_fast','progressive/loss_ema_slow',
           'progressive/step_in_round','progressive/steady',
           'grad_norm','progressive/barrier','soft/latent/saturation_frac',
-          'soft/latent/near_boundary_frac','weights/flip_rate'):
+          'soft/latent/near_boundary_frac','weights/flip_rate',
+          'c/mean','c/min','c/max','c/p50',
+          'c/l2_from_init','c/rms_from_init',
+          's/mean','s/min','s/max','s/p50',
+          's/l2_from_init','s/rms_from_init'):
     show(t)
 # Round transitions
 rnd = ea.Scalars('progressive/round') if 'progressive/round' in tags else []

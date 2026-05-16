@@ -225,6 +225,44 @@ class QLinear(nn.Linear):
             self._q_cache = q
         return self.weight + (self._q_cache - self.weight).detach()
 
+    def _full_qat_effective_weight(self) -> torch.Tensor:
+        """Single-stage QAT (qat_distill mode): every slot is ternarized.
+        codepoint_c is a learnable nn.Parameter (one per row, per group).
+
+        Forward at slot (r, c):
+            sign(w)·c_{r,g}   if |w| > c_{r,g}/2
+            0                 otherwise
+
+        Backward (sign-cancellation-free routing):
+          d/dw: 1 at nonzero-target slots, 0 at zero-target slots.
+          d/dc: 1 at every nonzero-target slot (regardless of sign).
+                The natural derivative is sign(w), which cancels across a
+                (row, group) when positive and negative band weights are
+                balanced — leaving c with ~0 gradient and stuck. We
+                redirect via .detach() trickery so each non-zero band
+                slot contributes +1 to c's gradient, summing to the
+                count-of-non-zero-slots × upstream gradient. c can
+                actually learn now.
+        """
+        w = self.weight
+        out_f, in_f = w.shape
+        wb = w.view(out_f, self.n_groups, self.group_size)
+        c_b = self.codepoint_c.unsqueeze(-1).to(w.dtype)  # [out, ng, 1]
+        with torch.no_grad():
+            sign_wb = torch.sign(wb)
+            is_nonzero = wb.abs() > c_b * 0.5
+        # Forward = sign(w)·c (carried by the detached product).
+        # (c_b - c_b.detach()) is 0 in forward, but back-prop sees identity
+        # on c_b — and because c_b broadcasts across the gs dim, each
+        # non-zero slot inside torch.where contributes +1 to c_b[r,g,0]'s
+        # gradient. Same trick for w: (wb - wb.detach()) is the STE.
+        sign_wb_c = (sign_wb * c_b).detach()
+        nonzero = (sign_wb_c
+                   + (c_b - c_b.detach())
+                   + (wb - wb.detach()))
+        eff = torch.where(is_nonzero, nonzero, torch.zeros_like(wb))
+        return eff.view(out_f, in_f)
+
     def _qat_effective_weight(self) -> torch.Tensor:
         """Progressive QAT: per element, blend STE-ternary (at promoted
         slots) with the latent (elsewhere). The ternary target in latent
@@ -258,9 +296,14 @@ class QLinear(nn.Linear):
         return torch.where(self.qat_mask, w_ste, w)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Progressive-QAT path is active iff the module carries both a
-        # qat_mask and codepoint_c (set up by attach_progressive_buffers).
-        if (hasattr(self, "qat_mask") and hasattr(self, "codepoint_c")
+        # Three paths, picked by what's attached:
+        #   codepoint_c is a Parameter, no qat_mask → full-QAT (qat_distill)
+        #   codepoint_c + qat_mask buffer (any True) → progressive QAT
+        #   otherwise → standard soft/levels (original Bonsai flow)
+        c = getattr(self, "codepoint_c", None)
+        if c is not None and isinstance(c, nn.Parameter):
+            q_ste = self._full_qat_effective_weight()
+        elif (c is not None and hasattr(self, "qat_mask")
                 and self.qat_mask.any()):
             q_ste = self._qat_effective_weight()
         else:
