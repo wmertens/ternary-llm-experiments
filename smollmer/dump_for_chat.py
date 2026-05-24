@@ -47,6 +47,12 @@ def main() -> None:
                          "would look like under naive ternary rounding "
                          "(typically degenerate when per-group well_a "
                          "differs from 1).")
+    ap.add_argument("--smooth-t", type=float, default=None,
+                    help="Override smooth temperature for mid-training smooth "
+                         "QAT checkpoints. When set, apply smooth forward at "
+                         "this T instead of hard-snapping. Useful for "
+                         "checkpoints saved before T_global was stored in "
+                         "soft_state. Read from log via check_run.sh.")
     args = ap.parse_args()
 
     print(f"[load] {args.in_path}")
@@ -83,42 +89,82 @@ def main() -> None:
           f"progressive={has_progressive} full_qat={has_full_qat}")
 
     if has_progressive or has_full_qat:
-        # Snap latents to the STE-ternary target so chat sees what the
-        # QAT forward was actually producing during training.
-        # - Progressive: snap only at qat_mask=True; unpromoted slots
-        #   keep their latent (chat shows the actual mid-training forward).
-        # - Full QAT (qat_distill): snap everywhere — every slot was
-        #   already ternarized in forward.
-        with torch.no_grad():
-            for m in model.modules():
-                if not hasattr(m, "codepoint_c"):
-                    continue
-                out_f, in_f = m.weight.shape
-                c_elem = (m.codepoint_c.unsqueeze(-1)
-                          .expand(out_f, m.n_groups, m.group_size)
-                          .reshape(out_f, in_f)
-                          .to(m.weight.dtype))
-                thresh = c_elem * 0.5
-                target = torch.where(m.weight.abs() > thresh,
-                                     torch.sign(m.weight) * c_elem,
-                                     torch.zeros_like(m.weight))
-                if has_full_qat:
-                    m.weight.data.copy_(target)  # snap every slot
-                else:
-                    # Progressive: only at promoted slots.
-                    m.weight.data = torch.where(m.qat_mask, target,
-                                                m.weight.data)
-                m.invalidate_q_cache()
+        # Smooth QAT (qat_smooth): if T > 0, the effective weight during
+        # training is w_q(w/c)*c, not the hard-snapped {-c,0,+c}. Hard-
+        # snapping at high T gives garbage output. Apply the smooth forward
+        # instead so chat sees the actual training distribution.
+        smooth_T = None
         if has_full_qat:
-            n_mod = sum(1 for m in model.modules()
-                        if hasattr(m, "codepoint_c"))
-            print(f"[qat] full-QAT: snapped all latents to ternary "
-                  f"across {n_mod} modules")
-        else:
-            n_mod = sum(1 for m in model.modules()
-                        if hasattr(m, "qat_mask") and bool(m.qat_mask.any()))
-            print(f"[qat] progressive: snapped latents to STE-ternary "
-                  f"at {n_mod} modules' promoted slots")
+            # Priority: explicit --smooth-t > T_global in checkpoint >
+            # recomputed from (T_init, anneal_step, anneal_steps)
+            if args.smooth_t is not None:
+                t = args.smooth_t
+            else:
+                ss = state.get("soft_state") or {}
+                t = ss.get("T_global")
+                if t is None and all(k in ss for k in
+                                     ("T_init", "anneal_step", "anneal_steps")):
+                    import math as _math
+                    frac = (min(int(ss["anneal_step"]), int(ss["anneal_steps"]))
+                            / int(ss["anneal_steps"]))
+                    t = float(ss["T_init"]) * _math.cos(_math.pi / 2 * frac)
+            if t is not None and float(t) > 1e-4:
+                smooth_T = float(t)
+
+        with torch.no_grad():
+            if smooth_T is not None:
+                import torch.nn.functional as _F
+                for m in model.modules():
+                    if not hasattr(m, "codepoint_c"):
+                        continue
+                    out_f, in_f = m.weight.shape
+                    wb = m.weight.float().view(out_f, m.n_groups, m.group_size)
+                    c_b = m.codepoint_c.float().unsqueeze(-1).clamp_min(1e-8)
+                    cb = torch.tensor([-1.0, 0.0, 1.0], dtype=torch.float32,
+                                      device=wb.device)
+                    probs = _F.softmax(
+                        -(wb / c_b).unsqueeze(-1).sub(cb).pow(2) / smooth_T,
+                        dim=-1)
+                    w_q = probs.mul(cb).sum(-1)
+                    eff = w_q.mul(c_b).view(out_f, in_f)
+                    m.weight.data.copy_(eff.to(m.weight.dtype))
+                    m.invalidate_q_cache()
+                n_mod = sum(1 for m in model.modules()
+                            if hasattr(m, "codepoint_c"))
+                print(f"[smooth] applied smooth forward at T={smooth_T:.4f} "
+                      f"across {n_mod} modules (hard snap kicks in at T≈0)")
+            else:
+                # Hard snap: {-c,0,+c} per slot — correct at T≈0 or for
+                # qat_distill (no smooth_T in checkpoint).
+                for m in model.modules():
+                    if not hasattr(m, "codepoint_c"):
+                        continue
+                    out_f, in_f = m.weight.shape
+                    c_elem = (m.codepoint_c.unsqueeze(-1)
+                              .expand(out_f, m.n_groups, m.group_size)
+                              .reshape(out_f, in_f)
+                              .to(m.weight.dtype))
+                    thresh = c_elem * 0.5
+                    target = torch.where(m.weight.abs() > thresh,
+                                         torch.sign(m.weight) * c_elem,
+                                         torch.zeros_like(m.weight))
+                    if has_full_qat:
+                        m.weight.data.copy_(target)
+                    else:
+                        m.weight.data = torch.where(m.qat_mask, target,
+                                                    m.weight.data)
+                    m.invalidate_q_cache()
+                if has_full_qat:
+                    n_mod = sum(1 for m in model.modules()
+                                if hasattr(m, "codepoint_c"))
+                    print(f"[qat] full-QAT: snapped all latents to ternary "
+                          f"across {n_mod} modules")
+                else:
+                    n_mod = sum(1 for m in model.modules()
+                                if hasattr(m, "qat_mask")
+                                and bool(m.qat_mask.any()))
+                    print(f"[qat] progressive: snapped latents to STE-ternary "
+                          f"at {n_mod} modules' promoted slots")
 
     if args.deploy and args.force_ternary:
         raise SystemExit("--deploy and --force-ternary are mutually exclusive")

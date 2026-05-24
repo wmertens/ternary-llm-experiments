@@ -12,7 +12,7 @@ PY=.venv/bin/python
 
 CKPT_DIR="${1:-}"
 if [[ -z "$CKPT_DIR" ]]; then
-  CKPT_DIR=$(ls -dt smollmer/ckpts.prog-*/ smollmer/ckpts.qat-*/ 2>/dev/null | head -1)
+  CKPT_DIR=$(ls -dt smollmer/ckpts.*/ 2>/dev/null | head -1)
   CKPT_DIR="${CKPT_DIR%/}"
 fi
 if [[ -z "$CKPT_DIR" || ! -d "$CKPT_DIR" ]]; then
@@ -98,7 +98,17 @@ TMP=/tmp/smollmer_chat_$$.safetensors
 trap 'rm -f "$TMP"' EXIT
 echo
 echo "--- dump on-disk state to $TMP ---"
-$PY -m smollmer.dump_for_chat --in "$CKPT" --out "$TMP" --scale-group-size 64 2>&1 | grep -E '^\[(load|build|save|done)\]'
+# Extract T from last [ckpt] log line (e.g. "T=0.2957") for smooth QAT runs.
+SMOOTH_T_ARG=""
+if [[ -f "$LOG" ]]; then
+  LAST_T=$(tr '\r' '\n' < "$LOG" | grep -E '^\[ckpt\]' | tail -1 \
+           | grep -oP '(?<=T=)[0-9]+\.[0-9]+' || true)
+  if [[ -n "$LAST_T" ]]; then
+    SMOOTH_T_ARG="--smooth-t $LAST_T"
+  fi
+fi
+$PY -m smollmer.dump_for_chat --in "$CKPT" --out "$TMP" --scale-group-size 64 \
+  $SMOOTH_T_ARG 2>&1 | grep -E '^\[(load|build|save|done|smooth|qat)\]'
 
 echo
 echo "--- chat samples (CPU, fp32, α=0, T=0.8, top_p=0.9, 60 tok) ---"

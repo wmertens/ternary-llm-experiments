@@ -213,40 +213,46 @@ def _project_text(example: dict) -> dict:
     return {"text": ""}
 
 
-def _make_corpus(seed: int):
-    """Interleaved SmolLM-Corpus at SmolLM2 training proportions (75/15/10)."""
-    from datasets import load_dataset, interleave_datasets
+# SmolLM2 training proportions, expressed as integer counts per cadence cycle.
+# 60-cycle ⇒ every shard divisible by 60 sees exactly 45F/9C/6P at the target
+# 75/15/10 mix, with sub-cycle shuffling so smaller batch sizes also see a
+# good mix (every batch size that divides 60: 1,2,3,4,5,6,10,12,15,20,30,60).
+_SOURCES: tuple[tuple[str, int], ...] = (
+    ("fineweb-edu-dedup", 45),
+    ("cosmopedia-v2",      9),
+    ("python-edu",         6),
+)
+_CADENCE = sum(n for _, n in _SOURCES)  # 60
+_N_SOURCES = len(_SOURCES)
 
-    cfgs = [
-        ("fineweb-edu-dedup", 0.75),
-        ("cosmopedia-v2",     0.15),
-        ("python-edu",        0.10),
-    ]
-    datasets_, probs = [], []
-    for cfg, p in cfgs:
+
+def _make_streams(seed: int):
+    """Return one streaming dataset per source (no interleaving)."""
+    from datasets import load_dataset
+
+    streams = []
+    for i, (cfg, _) in enumerate(_SOURCES):
         d = load_dataset(
             "HuggingFaceTB/smollm-corpus", cfg,
             split="train", streaming=True,
         )
-        d = d.shuffle(seed=seed + int(p * 1000), buffer_size=10_000)
+        d = d.shuffle(seed=seed + 1000 * (i + 1), buffer_size=10_000)
         d = d.map(_project_text, remove_columns=None)
-        datasets_.append(d)
-        probs.append(p)
-    return interleave_datasets(datasets_, probabilities=probs, seed=seed,
-                               stopping_strategy="all_exhausted")
+        streams.append(d)
+    return streams
 
 
-def _pack_iter(corpus, tokenizer, seq_len: int, docs_counter: list[int]):
-    """Yield fixed-length token sequences (BOS + seq_len-1 body tokens).
+def _pack_one_source(stream, tokenizer, seq_len: int, docs_counter: list[int]):
+    """Yield fixed-length token sequences from a single source's stream.
 
-    Increments docs_counter[0] for each corpus document consumed, so callers
-    can persist the exact position for later append/resume via corpus.skip().
+    Increments docs_counter[0] for each consumed document so callers can
+    persist the per-source skip position.
     """
     bos = tokenizer.bos_token_id
     eos = tokenizer.eos_token_id or tokenizer.pad_token_id or 0
     body_len = seq_len - (1 if bos is not None else 0)
     buf: list[int] = []
-    for example in corpus:
+    for example in stream:
         text = example.get("text") or ""
         if not text:
             continue
@@ -262,33 +268,59 @@ def _pack_iter(corpus, tokenizer, seq_len: int, docs_counter: list[int]):
             yield chunk
 
 
-_AVG_DOC_TOKENS = 1200  # empirical estimate for smollm-corpus 75/15/10 mix
+def _cycle_order(seed: int, cycle_idx: int) -> list[int]:
+    """Return the deterministic per-cycle source-index pattern (length _CADENCE).
+
+    Identical RNG used by both the streaming iterator and the shard-assembly
+    step, so a filter-free run lays sequences out in the same order as before.
+    """
+    rng = random.Random(seed * 1_000_003 + cycle_idx)
+    order: list[int] = []
+    for i, (_, n) in enumerate(_SOURCES):
+        order.extend([i] * n)
+    rng.shuffle(order)
+    return order
 
 
-def _docs_to_skip(out_dir: Path, start_shard: int, seq_len: int) -> int:
-    """Return how many corpus documents to skip when appending.
+def _stratified_seq_iter(packers, seed: int, start_cycle: int = 0):
+    """Yield (src_idx, chunk) pairs in cadence-_CADENCE cycles.
 
-    Reads docs_consumed from the last shard's metadata if available;
-    otherwise estimates from total tokens cached / avg doc length.
+    src_idx lets the caller (a) know which per-source pool to push the
+    forward-pass result into and (b) draw a replacement from the same source
+    on rejection. Resume reproduces the exact ordering by seeding from
+    (seed, cycle_idx) per cycle.
+    """
+    cycle = start_cycle
+    while True:
+        for src_idx in _cycle_order(seed, cycle):
+            yield src_idx, next(packers[src_idx])
+        cycle += 1
+
+
+def _read_resume_state(out_dir: Path) -> tuple[list[int], int]:
+    """Read (per-source docs_consumed, next cycle_idx) from last shard's metadata.
+
+    Requires the cadence-60 metadata keys; old shards (from the pre-stratified
+    cache_teacher.py) are not supported — regenerate the cache.
     """
     from safetensors import safe_open
     shards = sorted(out_dir.glob("shard_?????.safetensors"))
-
     with safe_open(str(shards[-1]), framework="pt") as f:
         meta = f.metadata() or {}
-    if "docs_consumed" in meta:
-        n = int(meta["docs_consumed"])
-        print(f"[append] resuming from docs_consumed={n:,} (from shard metadata)")
-        return n
-
-    # Estimate: total_tokens_cached / avg_doc_len
-    with safe_open(str(shards[0]), framework="pt") as f:
-        seqs_per_shard = f.get_slice("tokens").get_shape()[0]
-    total_tokens = start_shard * seqs_per_shard * seq_len
-    estimated = total_tokens // _AVG_DOC_TOKENS
-    print(f"[append] no docs_consumed metadata; estimating {estimated:,} docs to skip "
-          f"({total_tokens:,} tokens ÷ {_AVG_DOC_TOKENS} avg tokens/doc)")
-    return estimated
+    required = ("docs_consumed_per_source", "next_cycle_idx", "cadence")
+    if not all(k in meta for k in required):
+        raise SystemExit(
+            f"[append] existing shards in {out_dir} predate the cadence-60 "
+            f"layout (missing keys: {[k for k in required if k not in meta]}). "
+            "Delete the directory and re-run, or point --out to a fresh path.")
+    per_src = [int(x) for x in meta["docs_consumed_per_source"].split(",")]
+    if len(per_src) != _N_SOURCES:
+        raise SystemExit(
+            f"[append] docs_consumed_per_source has {len(per_src)} entries, "
+            f"expected {_N_SOURCES}")
+    cycle_idx = int(meta["next_cycle_idx"])
+    print(f"[append] resuming: docs_consumed={per_src}  next_cycle={cycle_idx:,}")
+    return per_src, cycle_idx
 
 
 @torch.no_grad()
@@ -297,82 +329,183 @@ def run_corpus(model, tok, args, start_shard: int) -> None:
         raise SystemExit(
             f"--shard-seqs ({args.shard_seqs}) must be divisible by "
             f"--batch-size ({args.batch_size})")
-    batches_per_shard = args.shard_seqs // args.batch_size
+    if args.shard_seqs % _CADENCE != 0:
+        raise SystemExit(
+            f"--shard-seqs ({args.shard_seqs}) must be divisible by the "
+            f"interleave cadence ({_CADENCE}) so shards align to whole 45/9/6 "
+            f"cycles. Try {(args.shard_seqs // _CADENCE) * _CADENCE} or "
+            f"{(args.shard_seqs // _CADENCE + 1) * _CADENCE}.")
+    cycles_per_shard = args.shard_seqs // _CADENCE
+    per_src_per_shard = [cycles_per_shard * n for _, n in _SOURCES]
+    threshold = args.max_mean_teacher_ce  # None = no filtering
+    filtering = threshold is not None
 
-    corpus = _make_corpus(seed=args.seed)
-    docs_counter = [0]
+    streams = _make_streams(seed=args.seed)
+    docs_counters = [[0] for _ in range(_N_SOURCES)]
+    cycle_idx = 0
 
     if start_shard > 0:
-        n_skip = _docs_to_skip(args.out, start_shard, args.seq_len)
-        print(f"[append] calling corpus.skip({n_skip:,}) …", flush=True)
-        corpus = corpus.skip(n_skip)
-        docs_counter[0] = n_skip
+        per_src, cycle_idx = _read_resume_state(args.out)
+        for i, n in enumerate(per_src):
+            print(f"[append] stream {i} ({_SOURCES[i][0]}): skip({n:,})",
+                  flush=True)
+            streams[i] = streams[i].skip(n)
+            docs_counters[i][0] = n
 
-    seq_iter = _pack_iter(corpus, tok, args.seq_len, docs_counter)
+    packers = [
+        _pack_one_source(streams[i], tok, args.seq_len, docs_counters[i])
+        for i in range(_N_SOURCES)
+    ]
+    seq_iter = _stratified_seq_iter(packers, seed=args.seed,
+                                    start_cycle=cycle_idx)
 
-    batch_buf: list[list[int]] = []
-    shard_tokens, shard_kidx, shard_kprob, shard_rest = [], [], [], []
+    # Per-source FIFO pools of accepted sequences (cpu tensors).
+    # Each entry: (tokens [T], topk_idx [T,K], topk_prob [T,K], rest [T]).
+    pool: list[list[tuple] ] = [[] for _ in range(_N_SOURCES)]
+    pulled = [0] * _N_SOURCES   # total drawn from each source's packer
+    rejected = [0] * _N_SOURCES  # total dropped by the CE filter
+
     shard_idx = start_shard
-    tokens_cached = 0
+    tokens_per_shard = args.shard_seqs * args.seq_len
+    n_shards_target = math.ceil(args.tokens / tokens_per_shard)
+    print(f"[corpus] {n_shards_target} shards × {tokens_per_shard:,} tok "
+          f"= {n_shards_target * tokens_per_shard:,} tok target "
+          f"(cadence={_CADENCE}, {cycles_per_shard} cycles/shard, "
+          f"per-shard targets {per_src_per_shard}, "
+          f"starting at shard {start_shard:05d}, cycle {cycle_idx:,})")
+    if filtering:
+        print(f"[corpus] filter: drop sequences with mean teacher CE > "
+              f"{threshold:.3f}")
+    pbar = tqdm(total=n_shards_target * tokens_per_shard, unit="tok",
+                desc="cache", unit_scale=True)
 
-    n_shards_est = math.ceil(args.tokens / (args.shard_seqs * args.seq_len))
-    print(f"[corpus] ~{args.tokens:,} tokens → ~{n_shards_est} shards "
-          f"(starting at shard {start_shard:05d})")
-    pbar = tqdm(total=args.tokens, unit="tok", desc="cache", unit_scale=True)
+    pending_src: list[int] = []
+    pending_chunks: list[list[int]] = []
 
-    def write_shard():
-        nonlocal shard_idx, shard_tokens, shard_kidx, shard_kprob, shard_rest
-        if not shard_tokens:
+    def have_full_shard() -> bool:
+        return all(len(pool[i]) >= per_src_per_shard[i]
+                   for i in range(_N_SOURCES))
+
+    def need_more() -> bool:
+        # Pull more if any source's pool is still below its per-shard quota
+        # (we may overshoot one source while another lags; that's fine,
+        # the surplus carries over to the next shard).
+        return any(len(pool[i]) < per_src_per_shard[i]
+                   for i in range(_N_SOURCES))
+
+    def flush_batch() -> None:
+        """Forward-pass the current pending batch, score, and push accepted
+        sequences into their source pools."""
+        if not pending_chunks:
             return
+        ids = torch.tensor(pending_chunks, dtype=torch.long,
+                           device=args.device)
+        logits = model(ids).logits.float()
+        probs = torch.softmax(logits, dim=-1)
+        topk_p, topk_i = probs.topk(args.top_k, dim=-1)
+        rest = (1.0 - topk_p.sum(dim=-1)).clamp_min(0.0)
+        topk_p[:, -1, :] = 0.0
+        rest[:, -1] = 0.0
+
+        if filtering:
+            # Teacher CE on the actual next token. At position t the teacher
+            # predicts ids[:, t+1]; the final position has no target. Average
+            # over the valid positions only.
+            log_probs = torch.log_softmax(logits, dim=-1)
+            target = ids[:, 1:].unsqueeze(-1)                          # [B,T-1,1]
+            nll = -log_probs[:, :-1, :].gather(-1, target).squeeze(-1)  # [B,T-1]
+            mean_ce = nll.mean(dim=-1).cpu()                            # [B]
+        else:
+            mean_ce = None
+
+        ids_cpu = ids.cpu()
+        topk_i_cpu = topk_i.cpu()
+        topk_p_cpu = topk_p.cpu()
+        rest_cpu = rest.cpu()
+
+        for j, src in enumerate(pending_src):
+            if mean_ce is not None and mean_ce[j].item() > threshold:
+                rejected[src] += 1
+                continue
+            pool[src].append((
+                ids_cpu[j], topk_i_cpu[j], topk_p_cpu[j], rest_cpu[j],
+            ))
+        pending_src.clear()
+        pending_chunks.clear()
+
+    def assemble_and_write_shard() -> None:
+        nonlocal shard_idx
+        # Pop seqs from per-source pools in cycle order for this shard's
+        # cycles_per_shard cycles, starting from cycle_idx + (shard_idx-start)*cps.
+        first_cycle = cycle_idx + cycles_per_shard * (shard_idx - start_shard)
+        cursors = [0, 0, 0]
+        out_tokens, out_kidx, out_kprob, out_rest = [], [], [], []
+        for c in range(cycles_per_shard):
+            for src in _cycle_order(args.seed, first_cycle + c):
+                t, ki, kp, rm = pool[src][cursors[src]]
+                cursors[src] += 1
+                out_tokens.append(t)
+                out_kidx.append(ki)
+                out_kprob.append(kp)
+                out_rest.append(rm)
+        # Drop consumed entries from each pool (keep tail = surplus).
+        for i in range(_N_SOURCES):
+            del pool[i][:cursors[i]]
+
+        next_cycle = first_cycle + cycles_per_shard
+        meta = {
+            "top_k": str(args.top_k), "seed_len": "0",
+            "source": "smollm-corpus stratified 75/15/10 (cadence 60)",
+            "cadence": str(_CADENCE),
+            "per_cycle": ",".join(str(n) for _, n in _SOURCES),
+            "sources": ",".join(name for name, _ in _SOURCES),
+            "docs_consumed_per_source": ",".join(
+                str(c[0]) for c in docs_counters),
+            "next_cycle_idx": str(next_cycle),
+            "pulled_per_source": ",".join(str(x) for x in pulled),
+            "rejected_per_source": ",".join(str(x) for x in rejected),
+        }
+        if filtering:
+            meta["max_mean_teacher_ce"] = f"{threshold:.6f}"
         _save_shard(
             args.out, shard_idx,
-            torch.cat(shard_tokens, dim=0),
-            torch.cat(shard_kidx, dim=0),
-            torch.cat(shard_kprob, dim=0),
-            torch.cat(shard_rest, dim=0),
-            metadata={"top_k": str(args.top_k), "seed_len": "0",
-                      "source": "smollm-corpus interleaved 75/15/10",
-                      "docs_consumed": str(docs_counter[0])},
+            torch.stack(out_tokens, dim=0),
+            torch.stack(out_kidx, dim=0),
+            torch.stack(out_kprob, dim=0),
+            torch.stack(out_rest, dim=0),
+            metadata=meta,
         )
         shard_idx += 1
-        shard_tokens.clear()
-        shard_kidx.clear()
-        shard_kprob.clear()
-        shard_rest.clear()
 
-    try:
-        while tokens_cached < args.tokens:
-            try:
-                batch_buf.append(next(seq_iter))
-            except StopIteration:
-                break
-            if len(batch_buf) < args.batch_size:
-                continue
+    while (shard_idx - start_shard) < n_shards_target:
+        while need_more():
+            src, chunk = next(seq_iter)
+            pending_src.append(src)
+            pending_chunks.append(chunk)
+            pulled[src] += 1
+            if len(pending_chunks) == args.batch_size:
+                flush_batch()
+                pbar.update(args.batch_size * args.seq_len)
+        # Out of pending pulls. If batch_buf still partial (impossible here
+        # since need_more() controls), flush. Then assemble shard.
+        if pending_chunks:
+            flush_batch()
+        assemble_and_write_shard()
 
-            ids = torch.tensor(batch_buf, dtype=torch.long, device=args.device)
-            batch_buf = []
-
-            probs = torch.softmax(model(ids).logits.float(), dim=-1)
-            topk_p, topk_i = probs.topk(args.top_k, dim=-1)
-            rest = (1.0 - topk_p.sum(dim=-1)).clamp_min(0.0)
-            topk_p[:, -1, :] = 0.0
-            rest[:, -1] = 0.0
-
-            shard_tokens.append(ids.cpu())
-            shard_kidx.append(topk_i.cpu())
-            shard_kprob.append(topk_p.cpu())
-            shard_rest.append(rest.cpu())
-            tokens_cached += ids.numel()
-            pbar.update(ids.numel())
-
-            if len(shard_tokens) == batches_per_shard:
-                write_shard()
-    finally:
-        write_shard()
-        pbar.close()
-
-    print(f"[done] wrote shards {start_shard:05d}–{shard_idx - 1:05d}, "
-          f"{tokens_cached:,} tokens to {args.out}")
+    pbar.close()
+    if filtering:
+        tot_pulled = sum(pulled)
+        tot_rej = sum(rejected)
+        rej_pct = 100.0 * tot_rej / max(1, tot_pulled)
+        per_src_pct = [
+            100.0 * rejected[i] / max(1, pulled[i]) for i in range(_N_SOURCES)
+        ]
+        print(f"[filter] rejected {tot_rej:,}/{tot_pulled:,} = {rej_pct:.2f}% "
+              f"(per source: " + ", ".join(
+                  f"{_SOURCES[i][0]}={per_src_pct[i]:.2f}%"
+                  for i in range(_N_SOURCES)) + ")")
+    print(f"[done] wrote shards {start_shard:05d}–{shard_idx - 1:05d} "
+          f"({n_shards_target * tokens_per_shard:,} tokens) to {args.out}")
 
 
 # ---------------------------------------------------------------------------
@@ -406,6 +539,14 @@ def main() -> None:
                     help="[rollout] Sampling temperature.")
     ap.add_argument("--min-p", type=float, default=0.05,
                     help="[rollout] min-P sampling threshold.")
+    # corpus-only filtering
+    ap.add_argument("--max-mean-teacher-ce", type=float, default=None,
+                    help="[corpus] Drop any sequence whose mean teacher CE "
+                         "on the actual next token exceeds this threshold "
+                         "(nats). Cheap noise filter for garbled / OCR-broken "
+                         "docs. Pick the threshold by running once unfiltered "
+                         "and inspecting the per-seq CE distribution (e.g. "
+                         "95th percentile). Off by default.")
     # shared
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--dtype", default="bfloat16",
@@ -422,7 +563,8 @@ def main() -> None:
     if args.top_k is None:
         args.top_k = 64 if is_rollout else 32
     if args.shard_seqs is None:
-        args.shard_seqs = 128 if is_rollout else 256
+        # corpus default = 240 = 4 × cadence(60), also divisible by batch_size 8
+        args.shard_seqs = 128 if is_rollout else 240
     if args.batch_size is None:
         args.batch_size = 16 if is_rollout else 8
 

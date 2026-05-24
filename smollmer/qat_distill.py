@@ -33,11 +33,11 @@ from tqdm import tqdm
 
 from .build_student import load_student
 from .distill import (
-    AdamW32, BestEmaTracker, CautiousAdamW, Lion32,
+    AdamW32, BestEmaTracker, CautiousAdamW, Lion32, PRM32,
     ShardedDataset, _INTERRUPT, _install_sigint_handler,
     kl_with_rest, lr_at, save_checkpoint, save_resume, snapshot_to_cpu,
 )
-from .qlinear import QLinear, clamp_qlinear_weights, set_soft_mode
+from .qlinear import QLinear, clamp_qlinear_weights, set_c_noise, set_soft_mode
 from .teacher_floor import load_or_compute as load_teacher_floor
 
 
@@ -200,7 +200,11 @@ def main() -> None:
     ap.add_argument("--wd", type=float, default=0.001)
     ap.add_argument("--max-grad-norm", type=float, default=1.0)
     ap.add_argument("--optimizer", default="cautious-adamw",
-                    choices=["lion", "adamw", "cautious-adamw"])
+                    choices=["lion", "adamw", "cautious-adamw", "prm"])
+    ap.add_argument("--prm-softness", type=float, default=1.0,
+                    help="PRM lam_pop. q=1/2 on the LOO boundary when "
+                         "softness=1; larger → more conservative. "
+                         "Practical range [0.3, 3]. Ignored for non-PRM opts.")
     ap.add_argument("--scale-group-size", type=int, default=64)
     ap.add_argument("--scale-lr-mult", type=float, default=None)
     ap.add_argument("--c-lr-mult", type=float, default=0.1,
@@ -213,6 +217,22 @@ def main() -> None:
     ap.add_argument("--target-zero-frac-init", type=float, default=0.25,
                     help="Used only to seed codepoint_c at init from the "
                          "|w| band mean. Learned c is free to drift after.")
+    ap.add_argument("--c-noise-sigma", type=float, default=0.0,
+                    help="Std of per-group Gaussian noise added to the "
+                         "ternary threshold (c/2) during training. Noised "
+                         "threshold only — output magnitude uses clean c, "
+                         "so c's gradient stays unperturbed. Encourages "
+                         "boundary weights to commit to one side. "
+                         "Good starting point: ~0.02 (~5%% of typical c=0.38). "
+                         "0 = disabled (default).")
+    ap.add_argument("--cs-alt-period", type=int, default=0,
+                    help="If >0, alternate between updating only codepoint_c "
+                         "and only scales every N steps (latents always "
+                         "update). Breaks the c*s magnitude degeneracy via "
+                         "coordinate descent: c settles for N steps, then s "
+                         "adapts for N steps, etc. Gradient zeroing used so "
+                         "optimizer momentum accumulates continuously. "
+                         "0 = disabled (default). Good starting point: 20.")
     ap.add_argument("--permute", action=argparse.BooleanOptionalAction,
                     default=True)
     ap.add_argument("--log-every", type=int, default=10)
@@ -281,12 +301,27 @@ def main() -> None:
         print(f"[qat] codepoint_c init: mean={cstats['mean']:.4f} "
               f"min={cstats['min']:.4f} max={cstats['max']:.4f} "
               f"p50={cstats['p50']:.4f}")
+    if args.c_noise_sigma > 0.0:
+        set_c_noise(model, args.c_noise_sigma)
+        print(f"[qat] c_noise_sigma={args.c_noise_sigma} applied to "
+              f"{n_qat} QLinears")
     print(f"[qat] {n_qat} QLinears with learnable codepoint_c; "
           f"fresh_start={fresh_start}")
 
     # ---- Optimizer: three param groups (latents, scales, codepoint_c) ----
     scale_lr_mult = (args.scale_lr_mult if args.scale_lr_mult is not None
                      else 1.0 / float(args.scale_group_size))
+    # lr_mult=0 → freeze entirely: no grad, no optimizer state, no backward cost.
+    if args.c_lr_mult == 0.0:
+        for m in model.modules():
+            if isinstance(m, QLinear):
+                m.codepoint_c.requires_grad_(False)
+        print("[qat] codepoint_c frozen (c_lr_mult=0)")
+    if scale_lr_mult == 0.0:
+        for m in model.modules():
+            if isinstance(m, QLinear):
+                m.scales.requires_grad_(False)
+        print("[qat] scales frozen (scale_lr_mult=0)")
     scale_param_ids = {id(m.scales) for m in model.modules()
                        if isinstance(m, QLinear)}
     c_param_ids = {id(m.codepoint_c) for m in model.modules()
@@ -311,8 +346,11 @@ def main() -> None:
          "name": "codepoint_c"},
     ]
     OptCls = {"lion": Lion32, "adamw": AdamW32,
-              "cautious-adamw": CautiousAdamW}[args.optimizer]
-    opt = OptCls(param_groups, lr=args.lr, weight_decay=args.wd)
+              "cautious-adamw": CautiousAdamW, "prm": PRM32}[args.optimizer]
+    opt_kwargs = dict(lr=args.lr, weight_decay=args.wd)
+    if args.optimizer == "prm":
+        opt_kwargs["softness"] = args.prm_softness
+    opt = OptCls(param_groups, **opt_kwargs)
     print(f"[opt] {args.optimizer} lr={args.lr} wd={args.wd} "
           f"scale_lr_mult={scale_lr_mult:g} c_lr_mult={args.c_lr_mult:g}")
 
@@ -391,7 +429,10 @@ def main() -> None:
         "**qat_distill** (single-stage, learnable c)",
         f"- c init from band mean (target_zero_frac_init={args.target_zero_frac_init})",
         f"- c_lr_mult = {args.c_lr_mult}",
+        f"- scale_lr_mult = {scale_lr_mult:g}",
+        f"- cs_alt_period = {args.cs_alt_period}",
         f"- c clamp = [{args.c_clamp_min}, {args.c_clamp_max}]",
+        f"- c_noise_sigma = {args.c_noise_sigma}",
         f"- group_size = {args.scale_group_size}",
         f"- optimizer = {args.optimizer}, lr = {args.lr}, wd = {args.wd}",
         f"- L_T = {L_T:.4f}",
@@ -455,6 +496,17 @@ def main() -> None:
             if args.max_grad_norm:
                 grad_norm = float(torch.nn.utils.clip_grad_norm_(
                     model.parameters(), args.max_grad_norm))
+            if args.cs_alt_period > 0:
+                # Coordinate descent on c vs s: zero the frozen group's
+                # gradient each step. Even steps → c updates, s frozen;
+                # odd steps → s updates, c frozen. Latents always update.
+                cs_phase = (global_step // args.cs_alt_period) % 2
+                freeze_name = "scales" if cs_phase == 0 else "codepoint_c"
+                for pg in opt.param_groups:
+                    if pg.get("name") == freeze_name:
+                        for p in pg["params"]:
+                            if p.grad is not None:
+                                p.grad.zero_()
             opt.step()
             clamp_qlinear_weights(model)  # keep latents in [-1, 1]
             with torch.no_grad():
@@ -484,6 +536,11 @@ def main() -> None:
                     writer.add_scalar("loss/ema", ctrl.ema, global_step)
                     writer.add_scalar("loss/gap", ctrl.ema - L_T, global_step)
                 writer.add_scalar("lr", cur_lr, global_step)
+                if args.cs_alt_period > 0:
+                    writer.add_scalar(
+                        "cs_phase",
+                        (global_step // args.cs_alt_period) % 2,
+                        global_step)
                 if grad_norm is not None:
                     writer.add_scalar("grad_norm", grad_norm, global_step)
                 # codepoint_c stats — watch the learned c drift

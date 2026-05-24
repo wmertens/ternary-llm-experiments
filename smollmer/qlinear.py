@@ -135,6 +135,27 @@ def module_ternary_fixed(m: "QLinear") -> torch.Tensor:
         return c.view(out_f, -1).to(m.weight.dtype)
 
 
+def gumbel_softmax_binary(logit: torch.Tensor, tau: float,
+                          kappa: float) -> torch.Tensor:
+    """Binary Gumbel-Softmax relaxation with a single logit.
+
+    Returns soft p(positive outcome) in (0, 1):
+        p = σ((2κ·logit + g₁ − g₂) / τ)    g₁, g₂ ~ Gumbel(0,1)
+
+    As τ→0: converges to 1{logit ≥ 0} (hard assignment).
+    Gradient flows through σ w.r.t. logit; Gumbel noise is treated
+    as a constant (no gradient through the sampling).
+
+    Lion optimizer handles the vanishing gradient magnitude at low τ
+    (near-saturated σ) because it uses the sign of the gradient.
+    """
+    g1 = -torch.log(-torch.log(
+        torch.rand_like(logit).clamp_(1e-10, 1.0 - 1e-10)))
+    g2 = -torch.log(-torch.log(
+        torch.rand_like(logit).clamp_(1e-10, 1.0 - 1e-10)))
+    return torch.sigmoid((2.0 * kappa * logit + g1 - g2) / tau)
+
+
 def soft_ternary(w: torch.Tensor, alpha: float,
                  c: torch.Tensor | None = None) -> torch.Tensor:
     """Residual contraction reparameterization toward {-1, 0, +1}.
@@ -153,6 +174,64 @@ def soft_ternary(w: torch.Tensor, alpha: float,
     if c is None:
         c = nearest_ternary(w)
     return c + (1.0 - alpha) * (w - c)
+
+
+class _HardTernaryWithSmoothGrad(torch.autograd.Function):
+    """Hard ternary forward, smooth gradient backward.
+
+    Used when T is at the floor (post-anneal): the loss sees the actual
+    deployed {-1,0,+1} weights, but the backward uses the smooth gradient
+    at T_floor instead of the dead-zone STE.
+
+    Forward:  sign(w_norm) if |w_norm| > 0.5 else 0  →  exactly {-1, 0, +1}
+    Backward: same analytical gradient as _SmoothTernary at temperature T:
+              d(w_q)/d(w_norm) = (2/T) * ((1 - p_zero) - w_q_soft²)
+    """
+
+    @staticmethod
+    def forward(ctx, w_norm: torch.Tensor, temp: float) -> torch.Tensor:
+        w_q = torch.where(w_norm.abs() > 0.5,
+                          torch.sign(w_norm),
+                          torch.zeros_like(w_norm))
+        codebook = w_norm.new_tensor([-1.0, 0.0, 1.0])
+        probs = torch.softmax(
+            -(w_norm.unsqueeze(-1) - codebook).pow(2) / temp, dim=-1)
+        w_q_soft = (probs * codebook).sum(-1)
+        ctx.save_for_backward(w_q_soft, probs[..., 1].clone())
+        ctx.temp = temp
+        return w_q
+
+    @staticmethod
+    def backward(ctx, grad_w_q: torch.Tensor):
+        w_q_soft, p_zero = ctx.saved_tensors
+        var_p = (1.0 - p_zero) - w_q_soft.pow(2)
+        return grad_w_q * (2.0 / ctx.temp) * var_p, None
+
+
+class _SmoothTernary(torch.autograd.Function):
+    """Smooth ternary expectation with memory-efficient backward.
+
+    Saves w_q and p_zero (2× weight size) instead of the full [O,G,gs,3]
+    probs tensor, using the analytical gradient:
+        d(w_q)/d(w_norm) = (2/T) * ((1 - p_zero) - w_q²)
+    where p_zero = P(k=0) and (1-p_zero) = E[k²].
+    """
+
+    @staticmethod
+    def forward(ctx, w_norm: torch.Tensor, temp: float) -> torch.Tensor:
+        codebook = w_norm.new_tensor([-1.0, 0.0, 1.0])
+        dists_sq = (w_norm.unsqueeze(-1) - codebook).pow(2)
+        probs = torch.softmax(-dists_sq / temp, dim=-1)
+        w_q = (probs * codebook).sum(-1)
+        ctx.save_for_backward(w_q, probs[..., 1].clone())
+        ctx.temp = temp
+        return w_q
+
+    @staticmethod
+    def backward(ctx, grad_w_q: torch.Tensor):
+        w_q, p_zero = ctx.saved_tensors
+        var_p = (1.0 - p_zero) - w_q.pow(2)
+        return grad_w_q * (2.0 / ctx.temp) * var_p, None
 
 
 class QLinear(nn.Linear):
@@ -225,6 +304,43 @@ class QLinear(nn.Linear):
             self._q_cache = q
         return self.weight + (self._q_cache - self.weight).detach()
 
+    def _smooth_qat_effective_weight(self) -> torch.Tensor:
+        """Smooth ternary QAT via temperature-scaled softmax over {-1, 0, +1}.
+
+        w_norm  = latent / c
+        w_quant = E_{probs}[k]  where probs_k ∝ exp(-‖w_norm-k‖²/T)
+        eff     = w_quant · c   (scales applied by forward())
+
+        When smooth_alpha > 0, blends with the FP32 latent to suppress the
+        initial quantization shock:
+            eff = α·w + (1-α)·(w_quant·c)
+        α=1 → FP32-equivalent forward (teacher loss at step 0); α=0 → pure
+        smooth ternary. Anneal α→0 over --blend-steps training steps.
+
+        Backward via _SmoothTernary: saves w_q and p_zero (2× weight size)
+        instead of the full [O,G,gs,3] probs tensor. Falls through to STE
+        when smooth_temp ≤ 1e-4.
+        """
+        temp = float(getattr(self, "smooth_temp", 0.0))
+        if temp <= 1e-4:
+            return self._full_qat_effective_weight()
+
+        w = self.weight
+        out_f, in_f = w.shape
+        wb = w.view(out_f, self.n_groups, self.group_size)
+        c_b = self.codepoint_c.unsqueeze(-1).to(wb.dtype).clamp_min(1e-8)
+
+        if getattr(self, "smooth_at_floor", False):
+            w_q = _HardTernaryWithSmoothGrad.apply(wb / c_b, temp)
+        else:
+            w_q = _SmoothTernary.apply(wb / c_b, temp)
+        eff = (w_q * c_b).view(out_f, in_f)
+
+        smooth_alpha = float(getattr(self, "smooth_alpha", 0.0))
+        if smooth_alpha > 0.0:
+            eff = smooth_alpha * w + (1.0 - smooth_alpha) * eff
+        return eff
+
     def _full_qat_effective_weight(self) -> torch.Tensor:
         """Single-stage QAT (qat_distill mode): every slot is ternarized.
         codepoint_c is a learnable nn.Parameter (one per row, per group).
@@ -243,6 +359,14 @@ class QLinear(nn.Linear):
                 slot contributes +1 to c's gradient, summing to the
                 count-of-non-zero-slots × upstream gradient. c can
                 actually learn now.
+
+        c-noise (set via c_noise_sigma attribute): during training, add
+        independent per-group Gaussian noise to the threshold only (not
+        the output magnitude). Weights at |w| ≈ c/2 stochastically flip
+        between zero and nonzero across steps → gradient pushes them
+        decisively away from the boundary. c's gradient remains clean
+        (uses the unnoised c_b for output), so c still gets a clear
+        magnitude signal.
         """
         w = self.weight
         out_f, in_f = w.shape
@@ -250,7 +374,14 @@ class QLinear(nn.Linear):
         c_b = self.codepoint_c.unsqueeze(-1).to(w.dtype)  # [out, ng, 1]
         with torch.no_grad():
             sign_wb = torch.sign(wb)
-            is_nonzero = wb.abs() > c_b * 0.5
+            c_noise_sigma = getattr(self, "c_noise_sigma", 0.0)
+            if self.training and c_noise_sigma > 0.0:
+                noise = torch.randn(out_f, self.n_groups, 1,
+                                    dtype=c_b.dtype, device=c_b.device)
+                c_b_thresh = (c_b + c_noise_sigma * noise).clamp_min(1e-8)
+                is_nonzero = wb.abs() > c_b_thresh * 0.5
+            else:
+                is_nonzero = wb.abs() > c_b * 0.5
         # Forward = sign(w)·c (carried by the detached product).
         # (c_b - c_b.detach()) is 0 in forward, but back-prop sees identity
         # on c_b — and because c_b broadcasts across the gs dim, each
@@ -295,19 +426,52 @@ class QLinear(nn.Linear):
         w_ste = w + (target - w).detach()
         return torch.where(self.qat_mask, w_ste, w)
 
+    def _gsq_effective_weight(self) -> torch.Tensor:
+        """GSQ ternary forward: c · GS_mask · GS_sign.
+
+        mask_logits ≥ 0 → nonzero;  sign_logits ≥ 0 → +1, else −1.
+        At tau≤1e-4 or eval: hard assignment (no Gumbel noise).
+        Gradient flows via the sigmoid in gumbel_softmax_binary.
+        """
+        tau = float(getattr(self, "gsq_tau", 1.0))
+        kappa = float(getattr(self, "gsq_kappa", 1.0))
+        out_f, in_f = self.weight.shape
+        mask_l = self.mask_logits   # [out, n_groups, group_size]
+        sign_l = self.sign_logits
+        c_b = self.codepoint_c.unsqueeze(-1).to(mask_l.dtype).clamp_min(1e-8)
+
+        if tau <= 1e-4 or not self.training:
+            mask = (mask_l >= 0).to(c_b.dtype)
+            sign = torch.where(sign_l >= 0,
+                               torch.ones_like(mask_l),
+                               -torch.ones_like(mask_l))
+        else:
+            mask = gumbel_softmax_binary(mask_l, tau, kappa)
+            sign = 2.0 * gumbel_softmax_binary(sign_l, tau, kappa) - 1.0
+
+        return (c_b * mask * sign).view(out_f, in_f)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Three paths, picked by what's attached:
-        #   codepoint_c is a Parameter, no qat_mask → full-QAT (qat_distill)
+        # Five paths, picked by what's attached:
+        #   mask_logits Parameter present               → GSQ PTQ
+        #   codepoint_c is a Parameter + smooth_temp > 1e-4 → smooth QAT
+        #   codepoint_c is a Parameter, no qat_mask → full-QAT / STE
         #   codepoint_c + qat_mask buffer (any True) → progressive QAT
         #   otherwise → standard soft/levels (original Bonsai flow)
-        c = getattr(self, "codepoint_c", None)
-        if c is not None and isinstance(c, nn.Parameter):
-            q_ste = self._full_qat_effective_weight()
-        elif (c is not None and hasattr(self, "qat_mask")
-                and self.qat_mask.any()):
-            q_ste = self._qat_effective_weight()
+        if getattr(self, "mask_logits", None) is not None:
+            q_ste = self._gsq_effective_weight()
         else:
-            q_ste = self.quantized_weight()  # [out, in], in [-1, 1]
+            c = getattr(self, "codepoint_c", None)
+            if (c is not None and isinstance(c, nn.Parameter)
+                    and getattr(self, "smooth_temp", 0.0) > 1e-4):
+                q_ste = self._smooth_qat_effective_weight()
+            elif c is not None and isinstance(c, nn.Parameter):
+                q_ste = self._full_qat_effective_weight()
+            elif (c is not None and hasattr(self, "qat_mask")
+                    and self.qat_mask.any()):
+                q_ste = self._qat_effective_weight()
+            else:
+                q_ste = self.quantized_weight()  # [out, in], in [-1, 1]
         # Apply per-(row, group) scales: expand scales [out, n_groups] to
         # [out, in] by broadcasting along the group's columns.
         q_blocks = q_ste.view(self.out_features, self.n_groups, self.group_size)
@@ -358,6 +522,17 @@ def set_soft_mode(model: nn.Module, alpha: float = 0.0,
             m.target_zero_frac = (float(target_zero_frac)
                                   if target_zero_frac is not None else None)
             m.invalidate_q_cache()
+            n += 1
+    return n
+
+
+def set_c_noise(model: nn.Module, sigma: float) -> int:
+    """Set c_noise_sigma on every QLinear (training-only threshold noise).
+    sigma=0 disables it. Returns count updated."""
+    n = 0
+    for m in model.modules():
+        if isinstance(m, QLinear):
+            m.c_noise_sigma = float(sigma)
             n += 1
     return n
 
@@ -539,6 +714,156 @@ def clamp_qlinear_weights(model: nn.Module, lo: float = -1.0, hi: float = 1.0) -
             m.invalidate_q_cache()
             n += 1
     return n
+
+
+def set_smooth_temp(model: nn.Module, T_global: float,
+                    temp_scales: dict[str, float] | None = None,
+                    at_floor: bool = False) -> None:
+    """Set smooth_temp on every QLinear to T_global × per-layer scale.
+
+    temp_scales maps module names (as in model.named_modules()) to
+    per-layer multipliers from Hessian calibration. Missing names get 1.0.
+    Call once per optimizer step before the forward pass.
+
+    at_floor=True switches to _HardTernaryWithSmoothGrad: forward is exactly
+    {-1,0,+1} (the deployed model), backward is still the smooth gradient at
+    T_global (avoids dead zones). Use once the cosine anneal has completed.
+    """
+    for name, m in model.named_modules():
+        if isinstance(m, QLinear):
+            scale = (temp_scales.get(name, 1.0)
+                     if temp_scales is not None else 1.0)
+            m.smooth_temp = T_global * scale
+            m.smooth_at_floor = at_floor
+
+
+def set_smooth_alpha(model: nn.Module, alpha: float) -> None:
+    """Set smooth_alpha on every QLinear.
+
+    alpha=1 → FP32-equivalent forward (zero quantization shock at init).
+    alpha=0 → pure smooth ternary (normal training).
+    Intermediate values blend: α·w + (1-α)·c·E_T[k].
+
+    Anneal from 1→0 over --blend-steps optimizer steps at the start of
+    training to avoid the ~500-step quantization shock.
+    """
+    for m in model.modules():
+        if isinstance(m, QLinear):
+            m.smooth_alpha = float(alpha)
+
+
+def init_gsq_logits(model: nn.Module, alpha: float = 3.0,
+                    std: float = 0.01) -> int:
+    """Attach mask_logits and sign_logits Parameters to every QLinear.
+
+    Warm-starts from the nearest-ternary of the current weights
+    (following GSQ paper Eq. 3–4, α=3 for ternary):
+
+        signal_mask = +1 if t≠0, −1 if t=0
+        signal_sign = +1 if t>0, −1 if t<0, 0 if t=0
+        logit = std × (ε + α × signal)
+
+    codepoint_c must already be attached (call attach_learnable_c first).
+    Returns the number of QLinear modules updated.
+    """
+    n = 0
+    for m in model.modules():
+        if not (isinstance(m, QLinear) and hasattr(m, "codepoint_c")):
+            continue
+        out_f, in_f = m.weight.shape
+        w = m.weight.detach().float()
+        c_b = (m.codepoint_c.detach().float()
+               .unsqueeze(-1)
+               .expand(out_f, m.n_groups, m.group_size)
+               .reshape(out_f, in_f))
+        is_nonzero = w.abs() > c_b * 0.5
+
+        mask_sig = torch.where(is_nonzero,
+                               torch.ones_like(w), -torch.ones_like(w))
+        sign_sig = torch.where(is_nonzero & (w > 0),
+                               torch.ones_like(w),
+                               torch.where(is_nonzero & (w < 0),
+                                           -torch.ones_like(w),
+                                           torch.zeros_like(w)))
+
+        mask_l = std * (torch.randn_like(w) + alpha * mask_sig)
+        sign_l = std * (torch.randn_like(w) + alpha * sign_sig)
+
+        m.mask_logits = nn.Parameter(
+            mask_l.view(out_f, m.n_groups, m.group_size).to(m.weight.dtype))
+        m.sign_logits = nn.Parameter(
+            sign_l.view(out_f, m.n_groups, m.group_size).to(m.weight.dtype))
+        n += 1
+    return n
+
+
+def set_gsq_temp(model: nn.Module, tau: float, kappa: float) -> None:
+    """Set gsq_tau and gsq_kappa on every QLinear with GSQ logits."""
+    for m in model.modules():
+        if isinstance(m, QLinear) and getattr(m, "mask_logits", None) is not None:
+            m.gsq_tau = float(tau)
+            m.gsq_kappa = float(kappa)
+
+
+def snap_gsq_to_weight(model: nn.Module) -> int:
+    """Hard-snap GSQ logits to {-1, 0, +1} and store in self.weight.
+
+    After this call, mask_logits and sign_logits are removed. The model
+    is back to the standard QLinear representation with ternary weight
+    ∈ {-1, 0, +1} and calibrated codepoint_c. Run _deploy_fold (from
+    finalize_smooth.py) to absorb codepoint_c into scales.
+    Returns count snapped.
+    """
+    n = 0
+    for m in model.modules():
+        if not (isinstance(m, QLinear)
+                and getattr(m, "mask_logits", None) is not None):
+            continue
+        out_f, in_f = m.weight.shape
+        with torch.no_grad():
+            mask = (m.mask_logits.detach() >= 0).float()
+            sign = torch.where(m.sign_logits.detach() >= 0,
+                               torch.ones_like(mask),
+                               -torch.ones_like(mask))
+            t = (mask * sign).view(out_f, in_f)
+            m.weight.data.copy_(t.to(m.weight.dtype))
+        del m.mask_logits
+        del m.sign_logits
+        n += 1
+    return n
+
+
+@torch.no_grad()
+def compute_T_init(model: nn.Module, target_odds: float = 9.0) -> float:
+    """Temperature where the median weight has target_odds:1 probability
+    on its nearest codebook value vs second-nearest in normalized space.
+
+    T_init = median(d2² - d1²) / log(target_odds)
+
+    where d1² and d2² are the squared distances from each latent (normalized
+    by codepoint_c) to its nearest and second-nearest codebook values
+    {-1, 0, +1}. At T=T_init, the typical weight is already mostly committed
+    but gradients still flow smoothly.
+    """
+    gaps: list[torch.Tensor] = []
+    for m in model.modules():
+        if not (isinstance(m, QLinear) and hasattr(m, "codepoint_c")):
+            continue
+        w = m.weight.detach().float()
+        c = m.codepoint_c.detach().float()
+        out_f = w.shape[0]
+        wb = w.view(out_f, m.n_groups, m.group_size)
+        c_b = c.unsqueeze(-1).clamp_min(1e-8)
+        w_norm = wb / c_b
+        codebook = w_norm.new_tensor([-1.0, 0.0, 1.0])
+        dists_sq = (w_norm.unsqueeze(-1) - codebook).pow(2)  # [..., 3]
+        sorted_d, _ = dists_sq.sort(dim=-1)
+        gaps.append((sorted_d[..., 1] - sorted_d[..., 0]).flatten().cpu())
+    if not gaps:
+        return 1.0
+    median_gap = float(torch.cat(gaps).median())
+    T_init = median_gap / math.log(max(target_odds, 1.001))
+    return max(T_init, 1e-4)
 
 
 def invalidate_q_cache(model: nn.Module) -> int:

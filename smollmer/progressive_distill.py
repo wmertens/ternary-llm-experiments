@@ -41,6 +41,7 @@ from .distill import (
     BestEmaTracker,
     CautiousAdamW,
     Lion32,
+    PRM32,
     ShardedDataset,
     _install_sigint_handler,
     collect_qlinear_metrics,
@@ -436,7 +437,11 @@ def main() -> None:
     ap.add_argument("--wd", type=float, default=0.001)
     ap.add_argument("--max-grad-norm", type=float, default=1.0)
     ap.add_argument("--optimizer", default="cautious-adamw",
-                    choices=["lion", "adamw", "cautious-adamw"])
+                    choices=["lion", "adamw", "cautious-adamw", "prm"])
+    ap.add_argument("--prm-softness", type=float, default=1.0,
+                    help="PRM lam_pop. q=1/2 on the LOO boundary when "
+                         "softness=1; larger → more conservative. "
+                         "Practical range [0.3, 3]. Ignored for non-PRM opts.")
     ap.add_argument("--scale-group-size", type=int, default=64,
                     help="64 for SmolLM2-135M (default model); 128 for "
                          "Qwen3-1.7B. Must divide every projection's "
@@ -607,8 +612,11 @@ def main() -> None:
          "lr_mult": scale_lr_mult, "name": "scales"},
     ]
     OptCls = {"lion": Lion32, "adamw": AdamW32,
-              "cautious-adamw": CautiousAdamW}[args.optimizer]
-    opt = OptCls(param_groups, lr=args.lr, weight_decay=args.wd)
+              "cautious-adamw": CautiousAdamW, "prm": PRM32}[args.optimizer]
+    opt_kwargs = dict(lr=args.lr, weight_decay=args.wd)
+    if args.optimizer == "prm":
+        opt_kwargs["softness"] = args.prm_softness
+    opt = OptCls(param_groups, **opt_kwargs)
     print(f"[opt] {args.optimizer} lr={args.lr} wd={args.wd} "
           f"scale_lr_mult={scale_lr_mult:g}")
 

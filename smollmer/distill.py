@@ -423,6 +423,97 @@ class CautiousAdamW(torch.optim.Optimizer):
         return loss
 
 
+class PRM32(torch.optim.Optimizer):
+    """Population Risk Minimization (Litman & Guo 2026,
+    github.com/elonlit/PopRiskMinimization).
+
+    AdamW + one extra fp32 state tensor s (Welford EMA of centered
+    minibatch gradient variance) + one extra step: multiply the Adam
+    direction by a per-parameter SNR mask
+
+        q = m_hat^2 / (m_hat^2 + lam_pop * alpha * s_hat + eps)
+
+    that shrinks parameters whose batch-mean gradient is below the
+    leave-one-out noise estimate. With alpha=1 (batch boundary, online
+    minibatches) and lam_pop=1 the mask is exactly 1/2 on the LOO
+    threshold m_hat^2 = s_hat; above the threshold q rises toward 1,
+    below it falls toward 0.
+
+    The Adam direction is then passed through the Cautious mask from
+    Liang et al. 2024 (cf. CautiousAdamW): coords where momentum and
+    current grad disagree are zeroed and the mask is mean-normalized to
+    preserve the effective LR. SNR shrinkage alone left big overshoot
+    on QAT runs, this kills the sign-flip component of it.
+
+    State is fp32 for the same underflow reason as AdamW32: (1-rho)*g^2
+    sends squared grads through a ~1e-2 multiplier, which kills v on
+    fp16 latents near a minimum.
+    """
+
+    def __init__(self, params, lr: float = 1e-3,
+                 betas: tuple[float, float] = (0.9, 0.999),
+                 rho: float = 0.99, eps: float = 1e-8,
+                 weight_decay: float = 0.01,
+                 softness: float = 1.0) -> None:
+        defaults = dict(lr=lr, betas=betas, rho=rho, eps=eps,
+                        weight_decay=weight_decay, softness=softness)
+        super().__init__(params, defaults)
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+        for group in self.param_groups:
+            lr = group["lr"]
+            beta1, beta2 = group["betas"]
+            rho = group["rho"]
+            eps = group["eps"]
+            wd = group["weight_decay"]
+            lam = group["softness"]
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+                grad = p.grad.to(torch.float32)
+                state = self.state[p]
+                if not state:
+                    state["step"] = 0
+                    state["exp_avg"] = torch.zeros_like(p, dtype=torch.float32)
+                    state["exp_avg_sq"] = torch.zeros_like(p, dtype=torch.float32)
+                    state["grad_var"] = torch.zeros_like(p, dtype=torch.float32)
+                state["step"] += 1
+                step = state["step"]
+                m, v, s = state["exp_avg"], state["exp_avg_sq"], state["grad_var"]
+                if wd != 0:
+                    p.mul_(1 - lr * wd)
+                # Welford centering: variance update uses pre-update m so
+                # s_t is an unbiased estimator of Sigma_B / (b-1) with no
+                # beta1 bias from the post-update form.
+                diff = grad - m
+                s.mul_(rho).addcmul_(diff, diff, value=1 - rho)
+                m.mul_(beta1).add_(grad, alpha=1 - beta1)
+                v.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+                bc1 = 1 - beta1 ** step
+                bc2 = 1 - beta2 ** step
+                bc_rho = 1 - rho ** step
+                m_hat = m / bc1
+                v_hat = v / bc2
+                s_hat = s / bc_rho
+                m_sq = m_hat * m_hat
+                # alpha = 1 (batch boundary, online minibatches).
+                q = m_sq / (m_sq + lam * s_hat + eps)
+                # Cautious mask (Liang et al. 2024): zero coords where the
+                # momentum direction disagrees with the current grad, then
+                # mean-normalize to preserve the effective LR. Curbs the
+                # post-shrink overshoot we saw on PRM runs.
+                mask = (m * grad > 0).to(m.dtype)
+                mask.div_(mask.mean().clamp_min(1e-3))
+                upd = q * mask * m_hat / v_hat.sqrt().add_(eps)
+                p.add_(upd.to(p.dtype), alpha=-lr)
+        return loss
+
+
 @torch.no_grad()
 def quantized_codes(m: QLinear) -> torch.Tensor:
     """Integer code per weight, used for bin-occupancy + step-to-step
@@ -780,10 +871,17 @@ def main() -> None:
     ap.add_argument("--batch-size", type=int, default=2)
     ap.add_argument("--grad-accum", type=int, default=8)
     ap.add_argument("--optimizer", default="lion",
-                    choices=["lion", "adamw", "cautious-adamw"],
+                    choices=["lion", "adamw", "cautious-adamw", "prm"],
                     help="Lion (sign-momentum, sweet spot 3e-4..1e-3 for ternary). "
                          "AdamW (standard). Cautious-AdamW (Bonsai recipe; one-line "
-                         "mod from Liang et al. 2024 arXiv:2411.16085, lr~1e-2).")
+                         "mod from Liang et al. 2024 arXiv:2411.16085, lr~1e-2). "
+                         "PRM (Population Risk Minimization, Litman & Guo 2026): "
+                         "AdamW + SNR mask that downweights coords whose batch-mean "
+                         "grad is below the LOO noise floor.")
+    ap.add_argument("--prm-softness", type=float, default=1.0,
+                    help="PRM lam_pop. Mask q=1/2 sits on the LOO boundary when "
+                         "softness=1; larger → more conservative (closes faster), "
+                         "smaller → more aggressive. Practical range [0.3, 3].")
     ap.add_argument("--lr", type=float, default=3e-4,
                     help="Base learning rate. Lion sweet spot for ternary "
                          "QAT is 3e-4..1e-3; AdamW family ~5e-4..1e-3. "
@@ -1163,6 +1261,9 @@ def main() -> None:
         opt = AdamW32(param_groups, lr=args.lr, weight_decay=args.wd)
     elif args.optimizer == "cautious-adamw":
         opt = CautiousAdamW(param_groups, lr=args.lr, weight_decay=args.wd)
+    elif args.optimizer == "prm":
+        opt = PRM32(param_groups, lr=args.lr, weight_decay=args.wd,
+                    softness=args.prm_softness)
     else:
         raise ValueError(f"unknown optimizer: {args.optimizer}")
     print(f"[opt] {args.optimizer} lr={args.lr} wd={args.wd} (fp32 state)")
