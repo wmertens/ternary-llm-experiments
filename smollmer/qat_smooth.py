@@ -1,16 +1,28 @@
-"""qat_smooth.py — single-stage QAT with smooth ternary forward and
-adaptive temperature annealing.
+"""qat_smooth.py — Hestia-style sequenced QAT with smooth ternary forward,
+adaptive compress (blend) phase, and adaptive anneal phase.
 
 Every QLinear uses a temperature-scaled softmax expectation over {-1,0,+1}
 instead of STE. As temperature T→0 the forward converges to hard ternary.
 
-Annealing schedule (no separate compress/anneal phases):
-  - T starts at T_init, computed from the weight distribution at init so
-    the median latent has 9:1 odds on its nearest codebook value.
-  - Each optimizer step where loss < slow_ema: anneal_step += 1.
-  - T = T_init × cos(π/2 × anneal_step / anneal_steps).
-  - When anneal_step == anneal_steps: T=0, forward falls through to STE.
-  - slow_ema tracks a 1/slow_ema_alpha-step horizon (default 200 steps).
+Schedule (Hestia-style sequencing: compress → anneal):
+  1. Compress (blend) phase. smooth_alpha starts at 1 (FP-equivalent
+     forward, zero quantization shock) and cosines down to 0 over
+     `blend_steps` plateau-gated advances. T stays at T_init during this
+     phase. The forward is α·w + (1-α)·c·E_T[k].
+  2. Anneal phase. Once blend completes (α=0), the anneal counter starts
+     advancing on plateau. T = T_init × cos(π/2 × anneal_step / anneal_steps).
+  3. Exit. When anneal_step reaches anneal_steps, training exits cleanly,
+     saving interrupted.pt with full optimizer state. Use --resume to
+     continue, or finalize_smooth.py for a deployed safetensors. We exit
+     instead of continuing past T_floor because the at-floor backward
+     [(2/T)·V_T] explodes at boundary trits and produces a loss spike.
+
+Plateau gate (drives both blend and anneal advances):
+    step_loss < slow_ema AND (slow-fast)/slow < anneal_gap_thr
+slow_ema tracks a 1/slow_ema_alpha horizon (default 200 steps).
+
+T_init is computed from the weight distribution at init so the median
+latent has 9:1 odds on its nearest codebook value.
 
 Per-layer temperature scaling (optional, from calibrate.py):
   T_layer = T_global × temp_scale_layer
@@ -85,18 +97,27 @@ def main() -> None:
                          "latents) since scales have a clean gradient through "
                          "the smooth forward.")
     ap.add_argument("--target-zero-frac-init", type=float, default=0.25,
-                    help="Used to seed codepoint_c at init (frozen thereafter).")
+                    help="Used to seed codepoint_c at init (frozen thereafter). "
+                         "Only used when --no-hestia-scale.")
     ap.add_argument("--c-clamp-min", type=float, default=0.05)
     ap.add_argument("--c-clamp-max", type=float, default=1.0)
     ap.add_argument("--freeze-scales", action="store_true", default=False,
                     help="Freeze per-group scales (no grad, no optimizer state). "
                          "Use when warm-starting from a checkpoint whose scales "
-                         "are already well-calibrated.")
+                         "are already well-calibrated. (Implied by --hestia-scale.)")
+    ap.add_argument("--hestia-scale", action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help="Use γ = mean(|w|) per (row, group), recomputed each "
+                         "forward, in place of the learnable-then-frozen "
+                         "codepoint_c. Drops c entirely; scales is frozen at "
+                         "1.0 during training and set to γ at deploy. Matches "
+                         "Hestia's scale convention.")
     # Temperature annealing
     ap.add_argument("--anneal-steps", type=int, default=1000,
-                    help="Number of 'good' optimizer steps (loss < slow_ema "
-                         "and model has plateaued) to complete the T_init→0 "
-                         "cosine anneal.")
+                    help="Number of plateau-gated advances (loss < slow_ema "
+                         "and (slow-fast)/slow < anneal_gap_thr) needed to "
+                         "complete the T_init→t_floor cosine anneal. "
+                         "Anneal advances only fire AFTER blend completes.")
     ap.add_argument("--slow-ema-alpha", type=float, default=0.005,
                     help="Decay rate for the slow EMA used to gate annealing "
                          "(1/alpha = window in steps, default 200).")
@@ -110,11 +131,15 @@ def main() -> None:
                          "gate fires: (slow-fast)/slow < thr. Default 0.005 "
                          "(0.5%%): anneal pauses while the model is still "
                          "improving by >0.5%% relative to its trend.")
-    ap.add_argument("--blend-steps", type=int, default=500,
-                    help="Steps over which smooth_alpha anneals linearly 1→0. "
-                         "At alpha=1 the forward is FP32-equivalent (teacher "
-                         "loss from step 0, no quantization shock). At alpha=0 "
-                         "pure smooth ternary. Default 500. Set to 0 to disable.")
+    ap.add_argument("--blend-steps", type=int, default=2000,
+                    help="Number of plateau-gated advances over which "
+                         "smooth_alpha cosines 1→0 (compress phase). At "
+                         "alpha=1 the forward is FP32-equivalent (teacher "
+                         "loss from step 0, no quantization shock). At "
+                         "alpha=0 pure smooth ternary. anneal_step is held "
+                         "at 0 during the entire blend phase (T stays at "
+                         "T_init, Hestia-style sequencing). Default 2000. "
+                         "Set to 0 to disable blend entirely.")
     ap.add_argument("--t-floor", type=float, default=0.001,
                     help="Minimum temperature kept after anneal completes. "
                          "Keeps the smooth backward active (avoiding STE dead "
@@ -147,7 +172,10 @@ def main() -> None:
     ap.add_argument("--grad-checkpointing",
                     action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--total-steps", type=int, default=40000)
+    ap.add_argument("--total-steps", type=int, default=40000,
+                    help="Safety cap. Training normally exits earlier when "
+                         "anneal completes; total_steps stops a run that "
+                         "never plateaus enough to finish anneal.")
     ap.add_argument("--ema-warmup", type=int, default=500)
     ap.add_argument("--soft-hist-every", type=int, default=200)
     ap.add_argument("--checkpoint-every", type=int, default=1000)
@@ -200,9 +228,13 @@ def main() -> None:
     print(f"[build] {n_replaced} QLinear modules (latent dtype {latent_dtype})")
 
     set_soft_mode(model, alpha=0.0, target_zero_frac=None)
-    attach_learnable_c(model, default_c=2.0 / 3.0)
+    # attach_learnable_c keeps codepoint_c attached as a Parameter so the
+    # forward-dispatch path routes to _smooth_qat_effective_weight. In
+    # Hestia mode c is unused (γ comes from mean(|w|)) but stays attached
+    # as a dispatch anchor with default 1.0.
+    attach_learnable_c(model, default_c=(1.0 if args.hestia_scale else 2.0 / 3.0))
 
-    if fresh_start:
+    if fresh_start and not args.hestia_scale:
         tzf = (args.target_zero_frac_init
                if 0.0 < args.target_zero_frac_init < 1.0 else None)
         cstats = init_c_from_band_mean(model, tzf, fallback_c=2.0 / 3.0)
@@ -216,7 +248,19 @@ def main() -> None:
             m.codepoint_c.data.clamp_(args.c_clamp_min, args.c_clamp_max)
     print("[smooth] codepoint_c frozen (no grad)")
 
-    if args.freeze_scales:
+    if args.hestia_scale:
+        for m in model.modules():
+            if isinstance(m, QLinear):
+                m.use_hestia_scale = True
+                # scales = 1.0 frozen during training. γ = mean(|w|) is
+                # absorbed inside _smooth_qat_effective_weight; the outer
+                # self.scales multiply is a no-op. Deploy fold later
+                # populates scales with γ for the snapped {-1,0,+1} weights.
+                m.scales.data.fill_(1.0)
+                m.scales.requires_grad_(False)
+        print("[smooth] hestia-scale ON: γ=mean(|w|) per (row, group); "
+              "scales frozen at 1.0 (deploy fold restores γ)")
+    elif args.freeze_scales:
         for m in model.modules():
             if isinstance(m, QLinear):
                 m.scales.requires_grad_(False)
@@ -353,9 +397,11 @@ def main() -> None:
                            purge_step=global_step if global_step else None)
     print(f"[tb] {run_dir}")
     writer.add_text("stage", "  \n".join([
-        "**qat_smooth** (smooth ternary, adaptive anneal)",
-        f"- T_init = {T_init:.4f}, anneal_steps = {args.anneal_steps}",
+        "**qat_smooth** (Hestia-style sequenced: cosine blend → anneal → exit)",
+        f"- T_init = {T_init:.4f}, anneal_steps = {args.anneal_steps} (plateau-gated)",
+        f"- blend_steps = {args.blend_steps} (plateau-gated, cosine α 1→0)",
         f"- slow_ema_alpha = {args.slow_ema_alpha} (window ~{1/args.slow_ema_alpha:.0f} steps)",
+        f"- anneal_gap_thr = {args.anneal_gap_thr}, t_floor = {args.t_floor}",
         f"- calib_file = {args.calib_file}",
         f"- scale_lr_mult = {args.scale_lr_mult:g}",
         f"- c frozen at init (target_zero_frac_init={args.target_zero_frac_init})",
@@ -392,15 +438,26 @@ def main() -> None:
 
     try:
         while global_step < args.total_steps:
-            # Current temperature and alpha blend
-            frac = min(anneal_step, args.anneal_steps) / args.anneal_steps
-            T_global = max(T_init * math.cos(math.pi / 2 * frac),
-                           args.t_floor)
-            at_floor = (anneal_step >= args.anneal_steps)
+            # Hestia-style sequencing: T pinned at T_init during the entire
+            # blend (compress) phase; only after blend completes does
+            # anneal_step start advancing and T start cosineing down.
+            blend_done = (args.blend_steps == 0
+                          or blend_step >= args.blend_steps)
+            if blend_done:
+                frac = min(anneal_step, args.anneal_steps) / args.anneal_steps
+                T_global = max(T_init * math.cos(math.pi / 2 * frac),
+                               args.t_floor)
+            else:
+                T_global = T_init
+            at_floor = blend_done and (anneal_step >= args.anneal_steps)
             set_smooth_temp(model, T_global, temp_scales, at_floor=at_floor)
-            smooth_alpha = (
-                1.0 - min(blend_step, args.blend_steps) / args.blend_steps
-                if args.blend_steps > 0 else 0.0)
+            # Cosine (not linear) blend so dα/dt → 0 as α → 0: smooths the
+            # gradient-scale regime change at α=0.
+            if args.blend_steps > 0:
+                blend_frac = min(blend_step, args.blend_steps) / args.blend_steps
+                smooth_alpha = math.cos(math.pi / 2 * blend_frac)
+            else:
+                smooth_alpha = 0.0
             set_smooth_alpha(model, smooth_alpha)
 
             cur_lr = lr_at(global_step, nominal_total, args.lr,
@@ -439,12 +496,11 @@ def main() -> None:
             clamp_qlinear_weights(model)
             opt.zero_grad(set_to_none=True)
             global_step += 1
-            if blend_step < args.blend_steps:
-                blend_step += 1
 
             step_loss = running / max(1, running_n)
 
-            # Update slow + fast EMAs, advance anneal only when plateaued
+            # Update slow + fast EMAs, advance blend OR anneal on plateau.
+            # Hestia-style: blend completes first, then anneal starts.
             if slow_ema is None:
                 slow_ema = step_loss
                 fast_ema = step_loss
@@ -454,10 +510,13 @@ def main() -> None:
                 fast_ema = ((1.0 - args.fast_ema_alpha) * fast_ema
                             + args.fast_ema_alpha * step_loss)
             plateau_gap = (slow_ema - fast_ema) / (slow_ema + 1e-8)
-            if (step_loss < slow_ema
-                    and plateau_gap < args.anneal_gap_thr
-                    and anneal_step < args.anneal_steps):
-                anneal_step += 1
+            plateaued = (step_loss < slow_ema
+                         and plateau_gap < args.anneal_gap_thr)
+            if plateaued:
+                if blend_step < args.blend_steps:
+                    blend_step += 1
+                elif anneal_step < args.anneal_steps:
+                    anneal_step += 1
 
             improved = ctrl.update(global_step, step_loss)
             if improved and at_floor:
@@ -474,6 +533,7 @@ def main() -> None:
                     "gap": f"{plateau_gap:.3f}",
                 }
                 if blend_step < args.blend_steps:
+                    postfix["blend"] = f"{blend_step}/{args.blend_steps}"
                     postfix["α"] = f"{smooth_alpha:.3f}"
                 pbar.set_postfix(postfix)
                 pbar.update(args.log_every)
@@ -548,6 +608,19 @@ def main() -> None:
                 print(f"[!] saved {interrupted_path}")
                 sys.exit(0)
 
+            # Exit when anneal completes — don't step into at_floor mode.
+            # The (2/T)·V_T backward at t_floor blows up at boundary trits
+            # and produces a loss spike. Save with full optimizer state so
+            # downstream experiments (flip, finalize, resume) can pick up.
+            if anneal_step >= args.anneal_steps:
+                save_resume(interrupted_path, model, opt, global_step,
+                            best_snapshot, ctrl.state_dict(), run_name,
+                            samples_consumed=samples_at_save,
+                            soft_state=_smooth_state())
+                tqdm.write(f"[smooth] anneal complete at step {global_step}, "
+                           f"saved {interrupted_path}")
+                break
+
     except SystemExit:
         raise
     except BaseException as e:
@@ -565,26 +638,42 @@ def main() -> None:
     finally:
         pbar.close()
 
-    # ---- Deploy fold: snap latents to hard ternary, fold c into scales ----
+    # ---- Deploy fold: snap latents to hard ternary, restore γ into scales ----
+    # Hestia mode: γ = mean(|w|) per (row, group), threshold at γ/2.
+    # Legacy mode: γ = codepoint_c, threshold at c/2.
+    def _deploy_fold() -> None:
+        with torch.no_grad():
+            for m in model.modules():
+                if not isinstance(m, QLinear):
+                    continue
+                out_f, in_f = m.weight.shape
+                wb = m.weight.view(out_f, m.n_groups, m.group_size)
+                if args.hestia_scale:
+                    gamma = wb.abs().mean(dim=-1, keepdim=True).clamp_min(1e-8)
+                    w_norm = wb / gamma
+                    ternary = torch.where(w_norm.abs() > 0.5,
+                                          torch.sign(w_norm),
+                                          torch.zeros_like(w_norm))
+                    m.weight.data.copy_(ternary.view(out_f, in_f))
+                    # scales picks up γ (was frozen at 1.0 during training)
+                    m.scales.data.copy_(gamma.squeeze(-1).to(m.scales.dtype))
+                else:
+                    c_elem = (m.codepoint_c.unsqueeze(-1)
+                              .expand(out_f, m.n_groups, m.group_size)
+                              .reshape(out_f, in_f)
+                              .to(m.weight.dtype))
+                    thresh = c_elem * 0.5
+                    target = torch.where(m.weight.abs() > thresh,
+                                         torch.sign(m.weight) * c_elem,
+                                         torch.zeros_like(m.weight))
+                    m.weight.data.copy_(target)
+                    m.weight.data.div_(c_elem)
+                    m.scales.data.mul_(m.codepoint_c.data.to(m.scales.dtype))
+                m.invalidate_q_cache()
+
     print(f"[smooth] complete after {global_step} steps  "
           f"(anneal_step={anneal_step}/{args.anneal_steps})")
-    with torch.no_grad():
-        for m in model.modules():
-            if not isinstance(m, QLinear):
-                continue
-            out_f, in_f = m.weight.shape
-            c_elem = (m.codepoint_c.unsqueeze(-1)
-                      .expand(out_f, m.n_groups, m.group_size)
-                      .reshape(out_f, in_f)
-                      .to(m.weight.dtype))
-            thresh = c_elem * 0.5
-            target = torch.where(m.weight.abs() > thresh,
-                                 torch.sign(m.weight) * c_elem,
-                                 torch.zeros_like(m.weight))
-            m.weight.data.copy_(target)
-            m.weight.data.div_(c_elem)
-            m.scales.data.mul_(m.codepoint_c.data.to(m.scales.dtype))
-            m.invalidate_q_cache()
+    _deploy_fold()
 
     out_ckpt = args.out / "stage_smooth.safetensors"
     save_checkpoint(model, out_ckpt, args.model, args.scale_group_size,
@@ -598,23 +687,7 @@ def main() -> None:
             and ctrl.best_step != global_step
             and T_at_best < 1e-3):
         model.load_state_dict(best_snapshot, strict=False)
-        with torch.no_grad():
-            for m in model.modules():
-                if not isinstance(m, QLinear):
-                    continue
-                out_f, in_f = m.weight.shape
-                c_elem = (m.codepoint_c.unsqueeze(-1)
-                          .expand(out_f, m.n_groups, m.group_size)
-                          .reshape(out_f, in_f)
-                          .to(m.weight.dtype))
-                thresh = c_elem * 0.5
-                target = torch.where(m.weight.abs() > thresh,
-                                     torch.sign(m.weight) * c_elem,
-                                     torch.zeros_like(m.weight))
-                m.weight.data.copy_(target)
-                m.weight.data.div_(c_elem)
-                m.scales.data.mul_(m.codepoint_c.data.to(m.scales.dtype))
-                m.invalidate_q_cache()
+        _deploy_fold()
         best_ckpt = args.out / "stage_smooth_best.safetensors"
         save_checkpoint(model, best_ckpt, args.model, args.scale_group_size,
                         alpha=0.0, target_zero_frac=None)
@@ -626,9 +699,10 @@ def main() -> None:
                     global_step)
     writer.flush()
     writer.close()
-    if interrupted_path.exists():
-        interrupted_path.unlink()
-    print("[done]")
+    # Keep interrupted.pt around — it holds the full optimizer state at the
+    # moment of anneal completion. Downstream tools (resume, flip, etc.)
+    # need it; the deploy-fold safetensors above is weights-only.
+    print(f"[done] interrupted.pt preserved at {interrupted_path}")
 
 
 if __name__ == "__main__":

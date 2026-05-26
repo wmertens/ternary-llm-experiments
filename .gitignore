@@ -17,4 +17,6 @@ wandb/
 *.bin
 *.log
 
+cache_corpus/
+
 .DS_Store

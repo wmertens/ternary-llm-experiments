@@ -307,15 +307,22 @@ class QLinear(nn.Linear):
     def _smooth_qat_effective_weight(self) -> torch.Tensor:
         """Smooth ternary QAT via temperature-scaled softmax over {-1, 0, +1}.
 
-        w_norm  = latent / c
+        Scale source — set by self.use_hestia_scale:
+          * False (legacy):  γ = self.codepoint_c (learnable then frozen)
+          * True (Hestia):   γ = mean(|w|) per (row, group), recomputed each
+                             forward. Autograd-traced (no detach), so the
+                             latent sees a small gradient via the chain
+                             rule through |w|.
+
+        w_norm  = latent / γ
         w_quant = E_{probs}[k]  where probs_k ∝ exp(-‖w_norm-k‖²/T)
-        eff     = w_quant · c   (scales applied by forward())
+        eff     = w_quant · γ   (the outer self.scales multiply must be 1
+                                 in Hestia mode — γ already restores the
+                                 magnitude.)
 
         When smooth_alpha > 0, blends with the FP32 latent to suppress the
         initial quantization shock:
-            eff = α·w + (1-α)·(w_quant·c)
-        α=1 → FP32-equivalent forward (teacher loss at step 0); α=0 → pure
-        smooth ternary. Anneal α→0 over --blend-steps training steps.
+            eff = α·w + (1-α)·(w_quant·γ)
 
         Backward via _SmoothTernary: saves w_q and p_zero (2× weight size)
         instead of the full [O,G,gs,3] probs tensor. Falls through to STE
@@ -328,13 +335,17 @@ class QLinear(nn.Linear):
         w = self.weight
         out_f, in_f = w.shape
         wb = w.view(out_f, self.n_groups, self.group_size)
-        c_b = self.codepoint_c.unsqueeze(-1).to(wb.dtype).clamp_min(1e-8)
+
+        if getattr(self, "use_hestia_scale", False):
+            s_eff = wb.abs().mean(dim=-1, keepdim=True).clamp_min(1e-8)
+        else:
+            s_eff = self.codepoint_c.unsqueeze(-1).to(wb.dtype).clamp_min(1e-8)
 
         if getattr(self, "smooth_at_floor", False):
-            w_q = _HardTernaryWithSmoothGrad.apply(wb / c_b, temp)
+            w_q = _HardTernaryWithSmoothGrad.apply(wb / s_eff, temp)
         else:
-            w_q = _SmoothTernary.apply(wb / c_b, temp)
-        eff = (w_q * c_b).view(out_f, in_f)
+            w_q = _SmoothTernary.apply(wb / s_eff, temp)
+        eff = (w_q * s_eff).view(out_f, in_f)
 
         smooth_alpha = float(getattr(self, "smooth_alpha", 0.0))
         if smooth_alpha > 0.0:
