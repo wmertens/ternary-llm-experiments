@@ -218,9 +218,11 @@ def _project_text(example: dict) -> dict:
 # 75/15/10 mix, with sub-cycle shuffling so smaller batch sizes also see a
 # good mix (every batch size that divides 60: 1,2,3,4,5,6,10,12,15,20,30,60).
 _SOURCES: tuple[tuple[str, int], ...] = (
-    ("fineweb-edu-dedup", 45),
+    ("fineweb-edu-dedup", 51),
     ("cosmopedia-v2",      9),
-    ("python-edu",         6),
+    # python-edu dropped 2026-05-25: HF schema now ships metadata only
+    # (blob_id/repo_name/path), no text/code. Re-add via a replacement
+    # code source (e.g. bigcode/the-stack-smol-py) when needed.
 )
 _CADENCE = sum(n for _, n in _SOURCES)  # 60
 _N_SOURCES = len(_SOURCES)
