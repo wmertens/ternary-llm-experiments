@@ -44,7 +44,11 @@ from .distill import ShardedDataset
 
 
 def _ce_loss(model: torch.nn.Module, ids: torch.Tensor,
-             targets: torch.Tensor) -> torch.Tensor:
+             targets: torch.Tensor,
+             max_seq_len: int | None = None) -> torch.Tensor:
+    if max_seq_len is not None and ids.shape[-1] > max_seq_len:
+        ids = ids[:, :max_seq_len]
+        targets = targets[:, :max_seq_len]
     logits = model(ids).logits
     return F.cross_entropy(
         logits.reshape(-1, logits.shape[-1]),
@@ -53,7 +57,8 @@ def _ce_loss(model: torch.nn.Module, ids: torch.Tensor,
 
 
 def calibrate_grad(model: torch.nn.Module, iter_dl, n_batches: int,
-                   device: str) -> dict[str, float]:
+                   device: str, max_seq_len: int | None = None,
+                   ) -> dict[str, float]:
     """Fisher diagonal trace ≈ mean ‖∇w L‖²."""
     traces: dict[str, float] = {
         n: 0.0 for n, m in model.named_modules()
@@ -65,7 +70,7 @@ def calibrate_grad(model: torch.nn.Module, iter_dl, n_batches: int,
         tokens = batch["tokens"].to(device, non_blocking=True).long()
         ids, targets = tokens[:, :-1], tokens[:, 1:]
         model.zero_grad()
-        loss = _ce_loss(model, ids, targets)
+        loss = _ce_loss(model, ids, targets, max_seq_len=max_seq_len)
         loss.backward()
         with torch.no_grad():
             for name, m in model.named_modules():
@@ -98,13 +103,35 @@ def _hvp_for_param(grad_flat_with_graph: torch.Tensor,
 
 def calibrate_hutchpp(model: torch.nn.Module, iter_dl, n_batches: int,
                       num_sketch: int, num_query: int,
-                      device: str) -> dict[str, float]:
+                      device: str, max_seq_len: int | None = None,
+                      ) -> dict[str, float]:
     """Per-Linear-layer Hessian trace via Hutch++.
 
     Per batch we share the forward + first backward across layers and
     issue per-(layer, probe) second-backwards. State lives in CPU until
     needed.
+
+    Forces the math SDPA backend for the duration: Flash and
+    mem-efficient kernels have no double-backward implementation in
+    PyTorch, which the second autograd.grad call needs.
     """
+    flash_was_on = torch.backends.cuda.flash_sdp_enabled()
+    mem_eff_was_on = torch.backends.cuda.mem_efficient_sdp_enabled()
+    torch.backends.cuda.enable_flash_sdp(False)
+    torch.backends.cuda.enable_mem_efficient_sdp(False)
+    try:
+        return _calibrate_hutchpp_inner(model, iter_dl, n_batches,
+                                        num_sketch, num_query, device,
+                                        max_seq_len)
+    finally:
+        torch.backends.cuda.enable_flash_sdp(flash_was_on)
+        torch.backends.cuda.enable_mem_efficient_sdp(mem_eff_was_on)
+
+
+def _calibrate_hutchpp_inner(model: torch.nn.Module, iter_dl, n_batches: int,
+                             num_sketch: int, num_query: int,
+                             device: str,
+                             max_seq_len: int | None) -> dict[str, float]:
     layer_modules: dict[str, torch.nn.Linear] = {
         n: m for n, m in model.named_modules()
         if isinstance(m, torch.nn.Linear) and m.weight.requires_grad
@@ -127,7 +154,7 @@ def calibrate_hutchpp(model: torch.nn.Module, iter_dl, n_batches: int,
     def _shared_first_backward(batch):
         tokens = batch["tokens"].to(device, non_blocking=True).long()
         ids, targets = tokens[:, :-1], tokens[:, 1:]
-        loss = _ce_loss(model, ids, targets)
+        loss = _ce_loss(model, ids, targets, max_seq_len=max_seq_len)
         grads = torch.autograd.grad(loss, params, create_graph=True,
                                     retain_graph=True)
         return [g.view(-1) for g in grads], loss
@@ -232,6 +259,17 @@ def main() -> None:
     ap.add_argument("--num-query", type=int, default=12,
                     help="Hutch++ residual probe count m. Larger → lower "
                          "variance on the residual trace.")
+    ap.add_argument("--max-seq-len", type=int, default=256,
+                    help="Truncate sequences to this length before running. "
+                         "Math SDPA backend (forced for double-backward) "
+                         "materializes the full [B,H,T,T] attention matrix; "
+                         "Hutch++ keeps it alive through create_graph. "
+                         "256 fits a 6GB GPU; raise if you have VRAM.")
+    ap.add_argument("--grad-checkpoint", action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help="Enable HF gradient checkpointing (use_reentrant=False, "
+                         "double-backward-safe). ~3× less activation memory at "
+                         "~1.5× extra compute. Recommended on small GPUs.")
     ap.add_argument("--batch-size", type=int, default=2)
     ap.add_argument("--dtype", default="bfloat16",
                     choices=["bfloat16", "float16", "float32"],
@@ -261,6 +299,15 @@ def main() -> None:
     # don't .eval() in a way that disables grad. Eval mode is fine; only
     # dropout/BN are toggled.
     model.eval()
+    if args.method == "hutchpp" and args.grad_checkpoint:
+        model.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs={"use_reentrant": False})
+        # Checkpointing relies on inputs requiring grad to trigger the
+        # backward re-forward; embeddings have no grad on input ids, so HF
+        # exposes this opt-in.
+        if hasattr(model, "enable_input_require_grads"):
+            model.enable_input_require_grads()
+        print("[hutch++] gradient checkpointing enabled (use_reentrant=False)")
 
     ds = ShardedDataset(args.cache_dir, seed=args.seed)
     dl = DataLoader(ds, batch_size=args.batch_size, num_workers=1,
@@ -268,11 +315,13 @@ def main() -> None:
     it = iter(dl)
 
     if args.method == "grad":
-        traces = calibrate_grad(model, it, args.n_batches, args.device)
+        traces = calibrate_grad(model, it, args.n_batches, args.device,
+                                max_seq_len=args.max_seq_len)
     else:
         traces = calibrate_hutchpp(model, it, args.n_batches,
                                    args.num_sketch, args.num_query,
-                                   args.device)
+                                   args.device,
+                                   max_seq_len=args.max_seq_len)
 
     # Z-score the log |trace| — Hutch++ traces are signed but should be ≥0
     # in expectation; we abs() to stay safe with the log.

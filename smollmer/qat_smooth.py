@@ -6,9 +6,10 @@ instead of STE. As temperature T→0 the forward converges to hard ternary.
 
 Schedule (Hestia-style sequencing: compress → anneal):
   1. Compress (blend) phase. smooth_alpha starts at 1 (FP-equivalent
-     forward, zero quantization shock) and cosines down to 0 over
-     `blend_steps` plateau-gated advances. T stays at T_init during this
-     phase. The forward is α·w + (1-α)·c·E_T[k].
+     forward, zero quantization shock) and linearly ramps to 0 over
+     `blend_steps` plateau-gated advances (Hestia §3 pressure parameter
+     p_t = min(1, t/(ρT)); here α = 1 - p_t). T stays at T_init during
+     this phase. The forward is α·w + (1-α)·γ·E_T[k].
   2. Anneal phase. Once blend completes (α=0), the anneal counter starts
      advancing on plateau. T = T_init × cos(π/2 × anneal_step / anneal_steps).
   3. Exit. When anneal_step reaches anneal_steps, training exits cleanly,
@@ -86,11 +87,30 @@ def main() -> None:
     ap.add_argument("--wd", type=float, default=0.001)
     ap.add_argument("--max-grad-norm", type=float, default=1.0)
     ap.add_argument("--optimizer", default="cautious-adamw",
-                    choices=["lion", "adamw", "cautious-adamw", "prm"])
+                    choices=["lion", "adamw", "cautious-adamw", "prm",
+                             "amuse"])
     ap.add_argument("--prm-softness", type=float, default=1.0,
                     help="PRM lam_pop. q=1/2 on the LOO boundary when "
                          "softness=1; larger → more conservative. "
                          "Practical range [0.3, 3]. Ignored for non-PRM opts.")
+    # AMUSE / SF-CAdamW (schedule-free) options. Used only when
+    # --optimizer amuse. Two LRs because Muon LR is typically 5–10× AdamW's.
+    ap.add_argument("--lr-amuse", type=float, default=2e-3,
+                    help="AMUSE (SF-Muon) LR for Linear weights. Paper "
+                         "default 2e-3; Muon LRs are typically 5–10× "
+                         "AdamW's so don't tie this to --lr.")
+    ap.add_argument("--lr-cadamw", type=float, default=3e-4,
+                    help="SF-CAdamW LR for non-Linear params (embeddings, "
+                         "norms, biases). Same scale as --lr.")
+    ap.add_argument("--amuse-momentum", type=float, default=0.9,
+                    help="AMUSE momentum μ (per Muon).")
+    ap.add_argument("--amuse-beta1", type=float, default=0.6,
+                    help="AMUSE schedule-free interpolation β1. Paper "
+                         "uses 0.4–0.6.")
+    ap.add_argument("--amuse-ns-steps", type=int, default=5,
+                    help="Newton-Schulz iterations for the polar factor. "
+                         "5 is the Muon default; 3 is faster, slightly "
+                         "less orthogonal.")
     ap.add_argument("--scale-group-size", type=int, default=64)
     ap.add_argument("--scale-lr-mult", type=float, default=1.0,
                     help="LR multiplier for scales. Defaults to 1.0 (same as "
@@ -133,13 +153,23 @@ def main() -> None:
                          "improving by >0.5%% relative to its trend.")
     ap.add_argument("--blend-steps", type=int, default=2000,
                     help="Number of plateau-gated advances over which "
-                         "smooth_alpha cosines 1→0 (compress phase). At "
-                         "alpha=1 the forward is FP32-equivalent (teacher "
-                         "loss from step 0, no quantization shock). At "
-                         "alpha=0 pure smooth ternary. anneal_step is held "
-                         "at 0 during the entire blend phase (T stays at "
-                         "T_init, Hestia-style sequencing). Default 2000. "
-                         "Set to 0 to disable blend entirely.")
+                         "smooth_alpha linearly ramps 1→0 (compress phase, "
+                         "Hestia §3). At alpha=1 the forward is FP32-"
+                         "equivalent (teacher loss from step 0, no "
+                         "quantization shock). At alpha=0 pure smooth "
+                         "ternary. anneal_step is held at 0 during the "
+                         "entire blend phase (T stays at T_init, Hestia-"
+                         "style sequencing). Default 2000. Set to 0 to "
+                         "disable blend entirely.")
+    ap.add_argument("--alpha-init", type=float, default=1.0,
+                    help="Initial smooth_alpha on fresh start (default 1.0 = "
+                         "FP-equivalent forward at step 0). Set <1.0 to skip "
+                         "the easy high-α tail of compress (e.g. 0.7 starts "
+                         "the model at a 70/30 FP/quantized mix, saving "
+                         "wall-time spent in the regime where loss is already "
+                         "tracking L_T). Initializes blend_step to "
+                         "round((2/π)·acos(alpha_init)·blend_steps). Ignored "
+                         "on resume.")
     ap.add_argument("--t-floor", type=float, default=0.001,
                     help="Minimum temperature kept after anneal completes. "
                          "Keeps the smooth backward active (avoiding STE dead "
@@ -252,14 +282,19 @@ def main() -> None:
         for m in model.modules():
             if isinstance(m, QLinear):
                 m.use_hestia_scale = True
-                # scales = 1.0 frozen during training. γ = mean(|w|) is
-                # absorbed inside _smooth_qat_effective_weight; the outer
-                # self.scales multiply is a no-op. Deploy fold later
-                # populates scales with γ for the snapped {-1,0,+1} weights.
-                m.scales.data.fill_(1.0)
+                # Keep the loaded amax scales (from build_student) frozen.
+                # Latents live in [-1,1] (= w_orig / amax); the inner
+                # _smooth_qat_effective_weight computes γ_inner =
+                # mean(|w_latent|) and returns eff in latent magnitude.
+                # The outer self.scales multiply (= amax) restores to
+                # original magnitude, so at α=1 the forward is FP-equivalent
+                # (eff·amax = w_latent·amax = w_orig). At α=0 the deployed
+                # γ becomes mean(|w_latent|)·amax = mean(|w_orig|) — the
+                # BitNet/Hestia recipe. Deploy fold rewrites scales to that.
                 m.scales.requires_grad_(False)
-        print("[smooth] hestia-scale ON: γ=mean(|w|) per (row, group); "
-              "scales frozen at 1.0 (deploy fold restores γ)")
+        print("[smooth] hestia-scale ON: γ_inner=mean(|w_latent|), "
+              "scales=amax(|w_orig|) preserved & frozen (deploy fold "
+              "folds γ_inner into scales)")
     elif args.freeze_scales:
         for m in model.modules():
             if isinstance(m, QLinear):
@@ -275,39 +310,76 @@ def main() -> None:
         print(f"[smooth] T_init = {T_init:.4f} "
               f"(target_odds={args.t_init_odds}, anneal_steps={args.anneal_steps})")
 
-    # ---- Optimizer: two param groups (latents, scales) ----
-    scale_param_ids = {id(m.scales) for m in model.modules()
-                       if isinstance(m, QLinear)}
-    scale_params, other_params = [], []
-    for p in model.parameters():
-        if not p.requires_grad:
-            continue
-        if id(p) in scale_param_ids:
-            scale_params.append(p)
-        else:
-            other_params.append(p)
-    param_groups = [
-        {"params": other_params, "lr": args.lr, "lr_mult": 1.0,
-         "weight_decay": args.wd, "name": "latents"},
-        {"params": scale_params, "lr": args.lr * args.scale_lr_mult,
-         "lr_mult": args.scale_lr_mult, "weight_decay": args.wd,
-         "name": "scales"},
-    ]
-    OptCls = {"lion": Lion32, "adamw": AdamW32,
-              "cautious-adamw": CautiousAdamW, "prm": PRM32}[args.optimizer]
-    opt_kwargs = dict(lr=args.lr, weight_decay=args.wd)
-    if args.optimizer == "prm":
-        opt_kwargs["softness"] = args.prm_softness
-    opt = OptCls(param_groups, **opt_kwargs)
-    print(f"[opt] {args.optimizer} lr={args.lr} wd={args.wd} "
-          f"scale_lr_mult={args.scale_lr_mult:g}")
+    # ---- Optimizer ----
+    is_sf = (args.optimizer == "amuse")
+    if is_sf:
+        from .amuse import (AMUSE, ScheduleFreeCAdamW, DualOptimizer,
+                            split_amuse_cadamw_params)
+        matrix_params, other_params = split_amuse_cadamw_params(model)
+        amuse = AMUSE(
+            [{"params": matrix_params, "lr": args.lr_amuse,
+              "lr_mult": 1.0, "weight_decay": args.wd, "name": "amuse"}],
+            lr=args.lr_amuse, momentum=args.amuse_momentum,
+            beta1=args.amuse_beta1, weight_decay=args.wd,
+            warmup_steps=args.warmup_steps,
+            ns_steps=args.amuse_ns_steps,
+        )
+        cadamw = ScheduleFreeCAdamW(
+            [{"params": other_params, "lr": args.lr_cadamw,
+              "lr_mult": 1.0, "weight_decay": args.wd, "name": "cadamw"}],
+            lr=args.lr_cadamw, weight_decay=args.wd,
+            warmup_steps=args.warmup_steps,
+        )
+        opt = DualOptimizer(amuse=amuse, cadamw=cadamw)
+        n_matrix = sum(p.numel() for p in matrix_params)
+        n_other = sum(p.numel() for p in other_params)
+        print(f"[opt] amuse lr={args.lr_amuse} β1={args.amuse_beta1} "
+              f"μ={args.amuse_momentum} ({len(matrix_params)} matrices, "
+              f"{n_matrix/1e6:.1f}M params) + "
+              f"sf-cadamw lr={args.lr_cadamw} "
+              f"({len(other_params)} tensors, {n_other/1e6:.1f}M params), "
+              f"warmup={args.warmup_steps}")
+        # Schedule-free → constant LR (no cosine), warmup baked in.
+    else:
+        scale_param_ids = {id(m.scales) for m in model.modules()
+                           if isinstance(m, QLinear)}
+        scale_params, other_params = [], []
+        for p in model.parameters():
+            if not p.requires_grad:
+                continue
+            if id(p) in scale_param_ids:
+                scale_params.append(p)
+            else:
+                other_params.append(p)
+        param_groups = [
+            {"params": other_params, "lr": args.lr, "lr_mult": 1.0,
+             "weight_decay": args.wd, "name": "latents"},
+            {"params": scale_params, "lr": args.lr * args.scale_lr_mult,
+             "lr_mult": args.scale_lr_mult, "weight_decay": args.wd,
+             "name": "scales"},
+        ]
+        OptCls = {"lion": Lion32, "adamw": AdamW32,
+                  "cautious-adamw": CautiousAdamW,
+                  "prm": PRM32}[args.optimizer]
+        opt_kwargs = dict(lr=args.lr, weight_decay=args.wd)
+        if args.optimizer == "prm":
+            opt_kwargs["softness"] = args.prm_softness
+        opt = OptCls(param_groups, **opt_kwargs)
+        print(f"[opt] {args.optimizer} lr={args.lr} wd={args.wd} "
+              f"scale_lr_mult={args.scale_lr_mult:g}")
 
     # ---- Resume ----
     interrupted_state = None
     global_step = 0
     samples_consumed = 0
     anneal_step = 0
-    blend_step = 0
+    # Map --alpha-init back into a blend_step offset via the inverse of the
+    # linear ramp α = 1 - blend_step/blend_steps. Clamped to [0, blend_steps].
+    if args.blend_steps > 0 and 0.0 <= args.alpha_init < 1.0:
+        blend_step = round((1.0 - args.alpha_init) * args.blend_steps)
+        blend_step = max(0, min(blend_step, args.blend_steps))
+    else:
+        blend_step = 0
     slow_ema: float | None = None
     fast_ema: float | None = None
     T_at_best: float = float("inf")  # T when best_snapshot was taken
@@ -397,9 +469,9 @@ def main() -> None:
                            purge_step=global_step if global_step else None)
     print(f"[tb] {run_dir}")
     writer.add_text("stage", "  \n".join([
-        "**qat_smooth** (Hestia-style sequenced: cosine blend → anneal → exit)",
+        "**qat_smooth** (Hestia-style sequenced: linear blend → anneal → exit)",
         f"- T_init = {T_init:.4f}, anneal_steps = {args.anneal_steps} (plateau-gated)",
-        f"- blend_steps = {args.blend_steps} (plateau-gated, cosine α 1→0)",
+        f"- blend_steps = {args.blend_steps} (plateau-gated, linear α 1→0)",
         f"- slow_ema_alpha = {args.slow_ema_alpha} (window ~{1/args.slow_ema_alpha:.0f} steps)",
         f"- anneal_gap_thr = {args.anneal_gap_thr}, t_floor = {args.t_floor}",
         f"- calib_file = {args.calib_file}",
@@ -451,20 +523,26 @@ def main() -> None:
                 T_global = T_init
             at_floor = blend_done and (anneal_step >= args.anneal_steps)
             set_smooth_temp(model, T_global, temp_scales, at_floor=at_floor)
-            # Cosine (not linear) blend so dα/dt → 0 as α → 0: smooths the
-            # gradient-scale regime change at α=0.
+            # Linear ramp matching Hestia §3 pressure parameter
+            # p_t = min(1, t/(ρT)); here α = 1 - p_t.
             if args.blend_steps > 0:
                 blend_frac = min(blend_step, args.blend_steps) / args.blend_steps
-                smooth_alpha = math.cos(math.pi / 2 * blend_frac)
+                smooth_alpha = max(0.0, 1.0 - blend_frac)
             else:
                 smooth_alpha = 0.0
             set_smooth_alpha(model, smooth_alpha)
 
-            cur_lr = lr_at(global_step, nominal_total, args.lr,
-                           args.warmup_steps, floor=args.lr_floor)
-            for g in opt.param_groups:
-                g["lr"] = cur_lr * g.get("lr_mult", 1.0)
-                g["weight_decay"] = args.wd
+            if is_sf:
+                # Schedule-free: warmup + constant lr handled inside the
+                # optimizer; just hold lr at its target and use it for
+                # logging. Cosine off (point of schedule-free).
+                cur_lr = args.lr_amuse  # nominal — TB logs only
+            else:
+                cur_lr = lr_at(global_step, nominal_total, args.lr,
+                               args.warmup_steps, floor=args.lr_floor)
+                for g in opt.param_groups:
+                    g["lr"] = cur_lr * g.get("lr_mult", 1.0)
+                    g["weight_decay"] = args.wd
 
             for _ in range(args.grad_accum):
                 batch = next(it)
@@ -655,8 +733,12 @@ def main() -> None:
                                           torch.sign(w_norm),
                                           torch.zeros_like(w_norm))
                     m.weight.data.copy_(ternary.view(out_f, in_f))
-                    # scales picks up γ (was frozen at 1.0 during training)
-                    m.scales.data.copy_(gamma.squeeze(-1).to(m.scales.dtype))
+                    # Fold γ_inner into scales: scales was amax(|w_orig|),
+                    # γ_inner = mean(|w_latent|), so the product equals
+                    # mean(|w_orig|) — the deployed Hestia γ. Inference
+                    # then computes ternary·γ in the original magnitude.
+                    m.scales.data.mul_(
+                        gamma.squeeze(-1).to(m.scales.dtype))
                 else:
                     c_elem = (m.codepoint_c.unsqueeze(-1)
                               .expand(out_f, m.n_groups, m.group_size)
@@ -673,6 +755,13 @@ def main() -> None:
 
     print(f"[smooth] complete after {global_step} steps  "
           f"(anneal_step={anneal_step}/{args.anneal_steps})")
+    if is_sf:
+        # Swap p.data from y (train) to x (averaged) so we deploy the
+        # actual schedule-free target weights, not the gradient-eval
+        # point. interrupted.pt was saved with y in p.data — resuming
+        # will call .train() automatically (state.train_mode is True).
+        opt.eval()
+        print("[smooth] opt.eval(): folding from averaged X")
     _deploy_fold()
 
     out_ckpt = args.out / "stage_smooth.safetensors"
