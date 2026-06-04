@@ -82,8 +82,9 @@ if [ "$EXIT" -ne 0 ]; then
 fi
 
 # ---- Parse metrics from log + TB --------------------------------------------
-# Last [val] step loss=Y line:
-VAL_LINE=$(grep '^\[val\]' "$OUT_DIR/train.log" | tail -1 || true)
+# tqdm uses CR not LF for progress updates, so [val] lines end up on the same
+# physical line as the surrounding tqdm bar. Convert CR→LF before grep.
+VAL_LINE=$(tr '\r' '\n' < "$OUT_DIR/train.log" | grep '^\[val\]' | tail -1 || true)
 if [ -z "$VAL_LINE" ]; then
     echo "ERROR: no [val] line in $OUT_DIR/train.log" >&2
     exit 3
