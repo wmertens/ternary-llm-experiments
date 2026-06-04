@@ -309,16 +309,23 @@ class QLinear(nn.Linear):
 
         Scale source — set by self.use_hestia_scale:
           * False (legacy):  γ = self.codepoint_c (learnable then frozen)
-          * True (Hestia):   γ = mean(|w|) per (row, group), recomputed each
-                             forward. Autograd-traced (no detach), so the
-                             latent sees a small gradient via the chain
-                             rule through |w|.
+          * True (Hestia):   γ_inner = mean(|w_latent|) per (row, group),
+                             recomputed each forward, then DETACHED from
+                             autograd (Hestia §3.1: γ is treated as a
+                             constant during backpropagation). This gives
+                             each weight a clean independent gradient
+                             instead of entangling per-group neighbors via
+                             the shared scale. The OUTER self.scales (=
+                             amax(|w_orig|), preserved from build_student)
+                             restores the original-weight magnitude: full
+                             forward uses w_q · γ_inner · amax = w_q ·
+                             mean(|w_orig|), the BitNet/Hestia recipe.
 
-        w_norm  = latent / γ
+        w_norm  = latent / γ_inner
         w_quant = E_{probs}[k]  where probs_k ∝ exp(-‖w_norm-k‖²/T)
-        eff     = w_quant · γ   (the outer self.scales multiply must be 1
-                                 in Hestia mode — γ already restores the
-                                 magnitude.)
+        eff     = w_quant · γ_inner   (returned in latent magnitude; outer
+                                       self.scales=amax restores w_orig
+                                       magnitude in QLinear.forward.)
 
         When smooth_alpha > 0, blends with the FP32 latent to suppress the
         initial quantization shock:
@@ -337,7 +344,13 @@ class QLinear(nn.Linear):
         wb = w.view(out_f, self.n_groups, self.group_size)
 
         if getattr(self, "use_hestia_scale", False):
-            s_eff = wb.abs().mean(dim=-1, keepdim=True).clamp_min(1e-8)
+            # Detach γ from autograd (Hestia §3.1: "treat γ as a constant
+            # during backpropagation"). Without this, the gradient flows
+            # back through |w| and entangles every weight in a (row, group)
+            # with its neighbors via the shared scale — each weight's
+            # update direction then depends on its neighbors' positions.
+            # Detaching gives each weight a clean independent gradient.
+            s_eff = wb.abs().mean(dim=-1, keepdim=True).clamp_min(1e-8).detach()
         else:
             s_eff = self.codepoint_c.unsqueeze(-1).to(wb.dtype).clamp_min(1e-8)
 

@@ -23,6 +23,7 @@ smollmer-distill  = "smollmer.distill:main"
 smollmer-finalize = "smollmer.finalize:main"
 smollmer-chat     = "smollmer.chat:main"
 smollmer-fix-ckpt = "smollmer.fix_checkpoint:main"
+smollmer-hrm-bop  = "smollmer.hrm_bop:main"
 
 [build-system]
 requires = ["hatchling"]
