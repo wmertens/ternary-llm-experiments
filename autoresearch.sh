@@ -19,9 +19,9 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="001"
-RUN_TAG="baseline-hrm-G"
-DESCRIPTION="hrm-G recipe replay: random lognormal frozen scales, frozen non-embed FP, Lion-on-embed, Bop Bet1 tau_norm=0.15"
+RUN_N="002"
+RUN_TAG="cautious-bop"
+DESCRIPTION="Bop with cautious mask (sign(m)==sign(g_t)); else identical to baseline"
 
 RUN_NAME="r${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments/${RUN_NAME}"
@@ -39,7 +39,7 @@ CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. The baseline replays
 # hrm-G exactly:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-scales --freeze-non-embed-fp}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-scales --freeze-non-embed-fp --cautious-bop}"
 
 mkdir -p "$OUT_DIR" tb
 

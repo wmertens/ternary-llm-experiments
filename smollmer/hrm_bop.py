@@ -31,13 +31,14 @@ from safetensors.torch import load_file, save_file
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
+from .cmuon import CMuon
 from .distill import (BestEmaTracker, Lion32, _INTERRUPT,
                       _install_sigint_handler, lr_at, save_resume,
                       snapshot_to_cpu)
 from .flip_distill import BopTernary, m_stats, trit_stats
 from .hrm_data import make_train_loader, make_val_loader
 from .hrm_model import HrmBopConfig, HrmBopModel, RMSNorm
-from .qlinear import QLinear
+from .qlinear import QLinear, clamp_qlinear_weights, quantize_levels
 
 
 # ---------------------------------------------------------------- init
@@ -178,6 +179,59 @@ def split_params(model: HrmBopModel) -> tuple[list[nn.Parameter],
         if p.requires_grad:
             fp.append(p)
     return trits, scales, fp
+
+
+@torch.no_grad()
+def quantized_codes_snapshot(model: nn.Module) -> dict[int, torch.Tensor]:
+    """Snapshot the quantized {-1, 0, +1} code per QLinear weight (by id(m)).
+    Used to compute step-to-step code flip rate when --ste-trits is on —
+    Bop's flip counter doesn't apply since the latent is continuous."""
+    snap: dict[int, torch.Tensor] = {}
+    for m in model.modules():
+        if isinstance(m, QLinear):
+            q = quantize_levels(m.weight.data, m.levels)
+            snap[id(m)] = q.to(torch.int8).cpu()
+    return snap
+
+
+@torch.no_grad()
+def code_flip_count(model: nn.Module,
+                    prev: dict[int, torch.Tensor]) -> tuple[int, int,
+                                                            dict[int, torch.Tensor]]:
+    """Count trits whose quantized code changed since the prev snapshot.
+    Returns (n_flips, n_trits, new_snapshot). If prev is empty (first call),
+    returns 0 flips and just records the snapshot."""
+    n_flips = 0
+    n_trits = 0
+    new: dict[int, torch.Tensor] = {}
+    for m in model.modules():
+        if not isinstance(m, QLinear):
+            continue
+        q = quantize_levels(m.weight.data, m.levels).to(torch.int8).cpu()
+        new[id(m)] = q
+        n_trits += q.numel()
+        old = prev.get(id(m))
+        if old is not None and old.shape == q.shape:
+            n_flips += int((q != old).sum().item())
+    return n_flips, n_trits, new
+
+
+@torch.no_grad()
+def trit_stats_quantized(model: nn.Module) -> dict[str, float]:
+    """trit_stats but reading from the quantized code (works for both Bop
+    discrete-weight and STE continuous-latent modes)."""
+    n = pos = neg = z = 0
+    for m in model.modules():
+        if not isinstance(m, QLinear):
+            continue
+        q = quantize_levels(m.weight.data, m.levels)
+        n += q.numel()
+        z += int((q == 0).sum().item())
+        pos += int((q > 0.5).sum().item())
+        neg += int((q < -0.5).sum().item())
+    n = max(1, n)
+    return {"frac_zero": z / n, "frac_pos": pos / n, "frac_neg": neg / n,
+            "n_trits": n}
 
 
 def trit_stats_per_stack(model: HrmBopModel) -> dict[str, float]:
@@ -355,6 +409,37 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--tau-norm", type=float, default=0.5,
                     help="Flip threshold on |m|/sqrt(v). Bet-1 default.")
     ap.add_argument("--bop-eps", type=float, default=1e-12)
+    ap.add_argument("--cautious-bop", action="store_true", default=False,
+                    help="Liang et al. 2024 cautious mask applied to Bop: "
+                         "flip only when sign(m) == sign(g_t) (m·g_t > 0). "
+                         "Filters oscillating trits whose m has saturated "
+                         "but whose current step disagrees with the EMA.")
+    # STE + alternative trit optimizers (mutually exclusive with --cautious-bop
+    # actually applying — when --ste-trits the trit optimizer changes entirely).
+    ap.add_argument("--ste-trits", action="store_true", default=False,
+                    help="Treat QLinear.weight as a continuous latent in "
+                         "[-1, 1] with STE quantization to {-1, 0, +1} at "
+                         "forward (mode=levels, levels=3 already does this). "
+                         "Skips the discrete random-ternary init; latents "
+                         "start from the standard Normal(0, --init-std) Linear "
+                         "init. After each opt step, latents are clamped back "
+                         "into [-1, 1]. Required for the continuous trit "
+                         "optimizers (--c-muon).")
+    ap.add_argument("--c-muon", action="store_true", default=False,
+                    help="Cautious Muon (Jordan 2024 + Liang 2024) on trit "
+                         "latents. Replaces BopTernary for the trit weights; "
+                         "non-trit FP params still go to Lion. Requires "
+                         "--ste-trits.")
+    ap.add_argument("--muon-lr", type=float, default=0.02,
+                    help="Learning rate for CMuon (default 0.02 per Jordan's "
+                         "blog). The orthogonalized update has Frobenius "
+                         "norm ~sqrt(min(m,n)), so effective per-coord step "
+                         "is muon-lr · sqrt(min(m,n))/sqrt(m*n) ≈ muon-lr / "
+                         "sqrt(max(m,n)).")
+    ap.add_argument("--muon-beta", type=float, default=0.95,
+                    help="CMuon first-moment EMA.")
+    ap.add_argument("--muon-ns-steps", type=int, default=5,
+                    help="Newton-Schulz iterations per CMuon step.")
     # Lion hyperparams
     ap.add_argument("--lr", type=float, default=5e-4)
     ap.add_argument("--lr-floor", type=float, default=0.1,
@@ -453,10 +538,25 @@ def main() -> None:
         print("[build] --grad-checkpointing requested but the model exposes "
               "no enable hook; ignoring.", flush=True)
 
+    # Validate STE/CMuon flag combination.
+    if args.c_muon and not args.ste_trits:
+        print("[arg] --c-muon requires --ste-trits; forcing --ste-trits on.",
+              flush=True)
+        args.ste_trits = True
+
     # ---- Init (fresh-start only) ----
     if fresh_start:
         gen = torch.Generator(device=args.device).manual_seed(args.init_seed)
-        n_t = init_trits_random(model, zero_frac=args.init_zero_frac, generator=gen)
+        if args.ste_trits:
+            # Continuous latents from the standard Normal(0, init-std) Linear
+            # init (already applied by HrmBopModel._init_weights); just skip
+            # the discrete random-ternary overwrite.
+            n_t = sum(1 for m in model.modules() if isinstance(m, QLinear))
+            print(f"[init] STE mode: leaving {n_t} QLinear latents at "
+                  f"Normal(0, {cfg.initializer_range}) Linear init", flush=True)
+        else:
+            n_t = init_trits_random(model, zero_frac=args.init_zero_frac,
+                                    generator=gen)
         if args.random_scales:
             scale_gen = torch.Generator(device=args.device).manual_seed(
                 args.init_seed + 1)
@@ -495,13 +595,24 @@ def main() -> None:
           f"scales={sum(p.numel() for p in scale_params)/1e6:.3f}M, "
           f"fp={sum(p.numel() for p in fp_params)/1e6:.1f}M", flush=True)
 
-    opt_bop = BopTernary(trit_params, gamma=args.gamma, tau=1.0,
-                         use_2nd_moment=True,
-                         gamma_v=args.gamma_v,
-                         tau_norm=args.tau_norm,
-                         eps=args.bop_eps,
-                         reset_on_flip=False,
-                         refractory=0)
+    # Trit optimizer: Bop (latent-free) by default, or CMuon for --c-muon.
+    opt_bop: BopTernary | None = None
+    opt_cmuon: CMuon | None = None
+    if args.c_muon:
+        opt_cmuon = CMuon(trit_params, lr=args.muon_lr, beta=args.muon_beta,
+                          ns_steps=args.muon_ns_steps, cautious=True)
+        print(f"[opt] CMuon trit opt lr={args.muon_lr:g} "
+              f"beta={args.muon_beta:g} ns={args.muon_ns_steps} cautious=True",
+              flush=True)
+    else:
+        opt_bop = BopTernary(trit_params, gamma=args.gamma, tau=1.0,
+                             use_2nd_moment=True,
+                             gamma_v=args.gamma_v,
+                             tau_norm=args.tau_norm,
+                             eps=args.bop_eps,
+                             reset_on_flip=False,
+                             refractory=0,
+                             cautious=args.cautious_bop)
     lion_groups: list[dict] = []
     if scale_params:
         lion_groups.append({"params": scale_params, "lr": args.lr})
@@ -535,23 +646,31 @@ def main() -> None:
                                        weights_only=False)
         model.load_state_dict(interrupted_state["model"], strict=False)
         del interrupted_state["model"]
-        opt_bop.load_state_dict(interrupted_state["opt_bop"])
+        if opt_bop is not None and "opt_bop" in interrupted_state:
+            opt_bop.load_state_dict(interrupted_state["opt_bop"])
+            del interrupted_state["opt_bop"]
+        if opt_cmuon is not None and "opt_cmuon" in interrupted_state:
+            opt_cmuon.load_state_dict(interrupted_state["opt_cmuon"])
+            del interrupted_state["opt_cmuon"]
         opt_lion.load_state_dict(interrupted_state["opt_lion"])
-        del interrupted_state["opt_bop"], interrupted_state["opt_lion"]
+        del interrupted_state["opt_lion"]
         # PyTorch's load_state_dict restores param_groups from the resume
         # file, clobbering the CLI-set hyperparams. Re-apply them so a
-        # mid-run retune (--tau-norm, --gamma, --gamma-v, --lr) actually
-        # takes effect on the warm-resumed run.
-        for g in opt_bop.param_groups:
-            g["tau_norm"] = args.tau_norm
-            g["gamma"] = args.gamma
-            g["gamma_v"] = args.gamma_v
-            g["eps"] = args.bop_eps
+        # mid-run retune actually takes effect on the warm-resumed run.
+        if opt_bop is not None:
+            for g in opt_bop.param_groups:
+                g["tau_norm"] = args.tau_norm
+                g["gamma"] = args.gamma
+                g["gamma_v"] = args.gamma_v
+                g["eps"] = args.bop_eps
+        if opt_cmuon is not None:
+            for g in opt_cmuon.param_groups:
+                g["lr"] = args.muon_lr
+                g["beta"] = args.muon_beta
         for g in opt_lion.param_groups:
             g["lr"] = args.lr     # cosine sched re-applies each step anyway
-        print(f"[resume] reapplied tau_norm={args.tau_norm:g} "
-              f"gamma={args.gamma:g} lr={args.lr:g} over loaded opt state",
-              flush=True)
+        print(f"[resume] reapplied trit-opt + lion hyperparams over loaded "
+              f"opt state", flush=True)
         global_step = int(interrupted_state.get("next_step", 0))
         samples_consumed = int(interrupted_state.get(
             "samples_consumed",
@@ -626,8 +745,16 @@ def main() -> None:
     window_t0 = time.time()
     pbar = tqdm(desc="hrmbop", dynamic_ncols=True,
                 initial=global_step, total=args.total_steps)
-    opt_bop.zero_grad(set_to_none=True)
+    if opt_bop is not None:
+        opt_bop.zero_grad(set_to_none=True)
+    if opt_cmuon is not None:
+        opt_cmuon.zero_grad(set_to_none=True)
     opt_lion.zero_grad(set_to_none=True)
+    # For STE mode: snapshot quantized codes once at fresh start so the
+    # first window's code_flip_count has a baseline.
+    prev_codes: dict[int, torch.Tensor] = {}
+    if args.ste_trits:
+        prev_codes = quantized_codes_snapshot(model)
 
     try:
         while global_step < args.total_steps:
@@ -663,24 +790,39 @@ def main() -> None:
                 fp_gnorm = float(torch.nn.utils.clip_grad_norm_(
                     fp_params + scale_params, args.max_grad_norm))
 
-            # --- Bop step + Lion step ---
-            n_flips, n_elems = opt_bop.step()
+            # --- Trit opt step (Bop or CMuon) + Lion step ---
+            cmuon_zeroed_frac = 0.0
+            if opt_bop is not None:
+                n_flips, n_elems = opt_bop.step()
+            elif opt_cmuon is not None:
+                _, cmuon_zeroed_frac = opt_cmuon.step()
+                # In STE mode the "code flip rate" is computed from
+                # quantized-code diffs below in the logging block, not here.
+                n_flips, n_elems = 0, 0
+            else:
+                n_flips, n_elems = 0, 0
             opt_lion.step()
             # Constrain per-(row, group) scales to be strictly positive.
             # Lion's sign update has no positivity bias, so without this clamp
-            # scales drift through zero — Bop's g_t = s · dL/dW then has its
-            # sign relative to dL/dW flipped, scrambling the flip-direction
-            # logic. (Negative-scale info is degenerate: same forward can be
-            # had with +|s| and negated trits.) Confirmed empirically in the
-            # initial hrm-A-bop run: scales drifted to ±3 by step 6k while
-            # the flip rate stayed at zero.
+            # scales drift through zero (see hrm_bop_spec.md "negative scales"
+            # failure mode).
             with torch.no_grad():
                 for s in scale_params:
                     s.data.clamp_min_(1e-6)
+            # STE: keep trit latents in box. The forward STE clips to [-1, 1]
+            # inside quantize_levels anyway, but the latent itself can drift
+            # past the boundaries under Muon's update; out-of-box latents are
+            # wasted capacity since the quantized code can't change until the
+            # latent re-enters.
+            if args.ste_trits:
+                clamp_qlinear_weights(model, lo=-1.0, hi=1.0)
             flips_window += n_flips
             elems_window += n_elems
             invalidate_all_q_caches(model)
-            opt_bop.zero_grad(set_to_none=True)
+            if opt_bop is not None:
+                opt_bop.zero_grad(set_to_none=True)
+            if opt_cmuon is not None:
+                opt_cmuon.zero_grad(set_to_none=True)
             opt_lion.zero_grad(set_to_none=True)
             global_step += 1
 
@@ -691,9 +833,21 @@ def main() -> None:
 
             # --- Periodic logging ---
             if global_step % args.log_every == 0:
-                rate = flips_window / max(1, elems_window)
                 t1 = time.time()
                 tps = tokens_window / max(1e-6, t1 - window_t0)
+                # Flip rate semantics differ between Bop and STE+CMuon:
+                #   Bop: count flips the opt's own discrete flip rule did
+                #        in the window (flips_window / elems_window).
+                #   STE: count trits whose quantized code changed between
+                #        the start and end of this window — a real measure
+                #        of how much the continuous latent moved relative
+                #        to the ±1/3 boundaries.
+                if args.ste_trits:
+                    n_diff, n_trits, prev_codes = code_flip_count(
+                        model, prev_codes)
+                    rate = n_diff / max(1, n_trits) / max(1, args.log_every)
+                else:
+                    rate = flips_window / max(1, elems_window)
                 postfix = {
                     "step": global_step,
                     "loss": f"{step_loss:.4f}",
@@ -708,16 +862,27 @@ def main() -> None:
                     writer.add_scalar("loss/ema", ctrl.ema, global_step)
                     writer.add_scalar("loss/best", ctrl.best_ema, global_step)
                 writer.add_scalar("bop/flip_rate", rate, global_step)
-                writer.add_scalar("bop/flip_count", flips_window, global_step)
-                ms = m_stats(opt_bop)
-                writer.add_scalar("bop/m_rms", ms["m_rms"], global_step)
-                writer.add_scalar("bop/m_max", ms["m_max"], global_step)
-                if "score_rms" in ms:
-                    writer.add_scalar("bop/score_rms", ms["score_rms"],
+                if opt_bop is not None:
+                    writer.add_scalar("bop/flip_count", flips_window,
                                       global_step)
-                    writer.add_scalar("bop/score_max", ms["score_max"],
+                    ms = m_stats(opt_bop)
+                    writer.add_scalar("bop/m_rms", ms["m_rms"], global_step)
+                    writer.add_scalar("bop/m_max", ms["m_max"], global_step)
+                    if "score_rms" in ms:
+                        writer.add_scalar("bop/score_rms", ms["score_rms"],
+                                          global_step)
+                        writer.add_scalar("bop/score_max", ms["score_max"],
+                                          global_step)
+                if opt_cmuon is not None:
+                    writer.add_scalar("cmuon/cautious_zeroed_frac",
+                                      cmuon_zeroed_frac, global_step)
+                    writer.add_scalar("cmuon/lr",
+                                      opt_cmuon.param_groups[0]["lr"],
                                       global_step)
-                ts = trit_stats(model)
+                # In STE mode the latent is continuous; read trit fractions
+                # from the quantized code instead of the raw weight.
+                ts = (trit_stats_quantized(model) if args.ste_trits
+                      else trit_stats(model))
                 writer.add_scalar("trits/frac_zero", ts["frac_zero"], global_step)
                 writer.add_scalar("trits/frac_pos", ts["frac_pos"], global_step)
                 writer.add_scalar("trits/frac_neg", ts["frac_neg"], global_step)
@@ -772,11 +937,13 @@ def main() -> None:
                     writer.add_histogram("hist/scales/all", all_s, global_step)
                 # Sample 1M m values to keep TB happy.
                 ms_all: list[torch.Tensor] = []
-                for group in opt_bop.param_groups:
-                    for p in group["params"]:
-                        st = opt_bop.state.get(p)
-                        if st and "m" in st:
-                            ms_all.append(st["m"].flatten())
+                opt_for_hist = opt_bop if opt_bop is not None else opt_cmuon
+                if opt_for_hist is not None:
+                    for group in opt_for_hist.param_groups:
+                        for p in group["params"]:
+                            st = opt_for_hist.state.get(p)
+                            if st and "m" in st:
+                                ms_all.append(st["m"].flatten())
                 if ms_all:
                     flat = torch.cat(ms_all)
                     if flat.numel() > 1_000_000:
@@ -796,15 +963,15 @@ def main() -> None:
             samples_at_save = global_step * args.grad_accum * args.batch_size
             if (args.checkpoint_every > 0
                     and global_step % args.checkpoint_every == 0):
-                _save_resume(interrupted_path, model, opt_bop, opt_lion,
-                             global_step, best_snapshot, ctrl, run_name,
-                             samples_at_save)
+                _save_resume(interrupted_path, model, opt_bop, opt_cmuon,
+                             opt_lion, global_step, best_snapshot, ctrl,
+                             run_name, samples_at_save)
                 tqdm.write(f"[ckpt] {interrupted_path} @ step {global_step}")
 
             if _INTERRUPT["flag"]:
-                _save_resume(interrupted_path, model, opt_bop, opt_lion,
-                             global_step, best_snapshot, ctrl, run_name,
-                             samples_at_save)
+                _save_resume(interrupted_path, model, opt_bop, opt_cmuon,
+                             opt_lion, global_step, best_snapshot, ctrl,
+                             run_name, samples_at_save)
                 writer.flush()
                 writer.close()
                 pbar.close()
@@ -849,17 +1016,14 @@ def main() -> None:
         interrupted_path.unlink()
 
 
-def _save_resume(path: Path, model, opt_bop, opt_lion, next_step: int,
-                 best_snapshot, ctrl, run_name: str,
+def _save_resume(path: Path, model, opt_bop, opt_cmuon, opt_lion,
+                 next_step: int, best_snapshot, ctrl, run_name: str,
                  samples_consumed: int) -> None:
-    """hrm_bop-flavored resume save: two optimizers instead of one.
-
-    Mirrors save_resume from distill.py but with the second optimizer's
-    state. interrupted.pt is the only on-disk file; atomic .tmp rename.
+    """hrm_bop-flavored resume save: trit-opt (Bop or CMuon, whichever is
+    live) + Lion. interrupted.pt is the only on-disk file; atomic .tmp rename.
     """
     payload = {
         "model": {k: v.detach().cpu() for k, v in model.state_dict().items()},
-        "opt_bop": opt_bop.state_dict(),
         "opt_lion": opt_lion.state_dict(),
         "next_step": int(next_step),
         "samples_consumed": int(samples_consumed),
@@ -867,6 +1031,10 @@ def _save_resume(path: Path, model, opt_bop, opt_lion, next_step: int,
         "ctrl_state": ctrl.state_dict() if ctrl is not None else None,
         "run_name": run_name,
     }
+    if opt_bop is not None:
+        payload["opt_bop"] = opt_bop.state_dict()
+    if opt_cmuon is not None:
+        payload["opt_cmuon"] = opt_cmuon.state_dict()
     tmp = path.with_suffix(path.suffix + ".tmp")
     torch.save(payload, str(tmp))
     tmp.replace(path)

@@ -78,7 +78,8 @@ class BopTernary(torch.optim.Optimizer):
                  tau_norm: float = 1.0,
                  eps: float = 1e-12,
                  reset_on_flip: bool = False,
-                 refractory: int = 0) -> None:
+                 refractory: int = 0,
+                 cautious: bool = False) -> None:
         if not (0.0 < gamma <= 1.0):
             raise ValueError(f"gamma must be in (0, 1], got {gamma}")
         if tau <= 0.0:
@@ -97,7 +98,8 @@ class BopTernary(torch.optim.Optimizer):
                         gamma_v=float(gamma_v) if gamma_v is not None else float(gamma),
                         tau_norm=float(tau_norm), eps=float(eps),
                         reset_on_flip=bool(reset_on_flip),
-                        refractory=int(refractory))
+                        refractory=int(refractory),
+                        cautious=bool(cautious))
         super().__init__(params, defaults)
 
     @torch.no_grad()
@@ -113,6 +115,7 @@ class BopTernary(torch.optim.Optimizer):
             eps = float(group["eps"])
             reset_on_flip = bool(group["reset_on_flip"])
             refractory = int(group["refractory"])
+            cautious = bool(group.get("cautious", False))
             for p in group["params"]:
                 if p.grad is None:
                     continue
@@ -160,6 +163,16 @@ class BopTernary(torch.optim.Optimizer):
                     flip = (score > tau_norm) & valid
                 else:
                     flip = (m.abs() > tau) & valid
+
+                # Cautious (Liang et al. 2024, arXiv:2411.16085, applied to
+                # Bop): only flip when this step's gradient direction agrees
+                # with the EMA's direction, i.e. the current g_t reinforces
+                # the accumulated signal. `direction = -sign(m)`; want
+                # direction == -sign(g_t), i.e. sign(m) == sign(g_t), i.e.
+                # m·g_t > 0. Filters trits where m has saturated but the
+                # current step disagrees — exactly the oscillation regime.
+                if cautious:
+                    flip = flip & ((m * g_t) > 0)
 
                 # Bet 5: refractory lockout. Decrement counter every step;
                 # while > 0, the trit can't flip. Applied BEFORE candidate
