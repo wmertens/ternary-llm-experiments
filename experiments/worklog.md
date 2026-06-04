@@ -21,7 +21,34 @@ knob.
 
 ## Run-by-run log
 
-(Updated by the loop after each experiment.)
+### Run 1: baseline-hrm-G — val_loss=6.9074 (KEEP, baseline)
+- Timestamp: 2026-06-04 11:04 → 16:24 (5h20m)
+- What ran: hrm-G recipe at 2500 steps. `--random-scales --freeze-scales
+  --freeze-non-embed-fp`, bs=2 ga=16, τ_norm=0.15, γ=γ_v=1e-3, lr=5e-4.
+- Result: val_loss=**6.9074**, loss_ema=6.8269, flip_rate=3.86e-6,
+  frac_zero δ=-1.1% (1.1% of trits left zero), per-loop gap=0.039 nats.
+- Insight: val at 2500 (6.91) is much higher than expected (predicted
+  ~6.6 from prior hrm-G trajectory). Reason: this run uses
+  `--ema-warmup 200` (vs prior hrm-G's 500), so the EMA tracker is
+  different — but val is direct, not EMA. The real diff: prior hrm-G
+  was at val 6.83 at *step 2000* in a 40k-budget cosine schedule, not
+  step 2500 in a 2500-budget schedule. The shorter budget means the
+  cosine decay is much steeper — at step 2500/2500 we're already deep
+  in the cosine tail (lr ≈ 0.55e-4) whereas the 40k-budget at step
+  2500 was still near peak (lr ≈ 4.84e-4). The val descent slowed
+  dramatically in the last 500 steps as Lion's LR collapsed.
+- **Implication for the budget**: 2500 steps with cosine-to-floor IS
+  the test budget, not "what hrm-G looked like at step 2500 on the
+  longer run." This is fine — we're optimizing the FIXED-BUDGET val
+  loss. But it means improvements are measured against 6.9074, not
+  the 6.83 we'd have predicted.
+- Tooling note: autoresearch.sh's grep '^[val]' missed tqdm's CR-
+  embedded val lines on the first try; fixed in commit 64dfda5
+  (pre-Run-1 commit, separate from the result).
+- Next: Run 2 — add **cautious mask** (`m·g_t > 0` AND existing flip
+  rule) to BopTernary. Lowest-cost win in the queue: one-line code
+  change, expected to let τ_norm drop without random-walking, which
+  should boost flip activity without hurting per-flip quality.
 
 ---
 
