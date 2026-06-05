@@ -440,6 +440,16 @@ def build_argparser() -> argparse.ArgumentParser:
                     help="CMuon first-moment EMA.")
     ap.add_argument("--muon-ns-steps", type=int, default=5,
                     help="Newton-Schulz iterations per CMuon step.")
+    ap.add_argument("--lion-trits", action="store_true", default=False,
+                    help="STE+Lion32 on trit latents (bitlooplm-style). "
+                         "Mutually exclusive with --c-muon. Requires "
+                         "--ste-trits.")
+    ap.add_argument("--lion-trit-lr", type=float, default=5e-4,
+                    help="LR for the trit-side Lion (separate from FP Lion).")
+    ap.add_argument("--int8-activations", action="store_true", default=False,
+                    help="BitNet-style per-token absmax int8 STE on the input "
+                         "to every QLinear. Approximately halves activation "
+                         "memory and adds quantization noise in the gradient.")
     # Lion hyperparams
     ap.add_argument("--lr", type=float, default=5e-4)
     ap.add_argument("--lr-floor", type=float, default=0.1,
@@ -538,10 +548,12 @@ def main() -> None:
         print("[build] --grad-checkpointing requested but the model exposes "
               "no enable hook; ignoring.", flush=True)
 
-    # Validate STE/CMuon flag combination.
-    if args.c_muon and not args.ste_trits:
-        print("[arg] --c-muon requires --ste-trits; forcing --ste-trits on.",
-              flush=True)
+    # Validate STE/CMuon/Lion-trit flag combination.
+    if args.c_muon and args.lion_trits:
+        raise ValueError("--c-muon and --lion-trits are mutually exclusive")
+    if (args.c_muon or args.lion_trits) and not args.ste_trits:
+        print(f"[arg] --c-muon/--lion-trits requires --ste-trits; "
+              f"forcing --ste-trits on.", flush=True)
         args.ste_trits = True
 
     # ---- Init (fresh-start only) ----
@@ -574,6 +586,15 @@ def main() -> None:
                   f"{args.init_zero_frac:.2f}); fan-in scales on {n_s}",
                   flush=True)
 
+    # Enable int8 activation quantization on every QLinear if requested.
+    if args.int8_activations:
+        n = 0
+        for m in model.modules():
+            if isinstance(m, QLinear):
+                m.int8_activations = True
+                n += 1
+        print(f"[init] int8 activations enabled on {n} QLinears", flush=True)
+
     # ---- Freezing ----
     if args.freeze_scales:
         nf = freeze_scales(model)
@@ -598,15 +619,23 @@ def main() -> None:
           f"scales={sum(p.numel() for p in scale_params)/1e6:.3f}M, "
           f"fp={sum(p.numel() for p in fp_params)/1e6:.1f}M", flush=True)
 
-    # Trit optimizer: Bop (latent-free) by default, or CMuon for --c-muon.
+    # Trit optimizer: Bop (latent-free) by default, CMuon for --c-muon, or
+    # Lion32 for --lion-trits. All three are mutually exclusive.
     opt_bop: BopTernary | None = None
     opt_cmuon: CMuon | None = None
+    opt_lion_trits: Lion32 | None = None
     if args.c_muon:
         opt_cmuon = CMuon(trit_params, lr=args.muon_lr, beta=args.muon_beta,
                           ns_steps=args.muon_ns_steps, cautious=True)
         print(f"[opt] CMuon trit opt lr={args.muon_lr:g} "
               f"beta={args.muon_beta:g} ns={args.muon_ns_steps} cautious=True",
               flush=True)
+    elif args.lion_trits:
+        opt_lion_trits = Lion32(trit_params, lr=args.lion_trit_lr,
+                                betas=tuple(args.lion_betas),
+                                weight_decay=0.0)
+        print(f"[opt] Lion32 trit opt lr={args.lion_trit_lr:g} "
+              f"betas={tuple(args.lion_betas)}", flush=True)
     else:
         opt_bop = BopTernary(trit_params, gamma=args.gamma, tau=1.0,
                              use_2nd_moment=True,
@@ -655,6 +684,9 @@ def main() -> None:
         if opt_cmuon is not None and "opt_cmuon" in interrupted_state:
             opt_cmuon.load_state_dict(interrupted_state["opt_cmuon"])
             del interrupted_state["opt_cmuon"]
+        if opt_lion_trits is not None and "opt_lion_trits" in interrupted_state:
+            opt_lion_trits.load_state_dict(interrupted_state["opt_lion_trits"])
+            del interrupted_state["opt_lion_trits"]
         opt_lion.load_state_dict(interrupted_state["opt_lion"])
         del interrupted_state["opt_lion"]
         # PyTorch's load_state_dict restores param_groups from the resume
@@ -752,6 +784,8 @@ def main() -> None:
         opt_bop.zero_grad(set_to_none=True)
     if opt_cmuon is not None:
         opt_cmuon.zero_grad(set_to_none=True)
+    if opt_lion_trits is not None:
+        opt_lion_trits.zero_grad(set_to_none=True)
     opt_lion.zero_grad(set_to_none=True)
     # For STE mode: snapshot quantized codes once at fresh start so the
     # first window's code_flip_count has a baseline.
@@ -793,7 +827,7 @@ def main() -> None:
                 fp_gnorm = float(torch.nn.utils.clip_grad_norm_(
                     fp_params + scale_params, args.max_grad_norm))
 
-            # --- Trit opt step (Bop or CMuon) + Lion step ---
+            # --- Trit opt step (Bop or CMuon or Lion-STE) + FP Lion step ---
             cmuon_zeroed_frac = 0.0
             if opt_bop is not None:
                 n_flips, n_elems = opt_bop.step()
@@ -801,6 +835,9 @@ def main() -> None:
                 _, cmuon_zeroed_frac = opt_cmuon.step()
                 # In STE mode the "code flip rate" is computed from
                 # quantized-code diffs below in the logging block, not here.
+                n_flips, n_elems = 0, 0
+            elif opt_lion_trits is not None:
+                opt_lion_trits.step()
                 n_flips, n_elems = 0, 0
             else:
                 n_flips, n_elems = 0, 0
@@ -826,6 +863,8 @@ def main() -> None:
                 opt_bop.zero_grad(set_to_none=True)
             if opt_cmuon is not None:
                 opt_cmuon.zero_grad(set_to_none=True)
+            if opt_lion_trits is not None:
+                opt_lion_trits.zero_grad(set_to_none=True)
             opt_lion.zero_grad(set_to_none=True)
             global_step += 1
 
@@ -967,14 +1006,14 @@ def main() -> None:
             if (args.checkpoint_every > 0
                     and global_step % args.checkpoint_every == 0):
                 _save_resume(interrupted_path, model, opt_bop, opt_cmuon,
-                             opt_lion, global_step, best_snapshot, ctrl,
-                             run_name, samples_at_save)
+                             opt_lion_trits, opt_lion, global_step,
+                             best_snapshot, ctrl, run_name, samples_at_save)
                 tqdm.write(f"[ckpt] {interrupted_path} @ step {global_step}")
 
             if _INTERRUPT["flag"]:
                 _save_resume(interrupted_path, model, opt_bop, opt_cmuon,
-                             opt_lion, global_step, best_snapshot, ctrl,
-                             run_name, samples_at_save)
+                             opt_lion_trits, opt_lion, global_step,
+                             best_snapshot, ctrl, run_name, samples_at_save)
                 writer.flush()
                 writer.close()
                 pbar.close()
@@ -1019,12 +1058,12 @@ def main() -> None:
         interrupted_path.unlink()
 
 
-def _save_resume(path: Path, model, opt_bop, opt_cmuon, opt_lion,
-                 next_step: int, best_snapshot, ctrl, run_name: str,
-                 samples_consumed: int) -> None:
-    """hrm_bop-flavored resume save: trit-opt (Bop or CMuon, whichever is
-    live) + Lion. interrupted.pt is the only on-disk file; atomic .tmp rename.
-    """
+def _save_resume(path: Path, model, opt_bop, opt_cmuon, opt_lion_trits,
+                 opt_lion, next_step: int, best_snapshot, ctrl,
+                 run_name: str, samples_consumed: int) -> None:
+    """hrm_bop-flavored resume save: trit-opt (Bop or CMuon or Lion-STE,
+    whichever is live) + FP Lion. interrupted.pt is the only on-disk file;
+    atomic .tmp rename."""
     payload = {
         "model": {k: v.detach().cpu() for k, v in model.state_dict().items()},
         "opt_lion": opt_lion.state_dict(),
@@ -1038,6 +1077,8 @@ def _save_resume(path: Path, model, opt_bop, opt_cmuon, opt_lion,
         payload["opt_bop"] = opt_bop.state_dict()
     if opt_cmuon is not None:
         payload["opt_cmuon"] = opt_cmuon.state_dict()
+    if opt_lion_trits is not None:
+        payload["opt_lion_trits"] = opt_lion_trits.state_dict()
     tmp = path.with_suffix(path.suffix + ".tmp")
     torch.save(payload, str(tmp))
     tmp.replace(path)

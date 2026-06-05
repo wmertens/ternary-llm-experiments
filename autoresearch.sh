@@ -19,17 +19,25 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="003"
-RUN_TAG="c-muon-ste"
-DESCRIPTION="CMuon (Newton-Schulz5 orthogonalized momentum + cautious mask) on STE'd ternary latents, replaces BopTernary; else hrm-G structure"
+RUN_N="007"
+RUN_TAG="screen-cmuon-int8act-tinynoloop"
+DESCRIPTION="SCREENING Round 2, s4: CMuon-STE + int8 per-token-absmax activations, tiny non-loop, 1500 steps"
 
 RUN_NAME="r${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments/${RUN_NAME}"
 
 # Defaults (mirror hrm-G-bop). Override below per experiment.
-TOTAL_STEPS="${TOTAL_STEPS:-2500}"
-BATCH_SIZE="${BATCH_SIZE:-2}"
-GRAD_ACCUM="${GRAD_ACCUM:-16}"
+TOTAL_STEPS="${TOTAL_STEPS:-1500}"
+BATCH_SIZE="${BATCH_SIZE:-4}"
+GRAD_ACCUM="${GRAD_ACCUM:-8}"
+# Tiny non-loop config for the optimizer screening round.
+HIDDEN_SIZE="${HIDDEN_SIZE:-384}"
+NUM_HEADS="${NUM_HEADS:-6}"
+INTERMEDIATE="${INTERMEDIATE:-1024}"
+H_LAYERS="${H_LAYERS:-2}"
+L_LAYERS="${L_LAYERS:-2}"
+H_CYCLES="${H_CYCLES:-1}"
+L_CYCLES="${L_CYCLES:-1}"
 TAU_NORM="${TAU_NORM:-0.15}"
 GAMMA="${GAMMA:-1e-3}"
 GAMMA_V="${GAMMA_V:-1e-3}"
@@ -39,7 +47,9 @@ CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. The baseline replays
 # hrm-G exactly:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-scales --freeze-non-embed-fp --ste-trits --c-muon}"
+# s4: CMuon-STE + int8 per-token-absmax activation quantization (BitNet-
+# style). Trick on top of the round-1 winner.
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-scales --freeze-non-embed-fp --ste-trits --c-muon --int8-activations}"
 
 mkdir -p "$OUT_DIR" tb
 
@@ -64,6 +74,12 @@ python -u -m smollmer.hrm_bop \
     --tb-dir tb \
     --total-steps "$TOTAL_STEPS" \
     --batch-size "$BATCH_SIZE" --grad-accum "$GRAD_ACCUM" \
+    --hidden-size "$HIDDEN_SIZE" \
+    --num-attention-heads "$NUM_HEADS" \
+    --num-kv-heads "$NUM_HEADS" \
+    --intermediate-size "$INTERMEDIATE" \
+    --H-layers "$H_LAYERS" --L-layers "$L_LAYERS" \
+    --H-cycles "$H_CYCLES" --L-cycles "$L_CYCLES" \
     --tau-norm "$TAU_NORM" --gamma "$GAMMA" --gamma-v "$GAMMA_V" \
     --lr "$LR" \
     --val-every "$VAL_EVERY" \
@@ -140,5 +156,12 @@ echo "METRIC val_loss=${VAL_LOSS}"
 # Belt-and-braces cleanup: hrm_bop.py deletes interrupted.pt on success,
 # but if the parse above failed for any reason we'd leave one around. Be safe.
 rm -f "$OUT_DIR/interrupted.pt" "$OUT_DIR/interrupted.pt.tmp"
+
+# Each run writes ~200-400 MB of final*.safetensors. We don't need them
+# between experiments — TB scalars are the durable signal, and the
+# safetensors can be re-created cheaply by re-running with seed. Delete
+# to keep experiments/ from filling the disk. (To analyze a model
+# post-hoc, edit this line or rerun with --total-steps and stop early.)
+rm -f "$OUT_DIR"/*.safetensors
 
 exit 0

@@ -476,6 +476,18 @@ class QLinear(nn.Linear):
         return (c_b * mask * sign).view(out_f, in_f)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Optional BitNet-style per-token absmax int8 activation quantization.
+        # Enabled when `self.int8_activations = True` is set by the trainer.
+        # STE: forward sees quantized, backward sees identity.
+        if getattr(self, "int8_activations", False):
+            Qp = 127.0
+            with torch.no_grad():
+                # Per-token absmax. amax over the last dim only (the input
+                # feature axis); broadcasts across the rest.
+                absmax = x.abs().amax(dim=-1, keepdim=True).clamp_min(1e-5)
+                s = Qp / absmax
+                xq = (x * s).round().clamp_(-Qp, Qp) / s
+            x = x + (xq - x).detach()
         # Five paths, picked by what's attached:
         #   mask_logits Parameter present               → GSQ PTQ
         #   codepoint_c is a Parameter + smooth_temp > 1e-4 → smooth QAT

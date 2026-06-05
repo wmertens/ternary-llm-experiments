@@ -93,6 +93,54 @@ knob.
   cautious mask plus the per-coord update magnitude ~lr/sqrt(N) ≈
   6e-4 means flipping a code (cross ±1/3) takes ~500+ consistent
   steps. If too slow, we may need higher muon-lr.
+- Result (2026-06-05): **val_loss 6.5320 (-0.357 vs Run 2)**. Big
+  win. flip_rate jumped to 2.63e-4 (65× Run 2), 2× more cumulative
+  trit motion. The per-loop gap actually *shrank* from 0.065 to
+  0.032, suggesting the trit pattern itself became more agile and
+  recurrence is less load-bearing. C-Muon STE is the new baseline.
+
+### Screening Round 1 (Segment 1) — 2026-06-05
+
+Tiny non-looped models (h=384, H=L=2, cycles=1×1, ~26M params, 1500
+steps) to compare optimizer choice without the recurrence confound.
+
+| run | optimizer | val_loss | flip_rate | Δfrac_zero | wall |
+|---|---|---|---|---|---|
+| 4 (s1) | Bop+cautious | 5.4674 | 1.71e-5 | -0.046 | 32min |
+| 5 (s2) | CMuon-STE | **5.1850** | 3.94e-4 | -0.004 | 32min |
+| 6 (s3) | Lion-STE | 5.5221 | 2.64e-4 | -0.006 | 28min |
+
+- CMuon-STE wins by 0.28 nats vs Bop, 0.34 vs Lion-STE.
+- Same direction as the Run-3 finding (where CMuon beat Bop by 0.36
+  on the 153M model). Optimizer-choice signal isn't an artifact of
+  recurrence dynamics — it's a property of CMuon at this STE setup.
+- Interesting: s1 (Bop) has 13× *more* net trit motion away from
+  zero (Δfrac_zero -0.046 vs s2's -0.004) but much lower flip rate.
+  CMuon-STE's continuous latents oscillate around ±1/3 boundaries so
+  trit codes flip back and forth often; the cumulative one-way drift
+  is smaller. The bidirectional churn is apparently more useful for
+  loss than monotonic drift.
+- Lion-STE's underperformance is puzzling given bitlooplm's success.
+  Possible explanations: (a) 1500 steps is too short for STE's slower
+  per-step convergence to fully express, (b) frozen lognormal scales
+  hurt Lion specifically (bitlooplm used per-tensor recomputed
+  scales), (c) Lion's sign update is too coarse without the per-tensor
+  scale's softening effect. Could revisit in a longer-budget run.
+
+### Screening Round 2 — starting 2026-06-05
+
+Stacking precision tricks on the round-1 winner (CMuon-STE).
+
+- s4: CMuon-STE + int8 per-token-absmax activations (BitNet style).
+  Adds STE wrapper around QLinear input. Tests whether BitNet's
+  inference-time quantization is also a free training-time trick.
+- s5 (planned): CMuon-STE + fp16 opt state (with stochastic rounding).
+  Tests whether Muon's m can be stored at lower precision.
+
+Tooling note: switched from `Bash run_in_background=True` (kept
+returning "undefined is not an object") to `nohup ... & disown` plus
+a `Monitor` watcher that fires when `METRIC val_loss=` appears in the
+log. Gives a single completion signal per run without polling.
 
 ---
 
