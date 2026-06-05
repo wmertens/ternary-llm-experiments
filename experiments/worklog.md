@@ -50,6 +50,50 @@ knob.
   change, expected to let τ_norm drop without random-walking, which
   should boost flip activity without hurting per-flip quality.
 
+### Run 2: cautious-bop — val_loss=6.8893 (KEEP, -0.018 vs baseline)
+- Timestamp: 2026-06-04 16:24 → 22:16 (5h52m)
+- What changed: added `cautious=True` flag to `BopTernary`. In the
+  flip rule, after computing `flip = (score > τ_norm) & valid`, AND
+  with `(m·g_t > 0)` so only coords where the EMA still agrees with
+  the current gradient direction actually flip.
+- Result: val 6.8893 vs 6.9074 (-0.018), loss_ema 6.8183 vs 6.8269
+  (-0.009), flip_rate 4.07e-6 vs 3.86e-6 (+5%), per_loop_gap
+  +0.065 vs +0.039 (+67%), wall +10% (more masking work per step).
+- Insight: small absolute win but a clean signal that filtering
+  oscillating trits via the cautious mask is helpful in our
+  regime — without it, the no-2nd-order-aware flips do happen
+  occasionally on noise. Per-loop gap improving more than val_loss
+  suggests the recurrence is benefiting disproportionately
+  (cautious-filtered flips concentrate on coords that help the
+  later H-cycle's representation).
+- Next: Run 3 — **C-Muon STE** (user steer). Replace BopTernary
+  with Cautious Muon (Jordan 2024 + Liang 2024) on STE'd ternary
+  latents. The latent in [-1, 1] gets continuous Muon updates;
+  forward STE-quantizes to {-1, 0, +1}; code flips happen as
+  latents cross ±1/3 boundaries. New optimizer module
+  `smollmer/cmuon.py`, new CLI flags `--ste-trits` and `--c-muon`.
+
+### 2026-06-05 — user steers captured into autoresearch.ideas.md
+1. "Warmup with full BPTT against small English corpus, then switch to
+   1-step gradient" curriculum (parking lot — non-trivial framework change)
+2. Tiny non-looped Bop vs Muon screening (HIGH priority, run after Run 3
+   completes but before Run 4 — gives optimizer-choice signal without
+   recurrence confound)
+
+### Run 3: c-muon-ste — STARTING 2026-06-04 22:30
+- Config: hrm-G structural baseline (random lognormal frozen scales,
+  frozen non-embed FP, Lion-on-embed) with trit optimizer swapped
+  from BopTernary to CMuon. Cautious mask ON. muon-lr=0.02, muon-
+  beta=0.95, ns_steps=5. Latents start at discrete random ternary
+  (else quantize-of-Normal(0, 0.02) gives all-zero forward output and
+  no gradient signal). After each opt step latents are clamped to
+  [-1, 1] via `clamp_qlinear_weights`.
+- Expected: Muon's orthogonalized update should drive faster code
+  flips than Bop (which is gated by score>τ). On the other hand, the
+  cautious mask plus the per-coord update magnitude ~lr/sqrt(N) ≈
+  6e-4 means flipping a code (cross ±1/3) takes ~500+ consistent
+  steps. If too slow, we may need higher muon-lr.
+
 ---
 
 ## Key Insights

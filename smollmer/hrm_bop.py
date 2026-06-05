@@ -547,16 +547,19 @@ def main() -> None:
     # ---- Init (fresh-start only) ----
     if fresh_start:
         gen = torch.Generator(device=args.device).manual_seed(args.init_seed)
+        # Even in STE mode we want non-trivial quantized output from step 0.
+        # The standard Normal(0, 0.02) Linear init puts ALL latents inside
+        # the ±1/3 zero-attractor, so `quantize_levels(w, 3)` returns 0
+        # everywhere and the forward output is zero → trit gradients are
+        # exactly zero → CMuon does nothing. Start from the discrete
+        # random-ternary distribution; the STE optimizer then drifts the
+        # latents continuously and code flips happen as they cross ±1/3.
+        n_t = init_trits_random(model, zero_frac=args.init_zero_frac,
+                                generator=gen)
         if args.ste_trits:
-            # Continuous latents from the standard Normal(0, init-std) Linear
-            # init (already applied by HrmBopModel._init_weights); just skip
-            # the discrete random-ternary overwrite.
-            n_t = sum(1 for m in model.modules() if isinstance(m, QLinear))
-            print(f"[init] STE mode: leaving {n_t} QLinear latents at "
-                  f"Normal(0, {cfg.initializer_range}) Linear init", flush=True)
-        else:
-            n_t = init_trits_random(model, zero_frac=args.init_zero_frac,
-                                    generator=gen)
+            print(f"[init] STE mode: {n_t} QLinear latents start at discrete "
+                  f"{{-1, 0, +1}} (random, {args.init_zero_frac:.0%} zero); "
+                  f"continuous evolution begins from step 1", flush=True)
         if args.random_scales:
             scale_gen = torch.Generator(device=args.device).manual_seed(
                 args.init_seed + 1)

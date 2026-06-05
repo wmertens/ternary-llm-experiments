@@ -1,2 +1,3 @@
 {"type":"config","name":"ternary-hrm-fast-recipe","metricName":"val_loss","metricUnit":"nats","bestDirection":"lower"}
 {"run":1,"commit":"64dfda5","metric":6.9074,"metrics":{"loss_ema":6.8269,"flip_rate":3.858971e-6,"frac_zero_delta":-0.011147,"per_loop_gap":0.039062,"wall_seconds":19189},"status":"keep","description":"baseline hrm-G replay: lognormal frozen scales + frozen non-embed FP, Lion-on-embed, Bop Bet1 tau_norm=0.15","timestamp":1780583203,"segment":0}
+{"run":2,"commit":"1c018e7","metric":6.8893,"metrics":{"loss_ema":6.8183,"flip_rate":4.073227e-6,"frac_zero_delta":-0.010856,"per_loop_gap":0.0652,"wall_seconds":21109},"status":"keep","description":"cautious mask on BopTernary (sign(m)==sign(g_t)); rest = baseline","timestamp":1780604663,"segment":0}

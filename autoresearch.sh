@@ -19,9 +19,9 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="002"
-RUN_TAG="cautious-bop"
-DESCRIPTION="Bop with cautious mask (sign(m)==sign(g_t)); else identical to baseline"
+RUN_N="003"
+RUN_TAG="c-muon-ste"
+DESCRIPTION="CMuon (Newton-Schulz5 orthogonalized momentum + cautious mask) on STE'd ternary latents, replaces BopTernary; else hrm-G structure"
 
 RUN_NAME="r${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments/${RUN_NAME}"
@@ -39,7 +39,7 @@ CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. The baseline replays
 # hrm-G exactly:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-scales --freeze-non-embed-fp --cautious-bop}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-scales --freeze-non-embed-fp --ste-trits --c-muon}"
 
 mkdir -p "$OUT_DIR" tb
 
