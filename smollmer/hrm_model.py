@@ -248,49 +248,58 @@ class HrmBopModel(nn.Module):
         return self.lm_head(h)
 
     def _core(self, z_H: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
-              return_per_loop: bool = False) -> torch.Tensor | list[torch.Tensor]:
-        """Recurrent core with 1-step gradient.
+              return_per_loop: bool = False,
+              full_bptt: bool = False) -> torch.Tensor | list[torch.Tensor]:
+        """Recurrent core.
 
-        Only the FINAL L-iter and FINAL H-iter are differentiable; the H_c·L_c-1
-        earlier L iterations and H_c-1 earlier H iterations run under
-        torch.no_grad(). This matches HRM-Text's training-time forward.
+        Two gradient modes:
+          - 1-step (default, full_bptt=False): only the FINAL inner L iter and
+            FINAL outer H iter are differentiable; the H_c·L_c-1 earlier L
+            iterations and H_c-1 earlier H iterations run under torch.no_grad().
+            This is HRM-Text's training-time forward, ~1× memory cost.
+          - full BPTT (full_bptt=True): every iter is in the autograd graph.
+            ~(H_c·L_c) × the memory of 1-step but gives each loop layer a real
+            gradient signal — useful as a warmup curriculum before switching to
+            1-step.
 
         `return_per_loop=True` returns the list of z_H values after each H-cycle
-        (length = H_cycles), all differentiable — used for the per-loop CE
-        diagnostic in the trainer (called under torch.no_grad() there anyway).
+        (always full BPTT through; intended for diagnostic use under no_grad).
         """
         z_L = self.z_L_init.to(z_H.dtype).expand_as(z_H)
         H_c, L_c = self.cfg.H_cycles, self.cfg.L_cycles
-        # Total inner L iters = H_c * L_c. The very last one is differentiable.
-        # Across H cycles: every H-step is no_grad except the final one.
         per_loop: list[torch.Tensor] = []
         inner_step = 0
         total_inner = H_c * L_c
         for h in range(H_c):
             for l in range(L_c):
                 inner_step += 1
-                if inner_step < total_inner and not return_per_loop:
+                differentiable = (full_bptt or return_per_loop
+                                  or inner_step >= total_inner)
+                if differentiable:
+                    z_L = self.L_stack(z_L + z_H, cos, sin)
+                else:
                     with torch.no_grad():
                         z_L = self.L_stack(z_L + z_H, cos, sin)
-                else:
-                    z_L = self.L_stack(z_L + z_H, cos, sin)
-            if h < H_c - 1 and not return_per_loop:
+            differentiable = (full_bptt or return_per_loop or h == H_c - 1)
+            if differentiable:
+                z_H = self.H_stack(z_H + z_L, cos, sin)
+            else:
                 with torch.no_grad():
                     z_H = self.H_stack(z_H + z_L, cos, sin)
-            else:
-                z_H = self.H_stack(z_H + z_L, cos, sin)
             if return_per_loop:
                 per_loop.append(z_H)
         if return_per_loop:
             return per_loop
         return z_H
 
-    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
-        """Returns logits [B, S, V]. CE/labels handled by the trainer."""
+    def forward(self, input_ids: torch.Tensor,
+                full_bptt: bool = False) -> torch.Tensor:
+        """Returns logits [B, S, V]. CE/labels handled by the trainer.
+        `full_bptt`: see `_core` docstring."""
         B, S = input_ids.shape
         x = self.embed_tokens(input_ids) * self.cfg.embedding_scale
         cos, sin = self.rotary(S, x.device, x.dtype)
-        z_H = self._core(x, cos, sin)
+        z_H = self._core(x, cos, sin, full_bptt=full_bptt)
         return self._project_to_logits(z_H)
 
     @torch.no_grad()

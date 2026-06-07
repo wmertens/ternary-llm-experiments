@@ -440,6 +440,12 @@ def build_argparser() -> argparse.ArgumentParser:
                     help="CMuon first-moment EMA.")
     ap.add_argument("--muon-ns-steps", type=int, default=5,
                     help="Newton-Schulz iterations per CMuon step.")
+    ap.add_argument("--cmuon-state-dtype", default="float32",
+                    choices=["float32", "float16", "bfloat16"],
+                    help="Storage dtype for CMuon's momentum buffer. fp16 "
+                         "halves CMuon's per-trit state (~200 MB on the 150M "
+                         "model). EMA update done in m's dtype; NS5 always "
+                         "fp32.")
     ap.add_argument("--lion-trits", action="store_true", default=False,
                     help="STE+Lion32 on trit latents (bitlooplm-style). "
                          "Mutually exclusive with --c-muon. Requires "
@@ -450,6 +456,12 @@ def build_argparser() -> argparse.ArgumentParser:
                     help="BitNet-style per-token absmax int8 STE on the input "
                          "to every QLinear. Approximately halves activation "
                          "memory and adds quantization noise in the gradient.")
+    ap.add_argument("--full-bptt-steps", type=int, default=0,
+                    help="First N steps use full BPTT through the recurrent "
+                         "core (every iter differentiable); after step N the "
+                         "trainer switches to the 1-step gradient approxima- "
+                         "tion. HRM-Text-style warmup curriculum. 0 = always "
+                         "1-step (current default).")
     # Lion hyperparams
     ap.add_argument("--lr", type=float, default=5e-4)
     ap.add_argument("--lr-floor", type=float, default=0.1,
@@ -625,10 +637,15 @@ def main() -> None:
     opt_cmuon: CMuon | None = None
     opt_lion_trits: Lion32 | None = None
     if args.c_muon:
+        cmuon_state_dtype = {"float32": torch.float32,
+                             "float16": torch.float16,
+                             "bfloat16": torch.bfloat16}[args.cmuon_state_dtype]
         opt_cmuon = CMuon(trit_params, lr=args.muon_lr, beta=args.muon_beta,
-                          ns_steps=args.muon_ns_steps, cautious=True)
+                          ns_steps=args.muon_ns_steps, cautious=True,
+                          state_dtype=cmuon_state_dtype)
         print(f"[opt] CMuon trit opt lr={args.muon_lr:g} "
-              f"beta={args.muon_beta:g} ns={args.muon_ns_steps} cautious=True",
+              f"beta={args.muon_beta:g} ns={args.muon_ns_steps} "
+              f"cautious=True state_dtype={args.cmuon_state_dtype}",
               flush=True)
     elif args.lion_trits:
         opt_lion_trits = Lion32(trit_params, lr=args.lion_trit_lr,
@@ -804,8 +821,9 @@ def main() -> None:
                        if autocast_dtype is not None
                        else torch.amp.autocast(args.device.split(":")[0],
                                                enabled=False))
+                full_bptt_now = global_step < args.full_bptt_steps
                 with ctx:
-                    logits = model(ids)
+                    logits = model(ids, full_bptt=full_bptt_now)
                     loss = causal_lm_loss(logits, ids)
                 if not torch.isfinite(loss):
                     raise RuntimeError(
@@ -1025,9 +1043,9 @@ def main() -> None:
     except BaseException as e:
         try:
             samples_at_save = global_step * args.grad_accum * args.batch_size
-            _save_resume(interrupted_path, model, opt_bop, opt_lion,
-                         global_step, best_snapshot, ctrl, run_name,
-                         samples_at_save)
+            _save_resume(interrupted_path, model, opt_bop, opt_cmuon,
+                         opt_lion_trits, opt_lion, global_step,
+                         best_snapshot, ctrl, run_name, samples_at_save)
             print(f"[!] emergency save → {interrupted_path} "
                   f"(reason: {type(e).__name__})", flush=True)
         except Exception as save_err:

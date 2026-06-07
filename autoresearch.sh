@@ -19,25 +19,27 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="007"
-RUN_TAG="screen-cmuon-int8act-tinynoloop"
-DESCRIPTION="SCREENING Round 2, s4: CMuon-STE + int8 per-token-absmax activations, tiny non-loop, 1500 steps"
+RUN_N="013"
+RUN_TAG="main-cmuon-fullbptt"
+DESCRIPTION="MAIN 153M HRM + CMuon-STE + full BPTT THROUGHOUT. Upgrade Run 12's recipe (fast-A best val 4.9572) to the full-spec model. Memory will be tight (8 stack-applications stash activations); fallback bs=1 if OOM."
 
 RUN_NAME="r${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments/${RUN_NAME}"
 
 # Defaults (mirror hrm-G-bop). Override below per experiment.
-TOTAL_STEPS="${TOTAL_STEPS:-1500}"
-BATCH_SIZE="${BATCH_SIZE:-4}"
-GRAD_ACCUM="${GRAD_ACCUM:-8}"
-# Tiny non-loop config for the optimizer screening round.
-HIDDEN_SIZE="${HIDDEN_SIZE:-384}"
-NUM_HEADS="${NUM_HEADS:-6}"
-INTERMEDIATE="${INTERMEDIATE:-1024}"
-H_LAYERS="${H_LAYERS:-2}"
-L_LAYERS="${L_LAYERS:-2}"
-H_CYCLES="${H_CYCLES:-1}"
-L_CYCLES="${L_CYCLES:-1}"
+TOTAL_STEPS="${TOTAL_STEPS:-2500}"
+BATCH_SIZE="${BATCH_SIZE:-1}"
+GRAD_ACCUM="${GRAD_ACCUM:-32}"
+# Main 153M HRM config (back to spec). Full BPTT throughout via large
+# FULL_BPTT_STEPS (greater than TOTAL_STEPS).
+HIDDEN_SIZE="${HIDDEN_SIZE:-1024}"
+NUM_HEADS="${NUM_HEADS:-16}"
+INTERMEDIATE="${INTERMEDIATE:-2752}"
+H_LAYERS="${H_LAYERS:-4}"
+L_LAYERS="${L_LAYERS:-4}"
+H_CYCLES="${H_CYCLES:-2}"
+L_CYCLES="${L_CYCLES:-3}"
+FULL_BPTT_STEPS="${FULL_BPTT_STEPS:-99999}"
 TAU_NORM="${TAU_NORM:-0.15}"
 GAMMA="${GAMMA:-1e-3}"
 GAMMA_V="${GAMMA_V:-1e-3}"
@@ -47,9 +49,9 @@ CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. The baseline replays
 # hrm-G exactly:
-# s4: CMuon-STE + int8 per-token-absmax activation quantization (BitNet-
-# style). Trick on top of the round-1 winner.
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-scales --freeze-non-embed-fp --ste-trits --c-muon --int8-activations}"
+# Run 10: fast-A baseline — CMuon-STE only, no int8 act (45% wall tax,
+# discarded). Same Run-3 winning recipe at smaller scale.
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-scales --freeze-non-embed-fp --ste-trits --c-muon}"
 
 mkdir -p "$OUT_DIR" tb
 
@@ -80,6 +82,7 @@ python -u -m smollmer.hrm_bop \
     --intermediate-size "$INTERMEDIATE" \
     --H-layers "$H_LAYERS" --L-layers "$L_LAYERS" \
     --H-cycles "$H_CYCLES" --L-cycles "$L_CYCLES" \
+    --full-bptt-steps "$FULL_BPTT_STEPS" \
     --tau-norm "$TAU_NORM" --gamma "$GAMMA" --gamma-v "$GAMMA_V" \
     --lr "$LR" \
     --val-every "$VAL_EVERY" \

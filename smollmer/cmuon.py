@@ -86,7 +86,8 @@ class CMuon(torch.optim.Optimizer):
     """
 
     def __init__(self, params, lr: float = 1e-3, beta: float = 0.95,
-                 ns_steps: int = 5, cautious: bool = True) -> None:
+                 ns_steps: int = 5, cautious: bool = True,
+                 state_dtype: torch.dtype = torch.float32) -> None:
         if not 0.0 < lr:
             raise ValueError(f"lr must be > 0, got {lr}")
         if not 0.0 <= beta < 1.0:
@@ -96,6 +97,7 @@ class CMuon(torch.optim.Optimizer):
         defaults = dict(lr=float(lr), beta=float(beta),
                         ns_steps=int(ns_steps), cautious=bool(cautious))
         super().__init__(params, defaults)
+        self.state_dtype = state_dtype
         # Sanity-check shapes once at construction so the per-step loop is
         # branch-free.
         for group in self.param_groups:
@@ -125,10 +127,18 @@ class CMuon(torch.optim.Optimizer):
                 g = p.grad.float()
                 state = self.state[p]
                 if "m" not in state:
-                    state["m"] = torch.zeros_like(p, dtype=torch.float32)
+                    state["m"] = torch.zeros_like(p, dtype=self.state_dtype)
                 m = state["m"]
-                m.mul_(beta).add_(g, alpha=1.0 - beta)
-                U = newton_schulz5(m, ns_steps)
+                # EMA in m's dtype. For fp16 state this accrues naive
+                # rounding error per step but Muon's NS5 normalizes the
+                # update direction, so per-coord precision drift on m
+                # doesn't propagate to the same per-step magnitude error
+                # that AdamW would suffer. If fp16 m underflows in late
+                # training, we can revisit with stochastic rounding.
+                m.mul_(beta).add_(g.to(m.dtype), alpha=1.0 - beta)
+                # NS5 always in fp32 for orthogonalization precision.
+                m_fp32 = m if m.dtype == torch.float32 else m.float()
+                U = newton_schulz5(m_fp32, ns_steps)
                 if cautious:
                     # sign(U) == sign(g)  iff  U * g > 0
                     agree = (U * g > 0).to(U.dtype)

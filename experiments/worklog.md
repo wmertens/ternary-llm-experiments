@@ -142,6 +142,38 @@ returning "undefined is not an object") to `nohup ... & disown` plus
 a `Monitor` watcher that fires when `METRIC val_loss=` appears in the
 log. Gives a single completion signal per run without polling.
 
+#### Round 2 results
+
+- **s4 (int8 activations)**: val 5.1848 vs s2 5.1850 — **free** on
+  the tiny model (within noise, +0.0002 nats). int8 is the BitNet-
+  style per-token-absmax STE applied to QLinear input. New
+  `m.int8_activations = True` attribute on QLinear, gated by
+  `--int8-activations` CLI flag.
+
+- **s5 (fp16 opt state on CMuon's m)**: val 5.1962 vs s2 5.1850 —
+  **small but real penalty (+0.011 nats)**. Stored m as fp16 via
+  `state_dtype` param to CMuon; NS5 still fp32 by upcast. The EMA
+  rounding error per step is small but does accumulate. Discard from
+  pure-quality view; revisit if memory pressure on main run forces it.
+
+### Run 9: main HRM 153M + CMuon-STE + int8 act — STARTED 2026-06-05 ~16:00
+
+Back to full HRM 153M config (hidden=1024, H=L=4, cycles=2×3, bs=2 ga=16,
+2500 steps) with the screening winners stacked: CMuon-STE + int8
+per-token-absmax activations.
+
+- Expected: val_loss ≈ 6.53 (same as Run 3) if int8 act stays free at
+  main-run scale. Better than 6.53 if STE regularization happens to
+  help on the bigger model.
+- Wall time **observed at step 300**: 11.7 s/step (vs Run 3's 8.1) =
+  +45% wall-clock overhead. The screening's "int8 act is free" claim
+  was on a model with 1/4 the QLinear forwards per step (cycles 1×1
+  vs 2×3). The relative overhead is bigger on main.
+- **Recipe-fastest implication**: if val ≈ Run 3 → discard int8 for
+  main (wall-time cost without quality gain). If val < Run 3 (real
+  improvement) → keep despite wall cost. Decision pending Run 9
+  completion (~7h remaining).
+
 ---
 
 ## Key Insights
