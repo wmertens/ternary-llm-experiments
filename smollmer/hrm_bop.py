@@ -440,6 +440,17 @@ def build_argparser() -> argparse.ArgumentParser:
                     help="CMuon first-moment EMA.")
     ap.add_argument("--muon-ns-steps", type=int, default=5,
                     help="Newton-Schulz iterations per CMuon step.")
+    ap.add_argument("--no-cautious-muon", action="store_true", default=False,
+                    help="Disable the cautious mask in CMuon (vanilla Muon). "
+                         "Tests whether the 90%-zeroed cautious dynamic on HRM "
+                         "is helping or hurting.")
+    ap.add_argument("--muon-lr-floor", type=float, default=1.0,
+                    help="CMuon LR cosine-decays from --muon-lr to "
+                         "--muon-lr * --muon-lr-floor by --total-steps. "
+                         "Default 1.0 = no decay (constant lr). 0.1 = decay "
+                         "to 10%% of peak (matches Lion's default schedule).")
+    ap.add_argument("--muon-warmup-steps", type=int, default=0,
+                    help="Linear warmup steps for CMuon. Default 0 (no warmup).")
     ap.add_argument("--cmuon-state-dtype", default="float32",
                     choices=["float32", "float16", "bfloat16"],
                     help="Storage dtype for CMuon's momentum buffer. fp16 "
@@ -640,12 +651,14 @@ def main() -> None:
         cmuon_state_dtype = {"float32": torch.float32,
                              "float16": torch.float16,
                              "bfloat16": torch.bfloat16}[args.cmuon_state_dtype]
+        cmuon_cautious = not args.no_cautious_muon
         opt_cmuon = CMuon(trit_params, lr=args.muon_lr, beta=args.muon_beta,
-                          ns_steps=args.muon_ns_steps, cautious=True,
+                          ns_steps=args.muon_ns_steps,
+                          cautious=cmuon_cautious,
                           state_dtype=cmuon_state_dtype)
         print(f"[opt] CMuon trit opt lr={args.muon_lr:g} "
               f"beta={args.muon_beta:g} ns={args.muon_ns_steps} "
-              f"cautious=True state_dtype={args.cmuon_state_dtype}",
+              f"cautious={cmuon_cautious} state_dtype={args.cmuon_state_dtype}",
               flush=True)
     elif args.lion_trits:
         opt_lion_trits = Lion32(trit_params, lr=args.lion_trit_lr,
@@ -838,6 +851,15 @@ def main() -> None:
                            args.warmup_steps, floor=args.lr_floor)
             for g in opt_lion.param_groups:
                 g["lr"] = cur_lr
+            # --- LR schedule on CMuon (if active) ---
+            if opt_cmuon is not None and (args.muon_lr_floor != 1.0
+                                          or args.muon_warmup_steps > 0):
+                cur_muon_lr = lr_at(global_step, args.total_steps,
+                                    args.muon_lr,
+                                    args.muon_warmup_steps,
+                                    floor=args.muon_lr_floor)
+                for g in opt_cmuon.param_groups:
+                    g["lr"] = cur_muon_lr
 
             # --- FP grad clip (skip trits) ---
             fp_gnorm = None
