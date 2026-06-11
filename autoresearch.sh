@@ -19,24 +19,23 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="013"
-RUN_TAG="main-cmuon-fullbptt"
-DESCRIPTION="MAIN 153M HRM + CMuon-STE + full BPTT THROUGHOUT. Upgrade Run 12's recipe (fast-A best val 4.9572) to the full-spec model. Memory will be tight (8 stack-applications stash activations); fallback bs=1 if OOM."
+RUN_N="032"
+RUN_TAG="fast-A-varcycles-1to8-5000steps"
+DESCRIPTION="FAST-A + variable H_cycles in [1,8] (wider range). Tests robustness of the fixpoint property found in Run 31 (per_loop_gap collapsed to 0.004 at [1,4]). If [1,8] also converges to fixed-point, the property is robust."
 
 RUN_NAME="r${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments/${RUN_NAME}"
 
 # Defaults (mirror hrm-G-bop). Override below per experiment.
-TOTAL_STEPS="${TOTAL_STEPS:-2500}"
-BATCH_SIZE="${BATCH_SIZE:-1}"
-GRAD_ACCUM="${GRAD_ACCUM:-32}"
-# Main 153M HRM config (back to spec). Full BPTT throughout via large
-# FULL_BPTT_STEPS (greater than TOTAL_STEPS).
-HIDDEN_SIZE="${HIDDEN_SIZE:-1024}"
-NUM_HEADS="${NUM_HEADS:-16}"
-INTERMEDIATE="${INTERMEDIATE:-2752}"
-H_LAYERS="${H_LAYERS:-4}"
-L_LAYERS="${L_LAYERS:-4}"
+TOTAL_STEPS="${TOTAL_STEPS:-5000}"
+BATCH_SIZE="${BATCH_SIZE:-2}"
+GRAD_ACCUM="${GRAD_ACCUM:-16}"
+# FAST-A with variable cycles for fixpoint regularization research.
+HIDDEN_SIZE="${HIDDEN_SIZE:-512}"
+NUM_HEADS="${NUM_HEADS:-8}"
+INTERMEDIATE="${INTERMEDIATE:-1408}"
+H_LAYERS="${H_LAYERS:-2}"
+L_LAYERS="${L_LAYERS:-2}"
 H_CYCLES="${H_CYCLES:-2}"
 L_CYCLES="${L_CYCLES:-3}"
 FULL_BPTT_STEPS="${FULL_BPTT_STEPS:-99999}"
@@ -49,9 +48,8 @@ CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. The baseline replays
 # hrm-G exactly:
-# Run 10: fast-A baseline — CMuon-STE only, no int8 act (45% wall tax,
-# discarded). Same Run-3 winning recipe at smaller scale.
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-scales --freeze-non-embed-fp --ste-trits --c-muon}"
+# Run 32: fast-A + variable H_cycles ∈ [1,8] (wider). Tests fixpoint robustness.
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-scales --freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.20 --muon-lr-floor 0.1 --grad-mode full-bptt --min-h-cycles 1 --max-h-cycles 8}"
 
 mkdir -p "$OUT_DIR" tb
 
