@@ -107,10 +107,16 @@ test-time cycle-sweep experiments with FP weights to isolate the cause.
 
 Feasibility: QLinear soft mode already has α=0 = identity (FP passthrough)
 — so an FP HRM is a bounded change, NOT a rewrite. Caveats:
-- With FP weights the trit optimiser (CMuon-STE) no longer applies; train
-  the weights with Lion/CAdamW instead. So the FP control is a genuinely
-  different recipe, not a one-flag toggle — needs an --fp-weights path in
-  hrm_bop that swaps the optimiser wiring.
+- **Keep CMuon, just drop the STE.** The STE only exists to bridge ternary
+  quantisation (forward quantises to {-1,0,1}, backward passes the gradient
+  straight through to a latent FP weight, CMuon updates the latent). FP
+  weights have no quantiser, so apply CMuon directly to the actual weight
+  matrices used in the forward — same cautious-Muon optimiser, same lr=0.20
+  cosine. This holds the optimiser FIXED across the ternary-vs-FP
+  comparison so **weight precision is the only variable** (do NOT switch to
+  Lion/CAdamW — that confounds precision with optimiser). Needs an
+  --fp-weights path in hrm_bop that feeds the FP weights to CMuon and skips
+  quantise-in-forward.
 - This is a **diagnostic / control line**, off the main fastest-*ternary*-
   recipe metric. Keep results in a separate segment; don't let FP val
   numbers contaminate the ternary leaderboard.
