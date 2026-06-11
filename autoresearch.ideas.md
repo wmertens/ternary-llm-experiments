@@ -93,3 +93,29 @@ Implementation notes:
   orthogonality precision); only the stored momentum buffer can be fp16.
 
 Status: queued. To launch after Run 3 completes, before Run 4.
+
+## 2026-06-11 — User steer (captured during Run 33, fixpoint extrapolation)
+
+### F. FP-weights control: is the recurrence brittle *because* it's ternary?
+User question: the runs so far (fixed-cycle recurrence doesn't pay; you
+only get a true fixed point by training with a variable per-step loop
+count) are all on **ternary** weights. Maybe recurrence is brittle
+specifically under ternary quantisation, and an FP-weight HRM would (a)
+benefit from fixed-cycle recurrence and/or (b) reach the fixpoint more
+easily / extrapolate further. Repeat the variable-vs-fixed cycle and the
+test-time cycle-sweep experiments with FP weights to isolate the cause.
+
+Feasibility: QLinear soft mode already has α=0 = identity (FP passthrough)
+— so an FP HRM is a bounded change, NOT a rewrite. Caveats:
+- With FP weights the trit optimiser (CMuon-STE) no longer applies; train
+  the weights with Lion/CAdamW instead. So the FP control is a genuinely
+  different recipe, not a one-flag toggle — needs an --fp-weights path in
+  hrm_bop that swaps the optimiser wiring.
+- This is a **diagnostic / control line**, off the main fastest-*ternary*-
+  recipe metric. Keep results in a separate segment; don't let FP val
+  numbers contaminate the ternary leaderboard.
+
+Sequencing: gated on Run 33. If the ternary [1,4] fixpoint extrapolates
+cleanly past its training range, recurrence is NOT too brittle for
+ternary and the FP control is lower priority. If ternary extrapolation is
+poor/unstable, the FP control becomes the key next experiment.
