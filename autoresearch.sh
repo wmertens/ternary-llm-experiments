@@ -19,9 +19,9 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="032"
-RUN_TAG="fast-A-varcycles-1to8-5000steps"
-DESCRIPTION="FAST-A + variable H_cycles in [1,8] (wider range). Tests robustness of the fixpoint property found in Run 31 (per_loop_gap collapsed to 0.004 at [1,4]). If [1,8] also converges to fixed-point, the property is robust."
+RUN_N="033"
+RUN_TAG="fast-A-varcycles-1to4-cyclesweep"
+DESCRIPTION="FAST-A + variable H_cycles [1,4] (the sweet-spot fixpoint from Run 31) + test-time loop extrapolation. At every val step, also evaluate val loss at H_cycles=1,2,3,4,6,8,12,16,24,32 (val/cyc_<n>). Tests whether the true fixpoint lets us spend MORE loops at inference for lower loss (test-time compute scaling) and how far past the [1,4] training range it extrapolates before degrading."
 
 RUN_NAME="r${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments/${RUN_NAME}"
@@ -48,8 +48,8 @@ CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. The baseline replays
 # hrm-G exactly:
-# Run 32: fast-A + variable H_cycles ∈ [1,8] (wider). Tests fixpoint robustness.
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-scales --freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.20 --muon-lr-floor 0.1 --grad-mode full-bptt --min-h-cycles 1 --max-h-cycles 8}"
+# Run 33: fast-A + variable H_cycles ∈ [1,4] + test-time cycle-sweep eval.
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-scales --freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.20 --muon-lr-floor 0.1 --grad-mode full-bptt --min-h-cycles 1 --max-h-cycles 4 --eval-cycle-sweep 1,2,3,4,6,8,12,16,24,32}"
 
 mkdir -p "$OUT_DIR" tb
 
