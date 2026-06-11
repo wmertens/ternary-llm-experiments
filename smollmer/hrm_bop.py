@@ -342,6 +342,35 @@ def evaluate(model: HrmBopModel, val_batches: list[dict],
 
 
 @torch.no_grad()
+def evaluate_at_cycles(model: HrmBopModel, val_batches: list[dict],
+                       device: str, autocast_dtype,
+                       cycles: list[int]) -> dict[int, float]:
+    """Val loss with H_cycles overridden to each value in `cycles`. Tests
+    test-time loop extrapolation: a model trained to a true fixed point
+    (variable per-step H_cycles) should keep its loss flat or improving as
+    the inference loop count is pushed beyond the training range, whereas a
+    fixed-cycle model degrades once it leaves the count it memorised."""
+    model.eval()
+    out: dict[int, float] = {}
+    for nc in cycles:
+        total_loss = 0.0
+        n = 0
+        for b in val_batches:
+            ids = b["input_ids"].to(device, non_blocking=True)
+            ctx = (torch.amp.autocast(device.split(":")[0], dtype=autocast_dtype)
+                   if autocast_dtype is not None
+                   else torch.amp.autocast(device.split(":")[0], enabled=False))
+            with ctx:
+                logits = model(ids, h_cycles=nc)
+                loss = causal_lm_loss(logits, ids)
+            total_loss += float(loss.item())
+            n += 1
+        out[nc] = total_loss / max(1, n)
+    model.train()
+    return out
+
+
+@torch.no_grad()
 def per_loop_ce_diag(model: HrmBopModel, batch_ids: torch.Tensor,
                      device: str, autocast_dtype) -> list[float]:
     """One CE per H-cycle, computed under no_grad. Doubles forward cost while
@@ -489,6 +518,11 @@ def build_argparser() -> argparse.ArgumentParser:
                          "H cycle plus all H iters are differentiable. "
                          "full-bptt: every iter is in the graph. See "
                          "HrmBopModel._core for details.")
+    ap.add_argument("--eval-cycle-sweep", default="",
+                    help="Comma-separated H_cycles values to evaluate val "
+                         "loss at, at every val step (e.g. '1,2,4,8,16,32'). "
+                         "Logs val/cyc_<n> to TB. Tests test-time loop "
+                         "extrapolation of the fixpoint. Empty disables.")
     # Lion hyperparams
     ap.add_argument("--lr", type=float, default=5e-4)
     ap.add_argument("--lr-floor", type=float, default=0.1,
@@ -1073,6 +1107,15 @@ def main() -> None:
                                     autocast_dtype)
                 writer.add_scalar("val/loss", val_loss, global_step)
                 tqdm.write(f"[val] step {global_step} loss={val_loss:.4f}")
+                if args.eval_cycle_sweep:
+                    cyc_list = [int(c) for c in args.eval_cycle_sweep.split(",")]
+                    sweep = evaluate_at_cycles(model, val_batches, args.device,
+                                               autocast_dtype, cyc_list)
+                    for nc, l in sweep.items():
+                        writer.add_scalar(f"val/cyc_{nc}", l, global_step)
+                    sweep_str = " ".join(f"c{nc}={l:.4f}"
+                                         for nc, l in sweep.items())
+                    tqdm.write(f"[val-sweep] step {global_step} {sweep_str}")
 
             # --- Checkpoint ---
             samples_at_save = global_step * args.grad_accum * args.batch_size
