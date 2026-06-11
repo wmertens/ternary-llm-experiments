@@ -249,39 +249,52 @@ class HrmBopModel(nn.Module):
 
     def _core(self, z_H: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
               return_per_loop: bool = False,
-              full_bptt: bool = False) -> torch.Tensor | list[torch.Tensor]:
-        """Recurrent core.
+              grad_mode: str = "one-step") -> torch.Tensor | list[torch.Tensor]:
+        """Recurrent core. Three gradient modes:
 
-        Two gradient modes:
-          - 1-step (default, full_bptt=False): only the FINAL inner L iter and
-            FINAL outer H iter are differentiable; the H_c·L_c-1 earlier L
-            iterations and H_c-1 earlier H iterations run under torch.no_grad().
-            This is HRM-Text's training-time forward, ~1× memory cost.
-          - full BPTT (full_bptt=True): every iter is in the autograd graph.
-            ~(H_c·L_c) × the memory of 1-step but gives each loop layer a real
-            gradient signal — useful as a warmup curriculum before switching to
-            1-step.
+          - "one-step" (default, HRM-Text training-time): only the FINAL inner
+            L iter and FINAL outer H iter are differentiable; all earlier iters
+            run under torch.no_grad(). 2 differentiable stack-apps total
+            (1 L + 1 H). Cheapest, but the inner L loop's "convergence" never
+            gets gradient signal.
 
-        `return_per_loop=True` returns the list of z_H values after each H-cycle
-        (always full BPTT through; intended for diagnostic use under no_grad).
+          - "last-per-cycle": for each H cycle, the LAST inner L iter and the
+            H iter are both differentiable; the first L_c-1 inner L iters run
+            under no_grad. Treats each H cycle as a fixed-point computation
+            over L iters whose "exit" is the differentiable handoff. For our
+            H_c=2 L_c=3 default: 2 L grads + 2 H grads = 4 differentiable
+            stack-apps. Middle ground between one-step and full-bptt.
+
+          - "full-bptt": every iter is in the autograd graph. 6 L grads + 2 H
+            grads = 8 differentiable stack-apps on the default config. Highest
+            memory, biggest gradient signal — confirmed to massively outperform
+            one-step on ternary HRM training (Runs 12/13).
+
+        `return_per_loop=True` always uses full BPTT (it returns a list of
+        intermediate z_H values for a diagnostic loop and is only invoked under
+        torch.no_grad in practice, so the autograd cost is fine).
         """
         z_L = self.z_L_init.to(z_H.dtype).expand_as(z_H)
         H_c, L_c = self.cfg.H_cycles, self.cfg.L_cycles
         per_loop: list[torch.Tensor] = []
-        inner_step = 0
-        total_inner = H_c * L_c
         for h in range(H_c):
             for l in range(L_c):
-                inner_step += 1
-                differentiable = (full_bptt or return_per_loop
-                                  or inner_step >= total_inner)
-                if differentiable:
+                if return_per_loop or grad_mode == "full-bptt":
+                    diff = True
+                elif grad_mode == "last-per-cycle":
+                    diff = (l == L_c - 1)
+                else:  # "one-step"
+                    diff = (h == H_c - 1 and l == L_c - 1)
+                if diff:
                     z_L = self.L_stack(z_L + z_H, cos, sin)
                 else:
                     with torch.no_grad():
                         z_L = self.L_stack(z_L + z_H, cos, sin)
-            differentiable = (full_bptt or return_per_loop or h == H_c - 1)
-            if differentiable:
+            if return_per_loop or grad_mode in ("full-bptt", "last-per-cycle"):
+                h_diff = True
+            else:  # "one-step"
+                h_diff = (h == H_c - 1)
+            if h_diff:
                 z_H = self.H_stack(z_H + z_L, cos, sin)
             else:
                 with torch.no_grad():
@@ -293,13 +306,26 @@ class HrmBopModel(nn.Module):
         return z_H
 
     def forward(self, input_ids: torch.Tensor,
-                full_bptt: bool = False) -> torch.Tensor:
+                grad_mode: str = "one-step",
+                h_cycles: int | None = None) -> torch.Tensor:
         """Returns logits [B, S, V]. CE/labels handled by the trainer.
-        `full_bptt`: see `_core` docstring."""
+        `grad_mode` ∈ {"one-step", "last-per-cycle", "full-bptt"}; see `_core`.
+        `h_cycles`: if set, overrides cfg.H_cycles for this single forward —
+        used by the trainer to sample variable loop counts per step (fixpoint
+        regularization). The model's params don't change; only the number of
+        recurrent applications does."""
         B, S = input_ids.shape
         x = self.embed_tokens(input_ids) * self.cfg.embedding_scale
         cos, sin = self.rotary(S, x.device, x.dtype)
-        z_H = self._core(x, cos, sin, full_bptt=full_bptt)
+        if h_cycles is not None:
+            orig_H = self.cfg.H_cycles
+            self.cfg.H_cycles = int(h_cycles)
+            try:
+                z_H = self._core(x, cos, sin, grad_mode=grad_mode)
+            finally:
+                self.cfg.H_cycles = orig_H
+        else:
+            z_H = self._core(x, cos, sin, grad_mode=grad_mode)
         return self._project_to_logits(z_H)
 
     @torch.no_grad()

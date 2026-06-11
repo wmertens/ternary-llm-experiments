@@ -468,11 +468,27 @@ def build_argparser() -> argparse.ArgumentParser:
                          "to every QLinear. Approximately halves activation "
                          "memory and adds quantization noise in the gradient.")
     ap.add_argument("--full-bptt-steps", type=int, default=0,
-                    help="First N steps use full BPTT through the recurrent "
-                         "core (every iter differentiable); after step N the "
-                         "trainer switches to the 1-step gradient approxima- "
-                         "tion. HRM-Text-style warmup curriculum. 0 = always "
-                         "1-step (current default).")
+                    help="(Legacy) first N steps use full BPTT; after step N "
+                         "the trainer switches to 1-step. Translates to "
+                         "--grad-mode full-bptt for first N, one-step after. "
+                         "Overridden by --grad-mode if that is not 'one-step'.")
+    ap.add_argument("--min-h-cycles", type=int, default=0,
+                    help="If > 0, each training step samples H_cycles "
+                         "uniformly from [--min-h-cycles, --max-h-cycles]. "
+                         "Fixpoint regularization: forces the recurrent "
+                         "layers to converge so output is robust to loop "
+                         "count. 0 disables (use cfg.H_cycles fixed).")
+    ap.add_argument("--max-h-cycles", type=int, default=0,
+                    help="Upper bound on the per-step H_cycles sample (incl). "
+                         "Only used when --min-h-cycles > 0.")
+    ap.add_argument("--grad-mode", default="one-step",
+                    choices=["one-step", "last-per-cycle", "full-bptt"],
+                    help="Gradient mode through the recurrent core. one-step: "
+                         "only the final inner L iter and final H iter are "
+                         "differentiable. last-per-cycle: last L iter of each "
+                         "H cycle plus all H iters are differentiable. "
+                         "full-bptt: every iter is in the graph. See "
+                         "HrmBopModel._core for details.")
     # Lion hyperparams
     ap.add_argument("--lr", type=float, default=5e-4)
     ap.add_argument("--lr-floor", type=float, default=0.1,
@@ -834,9 +850,26 @@ def main() -> None:
                        if autocast_dtype is not None
                        else torch.amp.autocast(args.device.split(":")[0],
                                                enabled=False))
-                full_bptt_now = global_step < args.full_bptt_steps
+                # Resolve grad mode for THIS step. --grad-mode is the explicit
+                # control; --full-bptt-steps stays as a legacy compatibility
+                # path (full-bptt for first N steps, then default 'one-step').
+                if args.grad_mode != "one-step":
+                    grad_mode_now = args.grad_mode
+                elif global_step < args.full_bptt_steps:
+                    grad_mode_now = "full-bptt"
+                else:
+                    grad_mode_now = "one-step"
+                # Variable H_cycles per step (fixpoint regularization).
+                if args.min_h_cycles > 0:
+                    import random
+                    h_cyc_now = random.randint(
+                        args.min_h_cycles,
+                        max(args.min_h_cycles, args.max_h_cycles))
+                else:
+                    h_cyc_now = None
                 with ctx:
-                    logits = model(ids, full_bptt=full_bptt_now)
+                    logits = model(ids, grad_mode=grad_mode_now,
+                                   h_cycles=h_cyc_now)
                     loss = causal_lm_loss(logits, ids)
                 if not torch.isfinite(loss):
                     raise RuntimeError(
