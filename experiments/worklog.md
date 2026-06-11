@@ -176,9 +176,50 @@ per-token-absmax activations.
 
 ---
 
+### Runs 10–32 — consolidated (fast-A surrogate → LR tuning → fixpoint)
+
+Detailed per-run numbers live in `autoresearch.jsonl`; the narrative arc:
+
+- **Runs 10–13 (full BPTT).** fast-A (38M) validated as a 5× faster
+  surrogate for the 153M model (Run 10 val 6.55 ≈ Run 3 6.53). Switching
+  from the 1-step gradient to **full BPTT throughout** was the big
+  unlock: Run 12 fast-A 4.96, Run 13 main 153M 4.78. The 1-step
+  approximation — the thing the HRM-Text paper sells — was the bottleneck.
+
+- **Runs 14–25 (CMuon LR).** Cautious mask confirmed helpful (Run 14
+  non-cautious +0.11). LR swept up: 0.05 → 0.10 → 0.20; peak at 0.10
+  constant, then **0.20 cosine→0.02** edged ahead (Runs 22/23), warmup
+  neutral (Run 24). Recipe landed the all-time champion **Run 25: main
+  153M, val 4.1562**.
+
+- **Runs 26–29 (does recurrence pay?).** Stripping the outer H cycle
+  (1×3, Run 26) and then all recurrence (1×1, Run 27) cost nothing at
+  2500 steps; extended to 5000 steps, 1×1 (Run 29, 4.178) ties 2×3
+  (Run 28, 4.171) at **53% less wall time**. Fixed-cycle recurrence
+  doesn't earn its compute here — the ~0.39 per-loop CE gap is
+  under-trained loop layers, not refinement.
+
+- **Runs 30–32 (the pivot — variable-loop fixpoint).** User insight:
+  randomize H_cycles per step so the model can't depend on a fixed loop
+  count. Run 31 ([1,4]) collapsed the per-loop CE gap **100×**
+  (0.39 → 0.004) with val unchanged (4.1863) — the model converges to a
+  **true fixed point**, doing genuine iterative refinement. Run 32 ([1,8])
+  confirms the property is robust to a 2× wider range (gap 0.016, still
+  ~24× below fixed) but costs +56% wall (mean loop count ~4.5 vs 2.5) for
+  no quality gain. **[1,4] is the sweet spot.**
+
+---
+
 ## Key Insights
 
-(Updated when a run reveals something architecturally important.)
+- Full BPTT >> 1-step gradient on this HRM/ternary setup (the paper's
+  central efficiency claim doesn't hold for us).
+- Trit optimizer: CMuon-STE with cautious mask, lr=0.20 cosine→0.02.
+- Plain val/loss does not reward recurrence at ≤5000 steps; 1×1 is the
+  fastest recipe for pure loss.
+- **The reason to keep recurrence is the fixed-point property, and you
+  only get it by training with a variable per-step loop count.** Fixed
+  cycles leave the loop layers under-trained.
 
 ## Next Ideas (queue)
 
