@@ -15,6 +15,7 @@ runs/
 wandb/
 *.safetensors
 *.bin
+*.pt
 *.log
 
 cache_corpus/
