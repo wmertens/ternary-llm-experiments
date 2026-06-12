@@ -19,9 +19,9 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="035"
-RUN_TAG="fpweights-cmuon-lr0p05-cosine"
-DESCRIPTION="FP CMuon-LR sweep leg 1 (per ideas#G, gated on r034). r034 (FP at lr=0.20 cosine) lost to ternary by +2.14 nats AND was already underwater at step 500 (val 6.86) — strongly suggests lr=0.20 is too hot for LeCun-scale FP weights (it was tuned for ternary latents in [-1,1]). Hold EVERYTHING ELSE fixed (fast-A, var [1,4], 5000 steps, full BPTT, --fp-weights, cycle sweep) and drop CMuon lr to 0.05 cosine→0.005 (4x lower peak). Read against r034 6.3229: any improvement = lr was the issue, not precision. If still > ternary 4.1873 at the FP optimum, ternary genuinely beats FP at this scale. Stays off the ternary leaderboard."
+RUN_N="036"
+RUN_TAG="fpweights-cmuon-lr0p10-cosine"
+DESCRIPTION="FP CMuon-LR sweep leg 2 — BISECT (per ideas#G + r035 result). r035 at lr=0.05 hit val 5.5042 (-0.82 vs r034 lr=0.20) but trajectory STILL descending at step 5000 (4500→5000 only -0.018, cosine floor biting, not plateau). Suggests FP optimum is HIGHER than 0.05 but lower than 0.20. Bisect: lr=0.10 cosine→0.01 (geometric midpoint). If r036 < r035 5.5042 → optimum closer to 0.10 or 0.20, sweep up next. If > 5.5042 → 0.05 was already past optimum, sweep down to 0.02. Either way isolates FP's LR optimum within 2x. Stays off ternary leaderboard."
 
 RUN_NAME="r${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments/${RUN_NAME}"
@@ -48,8 +48,8 @@ CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. The baseline replays
 # hrm-G exactly:
-# Run 35: FP CMuon-LR sweep leg 1 — same as Run 34 but --muon-lr 0.05 (vs 0.20).
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-scales --freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.05 --muon-lr-floor 0.005 --grad-mode full-bptt --min-h-cycles 1 --max-h-cycles 4 --fp-weights --eval-cycle-sweep 1,2,3,4,6,8,12,16,24,32,48,64}"
+# Run 36: FP CMuon-LR sweep leg 2 — bisect between r034 (0.20) and r035 (0.05).
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-scales --freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.10 --muon-lr-floor 0.01 --grad-mode full-bptt --min-h-cycles 1 --max-h-cycles 4 --fp-weights --eval-cycle-sweep 1,2,3,4,6,8,12,16,24,32,48,64}"
 
 mkdir -p "$OUT_DIR" tb
 
