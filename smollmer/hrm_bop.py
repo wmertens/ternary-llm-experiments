@@ -71,6 +71,28 @@ def init_trits_random(model: nn.Module, zero_frac: float = 0.5,
 
 
 @torch.no_grad()
+def init_fp_weights(model: nn.Module,
+                    generator: torch.Generator | None = None) -> int:
+    """Continuous LeCun-normal init for the FP-weights control: each
+    QLinear.weight ~ N(0, 1/fan_in). Replaces the discrete random-ternary
+    init (which would be a terrible FP start — 3 values, 50% zeros) and is
+    the natural counterpart used with --fp-weights, where the forward skips
+    quantize+scales and CMuon trains the raw weight."""
+    n = 0
+    for m in model.modules():
+        if not isinstance(m, QLinear):
+            continue
+        fan_in = m.weight.shape[1]
+        std = fan_in ** -0.5
+        noise = torch.randn(m.weight.shape, device=m.weight.device,
+                            generator=generator)
+        m.weight.data.copy_((noise * std).to(m.weight.dtype))
+        m.invalidate_q_cache()
+        n += 1
+    return n
+
+
+@torch.no_grad()
 def init_scales_fanin(model: nn.Module) -> int:
     """Initialize per-(row, group) scales to sqrt(2/in_features).
 
@@ -523,6 +545,13 @@ def build_argparser() -> argparse.ArgumentParser:
                          "loss at, at every val step (e.g. '1,2,4,8,16,32'). "
                          "Logs val/cyc_<n> to TB. Tests test-time loop "
                          "extrapolation of the fixpoint. Empty disables.")
+    ap.add_argument("--fp-weights", action="store_true", default=False,
+                    help="FP-weights control: QLinear forward uses the raw "
+                         "weight (no quantize, no STE, no per-group scales); "
+                         "CMuon trains it as an ordinary FP matrix. Isolates "
+                         "whether the recurrence/fixpoint behaviour is a "
+                         "ternary artefact. Pairs with --c-muon; continuous "
+                         "LeCun init replaces the random-ternary init.")
     # Lion hyperparams
     ap.add_argument("--lr", type=float, default=5e-4)
     ap.add_argument("--lr-floor", type=float, default=0.1,
@@ -629,8 +658,29 @@ def main() -> None:
               f"forcing --ste-trits on.", flush=True)
         args.ste_trits = True
 
+    # FP-weights control: flag every QLinear so forward uses the raw weight
+    # (no quantize/scales/STE). CMuon then trains it as an ordinary matrix.
+    if args.fp_weights:
+        if not args.c_muon:
+            raise ValueError("--fp-weights pairs with --c-muon "
+                             "(CMuon on the raw FP weight)")
+        n = 0
+        for m in model.modules():
+            if isinstance(m, QLinear):
+                m.fp_weights = True
+                n += 1
+        print(f"[init] FP-weights control: {n} QLinears use raw FP weight "
+              f"(no quantize/scales/STE)", flush=True)
+
     # ---- Init (fresh-start only) ----
-    if fresh_start:
+    if fresh_start and args.fp_weights:
+        # FP control: continuous LeCun init; the ternary-specific init and
+        # the per-group scales (unused in the FP forward path) are skipped.
+        gen = torch.Generator(device=args.device).manual_seed(args.init_seed)
+        n_t = init_fp_weights(model, generator=gen)
+        print(f"[init] FP mode: {n_t} QLinear weights ~ N(0, 1/fan_in) "
+              f"(continuous LeCun init)", flush=True)
+    elif fresh_start:
         gen = torch.Generator(device=args.device).manual_seed(args.init_seed)
         # Even in STE mode we want non-trivial quantized output from step 0.
         # The standard Normal(0, 0.02) Linear init puts ALL latents inside
@@ -961,7 +1011,7 @@ def main() -> None:
             # past the boundaries under Muon's update; out-of-box latents are
             # wasted capacity since the quantized code can't change until the
             # latent re-enters.
-            if args.ste_trits:
+            if args.ste_trits and not args.fp_weights:
                 clamp_qlinear_weights(model, lo=-1.0, hi=1.0)
             flips_window += n_flips
             elems_window += n_elems

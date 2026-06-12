@@ -476,6 +476,16 @@ class QLinear(nn.Linear):
         return (c_b * mask * sign).view(out_f, in_f)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Full-precision control path: use the raw weight directly — no
+        # quantize, no STE, no per-group scales. CMuon trains this weight as
+        # an ordinary FP matrix. Used to isolate whether the HRM recurrence /
+        # fixpoint behaviour is a ternary artefact (--fp-weights in the
+        # trainer sets m.fp_weights = True). Does not combine with int8 act.
+        if getattr(self, "fp_weights", False):
+            y = F.linear(x, self.weight.to(dtype=x.dtype))
+            if self.bias is not None:
+                y = y + self.bias
+            return y
         # Optional BitNet-style per-token absmax int8 activation quantization.
         # Enabled when `self.int8_activations = True` is set by the trainer.
         # STE: forward sees quantized, backward sees identity.
