@@ -125,3 +125,17 @@ Sequencing: gated on Run 33. If the ternary [1,4] fixpoint extrapolates
 cleanly past its training range, recurrence is NOT too brittle for
 ternary and the FP control is lower priority. If ternary extrapolation is
 poor/unstable, the FP control becomes the key next experiment.
+
+### G. FP CMuon-LR sweep (follow-up to Run 34, gated on its result)
+Run 34 early read (step 500): FP val 6.86 vs ternary 5.57 at matched
+lr=0.20 cosine — FP trains slower, and its fixpoint over-smooths earlier
+(collapse at cyc16 vs ternary cyc24; NaN by cyc48 from unclamped weight
+growth). The slow start suggests lr=0.20 (tuned for ternary latents in
+[-1,1]) is too hot for LeCun-scale FP weights. If Run 34 finishes below
+ternary, DON'T conclude "FP is worse" yet — first sweep CMuon lr on FP
+(0.05, 0.02, 0.01) to find FP's own optimum, then compare best-FP vs
+best-ternary. Only then is the precision conclusion clean.
+Also consider: add inter-iteration RMSNorm on z_H, or re-enable a
+(wider) weight clamp for FP, to tame the cyc>16 over-smoothing/NaN — the
+extrapolation-stability gap may be an artefact of unbounded FP residual
+growth, not of precision per se.
