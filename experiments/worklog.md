@@ -208,6 +208,24 @@ Detailed per-run numbers live in `autoresearch.jsonl`; the narrative arc:
   ~24× below fixed) but costs +56% wall (mean loop count ~4.5 vs 2.5) for
   no quality gain. **[1,4] is the sweet spot.**
 
+- **Run 33 (test-time cycle sweep).** Re-ran fast-A [1,4] and at val time
+  swept H_cycles ∈ {1,2,3,4,6,8,12,16,24,32}. val flat at 4.1873 ± 0.0002
+  from c2 to c24 — a **stable wide-basin fixed point**, holding 6× past
+  the training max. c1 = 4.1989 (one iter under-converged). c32 = 10.8125
+  = ln(V): the iterate over-smooths to a degenerate constant fixed point
+  (~96 stack-applies cumulative). So ternary recurrence is *stable but
+  not improving* at test-time, with a cliff past ~24 loops.
+
+- **Run 34 (FP-weights control — diagnostic, off-leaderboard).** Mirrored
+  Run 33 EXACTLY but with `--fp-weights` (CMuon directly on raw FP
+  weights, no STE/quantize/scales). Result: val 6.3229 vs ternary 4.1873
+  (+2.14 nats), and the cycle sweep has IDENTICAL shape (flat c2..c12,
+  collapse at c16, NaN by c48). NOT a clean precision verdict: lr=0.20
+  was tuned for ternary latents in [-1,1] and is likely too hot for
+  LeCun-scale FP weights (step-500 val 6.86 already underwater). Next:
+  sweep FP CMuon lr (0.05 / 0.02 / 0.01) to find FP's own optimum before
+  comparing.
+
 ---
 
 ## Key Insights

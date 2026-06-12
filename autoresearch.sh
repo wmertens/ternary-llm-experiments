@@ -19,9 +19,9 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="034"
-RUN_TAG="fpweights-varcycles-1to4-cyclesweep"
-DESCRIPTION="FP-WEIGHTS CONTROL for the fixpoint findings (user steer). Mirrors Run 33 EXACTLY (fast-A, var H_cycles [1,4], CMuon lr=0.20 cosine, 5000 steps, cycle sweep) but with --fp-weights: raw FP weights, CMuon directly (no STE/quantize/scales), continuous LeCun init. Weight PRECISION is the only variable vs Run 33. Q: does FP (a) reach val < ternary's 4.187, (b) gain test-time compute scaling (loss dropping with more loops, which ternary did NOT), (c) extend the stable range past ternary's cyc24 / avoid the cyc32 over-smoothing collapse? Sweep extended to 48,64 to locate FP's collapse cliff. Separate diagnostic line — NOT on the fastest-ternary-recipe leaderboard."
+RUN_N="035"
+RUN_TAG="fpweights-cmuon-lr0p05-cosine"
+DESCRIPTION="FP CMuon-LR sweep leg 1 (per ideas#G, gated on r034). r034 (FP at lr=0.20 cosine) lost to ternary by +2.14 nats AND was already underwater at step 500 (val 6.86) — strongly suggests lr=0.20 is too hot for LeCun-scale FP weights (it was tuned for ternary latents in [-1,1]). Hold EVERYTHING ELSE fixed (fast-A, var [1,4], 5000 steps, full BPTT, --fp-weights, cycle sweep) and drop CMuon lr to 0.05 cosine→0.005 (4x lower peak). Read against r034 6.3229: any improvement = lr was the issue, not precision. If still > ternary 4.1873 at the FP optimum, ternary genuinely beats FP at this scale. Stays off the ternary leaderboard."
 
 RUN_NAME="r${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments/${RUN_NAME}"
@@ -48,8 +48,8 @@ CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. The baseline replays
 # hrm-G exactly:
-# Run 34: FP-weights control — mirrors Run 33 + --fp-weights, extended sweep.
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-scales --freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.20 --muon-lr-floor 0.1 --grad-mode full-bptt --min-h-cycles 1 --max-h-cycles 4 --fp-weights --eval-cycle-sweep 1,2,3,4,6,8,12,16,24,32,48,64}"
+# Run 35: FP CMuon-LR sweep leg 1 — same as Run 34 but --muon-lr 0.05 (vs 0.20).
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-scales --freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.05 --muon-lr-floor 0.005 --grad-mode full-bptt --min-h-cycles 1 --max-h-cycles 4 --fp-weights --eval-cycle-sweep 1,2,3,4,6,8,12,16,24,32,48,64}"
 
 mkdir -p "$OUT_DIR" tb
 
