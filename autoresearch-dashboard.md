@@ -28,6 +28,7 @@
 | 29 | ea2d2cb | 4.1783 | 3.8226 | 7.51e-4 | 8131 | keep | fast-A 1×1, 5000 steps (53% faster, tied) |
 | 31 | ea2d2cb | 4.1863 | 3.8215 | 7.09e-4 | 19522 | keep | fast-A var H_cycles [1,4] — FIXPOINT (gap 0.004) |
 | 32 | cc165f1 | 4.1910 | 3.8169 | 7.14e-4 | 30463 | keep | fast-A var H_cycles [1,8] — fixpoint robust (gap 0.016) |
+| 33 | 9fe156e | 4.1873 | 3.8178 | 7.14e-4 | 18801 | keep | fast-A [1,4] + cycle-sweep — fixpoint flat cyc2–24, collapses at 32 |
 
 (Discarded along the way: #9 int8-act main, #11 full-BPTT→1-step, #15 lr=0.01,
 #17 last-per-cycle, #24 cosine+warmup, #30 interrupted pivot.)
@@ -76,3 +77,13 @@
    [1,4] is the sweet spot: cleaner fixpoint at 56% less wall time, since
    wall scales with the mean loop count. This is the property the HRM
    theory predicts but fixed-cycle training never delivered.
+9. **The fixpoint is stable but not improving, and over-smooths past
+   ~24 loops (Run 33 cycle sweep).** A [1,4]-trained model holds val flat
+   to ±0.0002 from cyc2 through cyc24 (6× the training max) — a genuine
+   wide-basin fixed point. But extra loops do NOT lower loss (no test-time
+   compute scaling), and at cyc32 val jumps to 10.81 ≈ ln(V): attention
+   over-smoothing collapses all tokens to a constant degenerate fixed
+   point. So ternary recurrence is not "too brittle to converge" — it
+   converges cleanly — it just doesn't earn extra compute. Open question
+   the FP control answers: do FP weights extend the stable range / avoid
+   the collapse / gain test-time scaling?
