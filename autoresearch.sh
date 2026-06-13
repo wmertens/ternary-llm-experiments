@@ -19,9 +19,9 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="036"
-RUN_TAG="fpweights-cmuon-lr0p10-cosine"
-DESCRIPTION="FP CMuon-LR sweep leg 2 — BISECT (per ideas#G + r035 result). r035 at lr=0.05 hit val 5.5042 (-0.82 vs r034 lr=0.20) but trajectory STILL descending at step 5000 (4500→5000 only -0.018, cosine floor biting, not plateau). Suggests FP optimum is HIGHER than 0.05 but lower than 0.20. Bisect: lr=0.10 cosine→0.01 (geometric midpoint). If r036 < r035 5.5042 → optimum closer to 0.10 or 0.20, sweep up next. If > 5.5042 → 0.05 was already past optimum, sweep down to 0.02. Either way isolates FP's LR optimum within 2x. Stays off ternary leaderboard."
+RUN_N="037"
+RUN_TAG="fpweights-cmuon-lr0p02-cosine"
+DESCRIPTION="FP CMuon-LR sweep leg 3 — SWEEP DOWN (per ideas#G + r036 bisect). r036 lr=0.10 → val 5.92, WORSE than r035 lr=0.05 → 5.50. So FP optimum is at-or-below 0.05; monotone trend 6.32(0.20)→5.92(0.10)→5.50(0.05). Next bisect: lr=0.02 cosine→0.002. If r037 < r035 5.5042 → optimum below 0.02, possibly sweep 0.01. If > 5.5042 → optimum lies in (0.02, 0.10), and 0.05 is the FP optimum at this step budget. Either way locks the precision conclusion. Off ternary leaderboard."
 
 RUN_NAME="r${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments/${RUN_NAME}"
@@ -48,8 +48,8 @@ CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. The baseline replays
 # hrm-G exactly:
-# Run 36: FP CMuon-LR sweep leg 2 — bisect between r034 (0.20) and r035 (0.05).
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-scales --freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.10 --muon-lr-floor 0.01 --grad-mode full-bptt --min-h-cycles 1 --max-h-cycles 4 --fp-weights --eval-cycle-sweep 1,2,3,4,6,8,12,16,24,32,48,64}"
+# Run 37: FP CMuon-LR sweep leg 3 — sweep down to 0.02 (r036 confirmed optimum below 0.10).
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-scales --freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.02 --muon-lr-floor 0.002 --grad-mode full-bptt --min-h-cycles 1 --max-h-cycles 4 --fp-weights --eval-cycle-sweep 1,2,3,4,6,8,12,16,24,32,48,64}"
 
 mkdir -p "$OUT_DIR" tb
 
