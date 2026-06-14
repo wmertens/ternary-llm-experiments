@@ -19,15 +19,15 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="039"
-RUN_TAG="fpweights-cmuon-lr0p005-cosine"
-DESCRIPTION="FP CMuon-LR sweep leg 5 — KEEP SWEEPING (r038 hit 3.88 still descending). Trend remains monotone-down through 5 legs: lr 0.20→0.10→0.05→0.02→0.01 gave val 6.32→5.92→5.50→4.16→3.88. r038 trajectory was still falling at step 5000 (-0.0094 last 500), and the inverse-LeCun-scale hypothesis predicts the optimum near 0.009. Run lr=0.005 cosine→0.0005 (half of r038). If r039 < r038 3.8782 by > ~0.05 → optimum still below; if delta ≤ 0.05 or worse → r038 is at or just past FP's optimum and we lock the precision conclusion. Off ternary leaderboard."
+RUN_N="040"
+RUN_TAG="ternary-varcycles-1to4-10000steps"
+DESCRIPTION="PIVOT back to ternary leaderboard. FP control line concluded (r034-r039): FP optimum is lr=0.01 cosine → val 3.88; ternary champion r033 is 4.19. So the 0.31-nat gap is a real precision tax (~7pct relative), not a recurrence pathology — recurrence works fine on ternary (same fixpoint, same stable cycle width). Now test whether ternary's 4.19 is a step-budget plateau or the architectural floor: DOUBLE the budget to 10000 steps with the proven recipe (fast-A, var H_cycles [1,4], CMuon lr=0.20 cosine→0.02, full BPTT, cycle sweep). If val drops to <4.0 → more compute is the lever. If still ~4.19 → architectural cap, need different changes (sandwich norm, curvature gate). ETA ~10h. On ternary leaderboard."
 
 RUN_NAME="r${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments/${RUN_NAME}"
 
 # Defaults (mirror hrm-G-bop). Override below per experiment.
-TOTAL_STEPS="${TOTAL_STEPS:-5000}"
+TOTAL_STEPS="${TOTAL_STEPS:-10000}"
 BATCH_SIZE="${BATCH_SIZE:-2}"
 GRAD_ACCUM="${GRAD_ACCUM:-16}"
 # FAST-A with variable cycles for fixpoint regularization research.
@@ -48,8 +48,8 @@ CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. The baseline replays
 # hrm-G exactly:
-# Run 39: FP CMuon-LR sweep leg 5 — continue down to 0.005 (r038 still descending).
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-scales --freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.005 --muon-lr-floor 0.0005 --grad-mode full-bptt --min-h-cycles 1 --max-h-cycles 4 --fp-weights --eval-cycle-sweep 1,2,3,4,6,8,12,16,24,32,48,64}"
+# Run 40: ternary leaderboard pivot — r033 recipe extended to 10000 steps.
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-scales --freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.20 --muon-lr-floor 0.02 --grad-mode full-bptt --min-h-cycles 1 --max-h-cycles 4 --eval-cycle-sweep 1,2,3,4,6,8,12,16,24,32,48,64}"
 
 mkdir -p "$OUT_DIR" tb
 
