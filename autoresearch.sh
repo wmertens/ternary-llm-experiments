@@ -19,9 +19,9 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="038"
-RUN_TAG="fpweights-cmuon-lr0p01-cosine"
-DESCRIPTION="FP CMuon-LR sweep leg 4 — BRACKET (per ideas#G final leg). r037 lr=0.02 hit val 4.1575, BEATING ternary r033 (4.1873) by 0.030 nats. Sweep so far monotonic: 6.32(0.20)→5.92(0.10)→5.50(0.05)→4.16(0.02). Trajectory still descending at step 5000, so we may still be on the down-slope. Run lr=0.01 cosine→0.001 to bracket the FP optimum: if r038 < 4.1575 → continue sweep (try 0.005); if > 4.1575 → 0.02 is FP's optimum at 5000 steps. Either result LOCKS the FP-vs-ternary precision conclusion. Off ternary leaderboard."
+RUN_N="039"
+RUN_TAG="fpweights-cmuon-lr0p005-cosine"
+DESCRIPTION="FP CMuon-LR sweep leg 5 — KEEP SWEEPING (r038 hit 3.88 still descending). Trend remains monotone-down through 5 legs: lr 0.20→0.10→0.05→0.02→0.01 gave val 6.32→5.92→5.50→4.16→3.88. r038 trajectory was still falling at step 5000 (-0.0094 last 500), and the inverse-LeCun-scale hypothesis predicts the optimum near 0.009. Run lr=0.005 cosine→0.0005 (half of r038). If r039 < r038 3.8782 by > ~0.05 → optimum still below; if delta ≤ 0.05 or worse → r038 is at or just past FP's optimum and we lock the precision conclusion. Off ternary leaderboard."
 
 RUN_NAME="r${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments/${RUN_NAME}"
@@ -48,8 +48,8 @@ CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. The baseline replays
 # hrm-G exactly:
-# Run 38: FP CMuon-LR sweep leg 4 — bracket optimum at lr=0.01 (r037 lr=0.02 BEAT ternary).
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-scales --freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.01 --muon-lr-floor 0.001 --grad-mode full-bptt --min-h-cycles 1 --max-h-cycles 4 --fp-weights --eval-cycle-sweep 1,2,3,4,6,8,12,16,24,32,48,64}"
+# Run 39: FP CMuon-LR sweep leg 5 — continue down to 0.005 (r038 still descending).
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-scales --freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.005 --muon-lr-floor 0.0005 --grad-mode full-bptt --min-h-cycles 1 --max-h-cycles 4 --fp-weights --eval-cycle-sweep 1,2,3,4,6,8,12,16,24,32,48,64}"
 
 mkdir -p "$OUT_DIR" tb
 
