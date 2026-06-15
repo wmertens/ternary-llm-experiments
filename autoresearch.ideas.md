@@ -211,3 +211,37 @@ adaptively if data pressure is present.
 Risk to manage: if reasoning eval shows DEEPER loops MORE WRONG (overfit
 or over-smoothing under reasoning pressure), the fixpoint hypothesis
 breaks down — escalate to exit gate, not fixed-high.
+
+### Note: "The Topological Trouble With Transformers" (arxiv 2604.17121v3, 2026-06-15)
+Position paper read mid r041. Core argument: depth-recurrence alone is
+fundamentally insufficient for state tracking; each input step pushes
+representations upward through layers, eventually exhausting depth. The
+paper advocates step-recurrence (block-recurrent / fully recurrent
+models that carry state ACROSS input positions) instead.
+
+Direct mapping to our findings:
+- Our HRM-text is purely depth-recurrent (no inter-token carrier state).
+- Explains why r027 (1×1, no recurrence) matched r028 (2×3 fixed) on
+  FineWeb val: depth-recurrence doesn't address what next-token CE on
+  generic text rewards. The recurrence is "free refinement" the loss
+  doesn't ask for.
+- The paper cites that variable-depth models can succeed "with only
+  fine-tuning, sometimes with no training at all", attributed to
+  residual alignment across layers — exactly what our fixpoint training
+  enforces by construction (c2..c24 flat). r042 (phase B fine-tune from
+  r040 on OpenMath, lr=0.05) is therefore a clean test of this claim.
+
+Predictions for r042 from the paper:
+- **Optimistic**: residual alignment + reasoning pressure → per_loop_gap
+  re-opens positively on OpenMath val sweep (c4 < c2 < c1 on math
+  tokens). Corroborates the "alignment-enables-test-time-compute"
+  reading.
+- **Pessimistic**: paper predicts depth-recurrence can't substitute for
+  state tracking; r042 may still show flat OpenMath sweep even with the
+  reasoning curriculum.
+
+Escalation path if r042 lands flat: do NOT add an exit gate (paper
+suggests it won't fix the fundamental issue for per-sequence tasks).
+Instead, prototype a **block-recurrent variant** — process seq_len in K
+chunks with a carrier state (RNN-style) across chunks. Real code rewrite
+(~1-2 weeks, new model class). Defer until r042 verdict is in.
