@@ -139,3 +139,51 @@ Also consider: add inter-iteration RMSNorm on z_H, or re-enable a
 (wider) weight clamp for FP, to tame the cyc>16 over-smoothing/NaN — the
 extrapolation-stability gap may be an artefact of unbounded FP residual
 growth, not of precision per se.
+
+## 2026-06-15 — User steer (captured during Run 41)
+
+### H. Two-phase curriculum: fixpoint → reasoning specialisation
+Hypothesis: a stable wide-basin fixpoint (now proven achievable with var
+[1,4] training, e.g. r040 per-loop-gap=0.01) is the RIGHT initialisation
+for "loops as iterative refinement" on hard problems. Phase A trains the
+recurrence to be a clean refiner on generic data (per_loop_gap → 0, flat
+test-time sweep on FineWeb). Phase B continues training on reasoning data
+and asks: does per_loop_gap RE-OPEN in a useful direction — c4 < c2 < c1
+on a reasoning val set, meaning the model has learned to USE the deep
+loops for harder tokens?
+
+Key design choices:
+- **Variable [1,4] vs fixed-high in Phase B.** Variable preserves the
+  fixpoint guarantee but gives no incentive to use deeper loops if shallow
+  ones suffice. Fixed-high (h_cyc=4 always) forces all examples through 4
+  cycles → rewards meaningful use of each iteration on hard examples, but
+  risks reverting to the brittle fixed-cycle regime (per-loop-gap 0.39
+  with no test-time scaling). Preferred: start with variable [1,4]; the
+  cleaner test is "do loops self-organise into refinement under reasoning
+  pressure" without forcing it.
+- **Data mix.** Current is 70/25/5 FineWeb/Cosmopedia/OpenMath. Phase B
+  should weight OpenMath heavily — 80/20 OpenMath/Cosmopedia (keeps some
+  language) or 100% OpenMath (max reasoning signal). Pure-OpenMath risks
+  catastrophic language drift; mix is safer.
+- **Optimiser LR.** Phase A used lr=0.20 cosine→0.02. Phase B should
+  fine-tune with lower peak (lr=0.05 cosine→0.005) to preserve the
+  fixpoint while specialising — full lr=0.20 might shake the fixpoint
+  loose.
+- **Measurement.** Two things matter: (a) per_loop_gap signed — positive
+  on reasoning val = model recruits depth for reasoning; (b) test-time
+  cycle sweep on a held-out reasoning eval (math word problems, e.g.
+  GSM-style) — if val_c4 < val_c2 < val_c1, test-time compute helps
+  reasoning, a Big Result we can't get from FineWeb-only training.
+
+Implementation cost: add a --data-mix CLI flag to hrm_data.py (currently
+the 70/25/5 ratio is hard-coded). Resume mechanism for Phase A → Phase B
+already exists: --resume-pt-weights from r040's final.safetensors keeps
+weights and resets optimiser, which is exactly what we want for a
+distribution shift.
+
+Sequencing: queue after r041 completes (main-153M var [1,2] scaling
+test). r042 = phase B fine-tune from r040 on OpenMath-heavy mix.
+
+Risk to manage: if reasoning eval shows DEEPER loops MORE WRONG (overfit
+or over-smoothing under reasoning pressure), the fixpoint hypothesis
+breaks down — try fixed-high cycles in Phase B instead.
