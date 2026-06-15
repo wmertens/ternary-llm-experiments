@@ -19,23 +19,23 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="040"
-RUN_TAG="ternary-varcycles-1to4-10000steps"
-DESCRIPTION="PIVOT back to ternary leaderboard. FP control line concluded (r034-r039): FP optimum is lr=0.01 cosine → val 3.88; ternary champion r033 is 4.19. So the 0.31-nat gap is a real precision tax (~7pct relative), not a recurrence pathology — recurrence works fine on ternary (same fixpoint, same stable cycle width). Now test whether ternary's 4.19 is a step-budget plateau or the architectural floor: DOUBLE the budget to 10000 steps with the proven recipe (fast-A, var H_cycles [1,4], CMuon lr=0.20 cosine→0.02, full BPTT, cycle sweep). If val drops to <4.0 → more compute is the lever. If still ~4.19 → architectural cap, need different changes (sandwich norm, curvature gate). ETA ~10h. On ternary leaderboard."
+RUN_N="041"
+RUN_TAG="main-153M-varcycles-1to4-5000steps"
+DESCRIPTION="MAIN 153M scaling test of the var-cycles + full-BPTT recipe (r040 confirmed it works at fast-A). Run 25 (prior main champion, 4.1562) used FIXED 2x3 cycles. This is identical to Run 25 except --min-h-cycles 1 --max-h-cycles 4 + the cycle sweep at val time. Same 5000 step budget, same lr=0.20 cosine to 0.02. Tests whether var-cycles regularisation also lifts the main 153M val_loss (predicted ~3.97-4.05 based on fast-A trajectory) AND whether the test-time cycle-extrapolation property scales. If <4.16 → new all-time champion (and we've collapsed Run 25 + Run 33 into a single recipe). Strict on ternary leaderboard. ETA ~10h."
 
 RUN_NAME="r${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments/${RUN_NAME}"
 
 # Defaults (mirror hrm-G-bop). Override below per experiment.
-TOTAL_STEPS="${TOTAL_STEPS:-10000}"
-BATCH_SIZE="${BATCH_SIZE:-2}"
-GRAD_ACCUM="${GRAD_ACCUM:-16}"
-# FAST-A with variable cycles for fixpoint regularization research.
-HIDDEN_SIZE="${HIDDEN_SIZE:-512}"
-NUM_HEADS="${NUM_HEADS:-8}"
-INTERMEDIATE="${INTERMEDIATE:-1408}"
-H_LAYERS="${H_LAYERS:-2}"
-L_LAYERS="${L_LAYERS:-2}"
+TOTAL_STEPS="${TOTAL_STEPS:-5000}"
+BATCH_SIZE="${BATCH_SIZE:-1}"
+GRAD_ACCUM="${GRAD_ACCUM:-32}"
+# MAIN 153M HRM (matches Run 25 / Run 13 sizing) — var cycles validation at scale.
+HIDDEN_SIZE="${HIDDEN_SIZE:-1024}"
+NUM_HEADS="${NUM_HEADS:-16}"
+INTERMEDIATE="${INTERMEDIATE:-2816}"
+H_LAYERS="${H_LAYERS:-4}"
+L_LAYERS="${L_LAYERS:-4}"
 H_CYCLES="${H_CYCLES:-2}"
 L_CYCLES="${L_CYCLES:-3}"
 FULL_BPTT_STEPS="${FULL_BPTT_STEPS:-99999}"
@@ -48,7 +48,7 @@ CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. The baseline replays
 # hrm-G exactly:
-# Run 40: ternary leaderboard pivot — r033 recipe extended to 10000 steps.
+# Run 41: MAIN 153M + var [1,4] — apply r040 recipe to the big model.
 EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-scales --freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.20 --muon-lr-floor 0.02 --grad-mode full-bptt --min-h-cycles 1 --max-h-cycles 4 --eval-cycle-sweep 1,2,3,4,6,8,12,16,24,32,48,64}"
 
 mkdir -p "$OUT_DIR" tb
