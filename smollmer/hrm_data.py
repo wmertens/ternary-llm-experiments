@@ -49,14 +49,46 @@ class MixComponent:
     formatter: Formatter
 
 
-DEFAULT_MIX: list[MixComponent] = [
-    MixComponent("fineweb-edu", "HuggingFaceFW/fineweb-edu", "sample-10BT",
-                 "train", 0.70, _fmt_text),
-    MixComponent("cosmopedia-v2", "HuggingFaceTB/smollm-corpus",
-                 "cosmopedia-v2", "train", 0.25, _fmt_text),
-    MixComponent("openmath", "nvidia/OpenMathInstruct-2", None,
-                 "train", 0.05, _fmt_openmath),
-]
+def _mk_fineweb(weight: float) -> MixComponent:
+    return MixComponent("fineweb-edu", "HuggingFaceFW/fineweb-edu",
+                        "sample-10BT", "train", weight, _fmt_text)
+
+
+def _mk_cosmo(weight: float) -> MixComponent:
+    return MixComponent("cosmopedia-v2", "HuggingFaceTB/smollm-corpus",
+                        "cosmopedia-v2", "train", weight, _fmt_text)
+
+
+def _mk_openmath(weight: float) -> MixComponent:
+    return MixComponent("openmath", "nvidia/OpenMathInstruct-2",
+                        None, "train", weight, _fmt_openmath)
+
+
+_SOURCE_FACTORIES = {
+    "fineweb": _mk_fineweb,
+    "cosmopedia": _mk_cosmo,
+    "openmath": _mk_openmath,
+}
+
+
+def build_mix(weights: dict[str, float]) -> list[MixComponent]:
+    """Build a mix from a {source_name: weight} dict. Zero-weighted sources
+    are dropped so we don't open useless streams. Unknown source names raise.
+    """
+    out: list[MixComponent] = []
+    for name, w in weights.items():
+        if name not in _SOURCE_FACTORIES:
+            raise ValueError(f"unknown data source {name!r}; "
+                             f"known: {list(_SOURCE_FACTORIES)}")
+        if w > 0:
+            out.append(_SOURCE_FACTORIES[name](float(w)))
+    if not out:
+        raise ValueError("build_mix produced an empty mix")
+    return out
+
+
+DEFAULT_MIX: list[MixComponent] = build_mix(
+    {"fineweb": 0.70, "cosmopedia": 0.25, "openmath": 0.05})
 
 
 def _packed_chunks(text_iter: Iterator[str], tokenizer, seq_len: int,
@@ -203,14 +235,32 @@ def make_train_loader(tokenizer, seq_len: int, batch_size: int,
 
 
 def make_val_loader(tokenizer, seq_len: int, batch_size: int,
-                    n_batches: int = 16) -> list[dict]:
+                    n_batches: int = 16,
+                    source: str = "fineweb") -> list[dict]:
     """Eager-load `n_batches` of held-out batches into RAM, so val is a
-    deterministic fixed sample across the entire run. Uses fineweb-edu
-    `sample-100BT` (different from training's `sample-10BT`) and drops the
-    first 1000 packed chunks to avoid any overlap.
+    deterministic fixed sample across the entire run.
+
+    `source` selects the validation distribution:
+      - "fineweb": fineweb-edu `sample-100BT` (different sub-shard from
+        training's `sample-10BT`) — clean held-out.
+      - "cosmopedia" / "openmath": same underlying split as training, but
+        different seed + start_skip=1000 to randomise the draw. Some
+        sequence overlap with training is possible (no second sub-shard
+        exists for these); acceptable for diagnostic val on a curriculum
+        phase B.
     """
-    comp = MixComponent("val-fineweb-edu", "HuggingFaceFW/fineweb-edu",
-                        "sample-100BT", "train", 1.0, _fmt_text)
+    if source == "fineweb":
+        comp = MixComponent("val-fineweb-edu", "HuggingFaceFW/fineweb-edu",
+                            "sample-100BT", "train", 1.0, _fmt_text)
+    elif source == "cosmopedia":
+        comp = MixComponent("val-cosmopedia-v2", "HuggingFaceTB/smollm-corpus",
+                            "cosmopedia-v2", "train", 1.0, _fmt_text)
+    elif source == "openmath":
+        comp = MixComponent("val-openmath", "nvidia/OpenMathInstruct-2",
+                            None, "train", 1.0, _fmt_openmath)
+    else:
+        raise ValueError(f"unknown val source {source!r}; "
+                         f"known: fineweb, cosmopedia, openmath")
     ds = MixedStream([comp], tokenizer=tokenizer, seq_len=seq_len,
                      seed=999_983,    # different from train seed
                      start_skip=1000)

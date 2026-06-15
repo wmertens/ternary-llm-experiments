@@ -36,7 +36,7 @@ from .distill import (BestEmaTracker, Lion32, _INTERRUPT,
                       _install_sigint_handler, lr_at, save_resume,
                       snapshot_to_cpu)
 from .flip_distill import BopTernary, m_stats, trit_stats
-from .hrm_data import make_train_loader, make_val_loader
+from .hrm_data import build_mix, make_train_loader, make_val_loader
 from .hrm_model import HrmBopConfig, HrmBopModel, RMSNorm
 from .qlinear import QLinear, clamp_qlinear_weights, quantize_levels
 
@@ -592,6 +592,19 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--log-every", type=int, default=25)
     ap.add_argument("--val-every", type=int, default=500)
     ap.add_argument("--val-batches", type=int, default=16)
+    ap.add_argument("--data-mix", type=str, default=None,
+                    help="Override the training mix. Comma-sep "
+                         "name:weight pairs, e.g. "
+                         "'fineweb:0,cosmopedia:0.2,openmath:0.8'. "
+                         "Zero-weighted sources are dropped. Default = "
+                         "70/25/5 fineweb/cosmopedia/openmath.")
+    ap.add_argument("--val-source", type=str, default="fineweb",
+                    choices=["fineweb", "cosmopedia", "openmath"],
+                    help="Source for the held-out val loader. Default "
+                         "fineweb uses a clean second sub-shard; "
+                         "cosmopedia/openmath share the training split "
+                         "(different seed + start_skip=1000), some "
+                         "overlap possible — diagnostic-grade.")
     ap.add_argument("--per-loop-every-mult", type=int, default=4,
                     help="Per-loop CE diagnostic cadence = "
                          "per_loop_every_mult * log_every.")
@@ -851,17 +864,34 @@ def main() -> None:
     if tok.eos_token_id is None and tok.pad_token_id is None:
         # SmolLM2 tokenizer ships eos; fallback only here as belt-and-braces.
         tok.add_special_tokens({"eos_token": "<|endoftext|>"})
+    train_components = None
+    if args.data_mix:
+        weights: dict[str, float] = {}
+        for piece in args.data_mix.split(","):
+            piece = piece.strip()
+            if not piece:
+                continue
+            name, _, w = piece.partition(":")
+            weights[name.strip()] = float(w)
+        train_components = build_mix(weights)
+        mix_desc = ", ".join(f"{c.name}={c.weight:.3f}"
+                             for c in train_components)
+    else:
+        mix_desc = "fineweb=0.70, cosmopedia=0.25, openmath=0.05 (default)"
     train_loader = make_train_loader(
         tok, seq_len=args.max_position_embeddings,
         batch_size=args.batch_size, seed=args.seed,
-        num_workers=args.num_workers, start_skip=samples_consumed)
+        num_workers=args.num_workers, start_skip=samples_consumed,
+        components=train_components)
     print(f"[data] train mix at seq={args.max_position_embeddings} "
-          f"bs={args.batch_size} workers={args.num_workers}", flush=True)
+          f"bs={args.batch_size} workers={args.num_workers}: {mix_desc}",
+          flush=True)
     print(f"[data] loading {args.val_batches} val batches "
-          f"(fineweb-edu/sample-100BT)…", flush=True)
+          f"(source={args.val_source})…", flush=True)
     val_batches = make_val_loader(tok, seq_len=args.max_position_embeddings,
                                   batch_size=args.batch_size,
-                                  n_batches=args.val_batches)
+                                  n_batches=args.val_batches,
+                                  source=args.val_source)
     print(f"[data] val ready: {len(val_batches)} batches", flush=True)
 
     train_iter = iter(train_loader)

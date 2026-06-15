@@ -184,6 +184,30 @@ distribution shift.
 Sequencing: queue after r041 completes (main-153M var [1,2] scaling
 test). r042 = phase B fine-tune from r040 on OpenMath-heavy mix.
 
+**Decision after user steer 2026-06-15**: cascade rather than commit.
+- r042 = variable [1,4] (NOT fixed-high) on OpenMath-heavy data, fine-
+  tune LR (lr=0.05 cosine→0.005), resume from r040's final.safetensors.
+  Cheapest test of whether reasoning data alone can re-open per_loop_gap
+  *positively* on a math-eval split.
+- If r042 stays flat (c4 ≈ c2 ≈ c1 on reasoning val) → variable cycles
+  alone don't generate the depth pressure. Then escalate to a per-loop
+  exit gate (the bitnet+looplm pattern: small head decides "stop here?"
+  per loop). That's a real code change (head + gate loss + scheduled
+  expectation), ~1-2 days.
+- If r042's reasoning still incoherent at fast-A scale → scale issue,
+  not recipe. Reasoning use of loops likely needs 250M+, as in the
+  user's prior bitnet+looplm work where 250M-with-exit-gate was still
+  "not very coherent". Note that finding; don't keep scaling tweaks at
+  fast-A.
+
+Why variable not fixed in Phase B: our fixed-cycle ternary runs (r028,
+r031 comparison) showed per_loop_gap=0.39 in fixed, but c1=c2=c4 at
+test-time (the gap was scheduled refinement, not test-time-useful
+compute). Even at extra-step budgets, r027 (1x1) matched r028 (2x3) on
+val. Fixed cycles consume compute without test-time payoff. Variable
+preserves the fixpoint and gives the model freedom to allocate depth
+adaptively if data pressure is present.
+
 Risk to manage: if reasoning eval shows DEEPER loops MORE WRONG (overfit
 or over-smoothing under reasoning pressure), the fixpoint hypothesis
-breaks down — try fixed-high cycles in Phase B instead.
+breaks down — escalate to exit gate, not fixed-high.
