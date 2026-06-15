@@ -20,8 +20,8 @@ source .venv/bin/activate
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
 RUN_N="041"
-RUN_TAG="main-153M-varcycles-1to4-5000steps"
-DESCRIPTION="MAIN 153M scaling test of the var-cycles + full-BPTT recipe (r040 confirmed it works at fast-A). Run 25 (prior main champion, 4.1562) used FIXED 2x3 cycles. This is identical to Run 25 except --min-h-cycles 1 --max-h-cycles 4 + the cycle sweep at val time. Same 5000 step budget, same lr=0.20 cosine to 0.02. Tests whether var-cycles regularisation also lifts the main 153M val_loss (predicted ~3.97-4.05 based on fast-A trajectory) AND whether the test-time cycle-extrapolation property scales. If <4.16 → new all-time champion (and we've collapsed Run 25 + Run 33 into a single recipe). Strict on ternary leaderboard. ETA ~10h."
+RUN_TAG="main-153M-varcycles-1to2-5000steps"
+DESCRIPTION="MAIN 153M scaling test of var-cycles, RETRY after [1,4] OOMed at step 0 (worst-case 4*3=12 inner applications doubled act-mem vs Run 25's fixed 2x3=6). Drop to var [1,2]: worst case 2*3=6, same act-mem ceiling as Run 13/25 which fit. Still tests the variable-cycles property (narrower range). Run 25 (prior main champion, 4.1562) used FIXED 2x3 cycles. Same 5000 step budget, lr=0.20 cosine to 0.02. If <4.16 → new all-time champion. If a var [1,4] test is still wanted, options are checkpointing (code change) or fast-A. Strict on ternary leaderboard. ETA ~10h."
 
 RUN_NAME="r${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments/${RUN_NAME}"
@@ -48,8 +48,8 @@ CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. The baseline replays
 # hrm-G exactly:
-# Run 41: MAIN 153M + var [1,4] — apply r040 recipe to the big model.
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-scales --freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.20 --muon-lr-floor 0.02 --grad-mode full-bptt --min-h-cycles 1 --max-h-cycles 4 --eval-cycle-sweep 1,2,3,4,6,8,12,16,24,32,48,64}"
+# Run 41: MAIN 153M + var [1,2] (retry after [1,4] OOM, narrower range fits act-mem).
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-scales --freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.20 --muon-lr-floor 0.02 --grad-mode full-bptt --min-h-cycles 1 --max-h-cycles 2 --eval-cycle-sweep 1,2,3,4,6,8,12,16,24,32,48,64}"
 
 mkdir -p "$OUT_DIR" tb
 
