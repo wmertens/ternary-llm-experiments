@@ -19,23 +19,24 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="041"
-RUN_TAG="main-153M-varcycles-1to2-5000steps"
-DESCRIPTION="MAIN 153M scaling test of var-cycles, RETRY after [1,4] OOMed at step 0 (worst-case 4*3=12 inner applications doubled act-mem vs Run 25's fixed 2x3=6). Drop to var [1,2]: worst case 2*3=6, same act-mem ceiling as Run 13/25 which fit. Still tests the variable-cycles property (narrower range). Run 25 (prior main champion, 4.1562) used FIXED 2x3 cycles. Same 5000 step budget, lr=0.20 cosine to 0.02. If <4.16 → new all-time champion. If a var [1,4] test is still wanted, options are checkpointing (code change) or fast-A. Strict on ternary leaderboard. ETA ~10h."
+RUN_N="042"
+RUN_TAG="phaseA-fastA-varcycles-1to4-5000steps"
+DESCRIPTION="PHASE A baseline for two-phase curriculum (per ideas#H). Rerun r033's validated recipe (fast-A + var [1,4] + 5000 steps + lr=0.20 cosine + full BPTT + cycle sweep) BUT keep the safetensors so r043 can fine-tune on OpenMath. Expected val ~4.19 (per r033). Per_loop_gap should be < 0.01 (fixpoint property). KEEP_SAFETENSORS=1 set in script. ETA ~5h. Successor: r043 will resume from this run's final.safetensors with --data-mix cosmopedia:0.2,openmath:0.8 --val-source openmath at lr=0.05 cosine."
+KEEP_SAFETENSORS=1
 
 RUN_NAME="r${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments/${RUN_NAME}"
 
 # Defaults (mirror hrm-G-bop). Override below per experiment.
 TOTAL_STEPS="${TOTAL_STEPS:-5000}"
-BATCH_SIZE="${BATCH_SIZE:-1}"
-GRAD_ACCUM="${GRAD_ACCUM:-32}"
-# MAIN 153M HRM (matches Run 25 / Run 13 sizing) — var cycles validation at scale.
-HIDDEN_SIZE="${HIDDEN_SIZE:-1024}"
-NUM_HEADS="${NUM_HEADS:-16}"
-INTERMEDIATE="${INTERMEDIATE:-2816}"
-H_LAYERS="${H_LAYERS:-4}"
-L_LAYERS="${L_LAYERS:-4}"
+BATCH_SIZE="${BATCH_SIZE:-2}"
+GRAD_ACCUM="${GRAD_ACCUM:-16}"
+# FAST-A (38M) — surrogate for the curriculum experiment.
+HIDDEN_SIZE="${HIDDEN_SIZE:-512}"
+NUM_HEADS="${NUM_HEADS:-8}"
+INTERMEDIATE="${INTERMEDIATE:-1408}"
+H_LAYERS="${H_LAYERS:-2}"
+L_LAYERS="${L_LAYERS:-2}"
 H_CYCLES="${H_CYCLES:-2}"
 L_CYCLES="${L_CYCLES:-3}"
 FULL_BPTT_STEPS="${FULL_BPTT_STEPS:-99999}"
@@ -48,8 +49,8 @@ CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. The baseline replays
 # hrm-G exactly:
-# Run 41: MAIN 153M + var [1,2] (retry after [1,4] OOM, narrower range fits act-mem).
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-scales --freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.20 --muon-lr-floor 0.02 --grad-mode full-bptt --min-h-cycles 1 --max-h-cycles 2 --eval-cycle-sweep 1,2,3,4,6,8,12,16,24,32,48,64}"
+# Run 42: PHASE A — fast-A var [1,4] @ 5000 steps (r033 recipe), keep safetensors.
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-scales --freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.20 --muon-lr-floor 0.02 --grad-mode full-bptt --min-h-cycles 1 --max-h-cycles 4 --eval-cycle-sweep 1,2,3,4,6,8,12,16,24,32,48,64}"
 
 mkdir -p "$OUT_DIR" tb
 
@@ -168,8 +169,13 @@ fi
 # Each run writes ~200-400 MB of final*.safetensors. We don't need them
 # between experiments — TB scalars are the durable signal, and the
 # safetensors can be re-created cheaply by re-running with seed. Delete
-# to keep experiments/ from filling the disk. (To analyze a model
-# post-hoc, edit this line or rerun with --total-steps and stop early.)
-rm -f "$OUT_DIR"/*.safetensors
+# by default to keep experiments/ from filling the disk. Set
+# KEEP_SAFETENSORS=1 in this script's per-experiment block to preserve
+# the safetensors for a downstream resume / phase-B fine-tune.
+if [ -z "${KEEP_SAFETENSORS:-}" ]; then
+    rm -f "$OUT_DIR"/*.safetensors
+else
+    echo "[harness] KEEP_SAFETENSORS=1 → preserving $OUT_DIR/*.safetensors"
+fi
 
 exit 0
