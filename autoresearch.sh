@@ -19,9 +19,9 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="042"
-RUN_TAG="phaseA-fastA-varcycles-1to4-5000steps"
-DESCRIPTION="PHASE A baseline for two-phase curriculum (per ideas#H). Rerun r033's validated recipe (fast-A + var [1,4] + 5000 steps + lr=0.20 cosine + full BPTT + cycle sweep) BUT keep the safetensors so r043 can fine-tune on OpenMath. Expected val ~4.19 (per r033). Per_loop_gap should be < 0.01 (fixpoint property). KEEP_SAFETENSORS=1 set in script. ETA ~5h. Successor: r043 will resume from this run's final.safetensors with --data-mix cosmopedia:0.2,openmath:0.8 --val-source openmath at lr=0.05 cosine."
+RUN_N="043"
+RUN_TAG="phaseB-fastA-openmath-resume-r042"
+DESCRIPTION="PHASE B fine-tune from r042's fixpoint init (per ideas#H + Topological Trouble paper note). Resume r042 final.safetensors (val 4.14, c2..c24 flat at 4.13-4.14, per_loop_gap +0.011). Shift training to OpenMath-heavy mix (80pct openmath, 20pct cosmopedia for language stability). Val source = openmath: the cycle sweep at val now measures per-loop CE on MATH/REASONING tokens, not FineWeb. Lower lr (0.05 cosine to 0.005, vs Phase A's 0.20) to preserve the fixpoint while specialising. Question: does per_loop_gap re-open POSITIVELY on the OpenMath cycle sweep (c4 < c2 < c1 → depth helps reasoning), or stay flat (Topological Trouble paper prediction: depth recurrence alone insufficient)? 5000 more steps. KEEP_SAFETENSORS=1 in case r044 wants further phases."
 KEEP_SAFETENSORS=1
 
 RUN_NAME="r${RUN_N}-${RUN_TAG}"
@@ -49,8 +49,8 @@ CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. The baseline replays
 # hrm-G exactly:
-# Run 42: PHASE A — fast-A var [1,4] @ 5000 steps (r033 recipe), keep safetensors.
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-scales --freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.20 --muon-lr-floor 0.02 --grad-mode full-bptt --min-h-cycles 1 --max-h-cycles 4 --eval-cycle-sweep 1,2,3,4,6,8,12,16,24,32,48,64}"
+# Run 43: PHASE B — resume r042 final.safetensors, OpenMath-heavy mix, fine-tune lr.
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-scales --freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.05 --muon-lr-floor 0.005 --grad-mode full-bptt --min-h-cycles 1 --max-h-cycles 4 --eval-cycle-sweep 1,2,3,4,6,8,12,16,24,32,48,64 --resume experiments/r042-phaseA-fastA-varcycles-1to4-5000steps/final.safetensors --data-mix cosmopedia:0.2,openmath:0.8 --val-source openmath}"
 
 mkdir -p "$OUT_DIR" tb
 
