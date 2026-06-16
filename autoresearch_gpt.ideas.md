@@ -39,8 +39,21 @@ After Phase 1 stabilises the compute regime.
 13. **Cautious mask off** as a control (Run 14 confirmed it helps HRM; reconfirm on GPT).
 
 ### Phase 3 — Architectural levers
-After quantisation settles.
+After quantisation settles. **First entry promoted to g002 per user steer
+2026-06-17.**
 
+13a. **Q-K=V** — share weights of the K and V projections, keep Q separate
+     (arxiv 2606.04032v2). Paper: +2.48% PPL at 1.2B, **50% KV cache
+     reduction**, stacks with GQA/MQA and quantisation. Mechanism: K and V
+     have natural cosine similarity 0.73 — the projection sharing absorbs
+     a redundancy. For our fast-A geometry (num_kv_heads=8, head_dim=64):
+     **1.57M fewer trits** (-8% of trit total) and ~8% less optimiser
+     state across the 6 layers. RoPE is applied to K after the shared
+     projection; V uses the pre-RoPE output of the same projection, so
+     W_K = W_V but post-application K ≠ V. ~30 lines of code: add
+     `share_kv: bool` to GptBopConfig + conditional in HrmAttention.
+     **g002**: same baseline recipe as g001 with --share-kv. If PPL cost
+     < ~+5%, this becomes the new baseline and propagates forward.
 14. **Sandwich norm** (RMSNorm before AND after attention/MLP).
 15. **Tie / untie lm_head**.
 16. **Pre-LN vs post-LN**.
