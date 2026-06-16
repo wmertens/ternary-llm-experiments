@@ -19,19 +19,18 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="043"
-RUN_TAG="phaseB-fastA-openmath-resume-r042"
-DESCRIPTION="PHASE B fine-tune from r042's fixpoint init (per ideas#H + Topological Trouble paper note). Resume r042 final.safetensors (val 4.14, c2..c24 flat at 4.13-4.14, per_loop_gap +0.011). Shift training to OpenMath-heavy mix (80pct openmath, 20pct cosmopedia for language stability). Val source = openmath: the cycle sweep at val now measures per-loop CE on MATH/REASONING tokens, not FineWeb. Lower lr (0.05 cosine to 0.005, vs Phase A's 0.20) to preserve the fixpoint while specialising. Question: does per_loop_gap re-open POSITIVELY on the OpenMath cycle sweep (c4 < c2 < c1 → depth helps reasoning), or stay flat (Topological Trouble paper prediction: depth recurrence alone insufficient)? 5000 more steps. KEEP_SAFETENSORS=1 in case r044 wants further phases."
-KEEP_SAFETENSORS=1
+RUN_N="044"
+RUN_TAG="ternary-varcycles-1to4-20000steps"
+DESCRIPTION="Recurrence-research line CLOSED at fast-A (r043 verdict: depth-recurrence flat on OpenMath even with fixpoint init). Returning to the ternary leaderboard. r040 (10k steps) hit val 4.00 with the trajectory STILL descending; extend to 20000 steps with the same recipe to see if compute scaling continues or plateaus. If val < 3.9 → compute remains a live lever; consider main-153M version. If val plateaus near 4.0 → architectural change needed (sandwich norm, BitNet per-tensor scale, etc.). ~20h. KEEP_SAFETENSORS not needed (no phase-B planned). On ternary leaderboard."
 
 RUN_NAME="r${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments/${RUN_NAME}"
 
 # Defaults (mirror hrm-G-bop). Override below per experiment.
-TOTAL_STEPS="${TOTAL_STEPS:-5000}"
+TOTAL_STEPS="${TOTAL_STEPS:-20000}"
 BATCH_SIZE="${BATCH_SIZE:-2}"
 GRAD_ACCUM="${GRAD_ACCUM:-16}"
-# FAST-A (38M) — surrogate for the curriculum experiment.
+# FAST-A (38M) — long-horizon compute scaling test on the validated recipe.
 HIDDEN_SIZE="${HIDDEN_SIZE:-512}"
 NUM_HEADS="${NUM_HEADS:-8}"
 INTERMEDIATE="${INTERMEDIATE:-1408}"
@@ -49,8 +48,8 @@ CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. The baseline replays
 # hrm-G exactly:
-# Run 43: PHASE B — resume r042 final.safetensors, OpenMath-heavy mix, fine-tune lr.
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-scales --freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.05 --muon-lr-floor 0.005 --grad-mode full-bptt --min-h-cycles 1 --max-h-cycles 4 --eval-cycle-sweep 1,2,3,4,6,8,12,16,24,32,48,64 --resume experiments/r042-phaseA-fastA-varcycles-1to4-5000steps/final.safetensors --data-mix cosmopedia:0.2,openmath:0.8 --val-source openmath}"
+# Run 44: extend r040's compute-scaling result — same recipe at 20000 steps.
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-scales --freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.20 --muon-lr-floor 0.02 --grad-mode full-bptt --min-h-cycles 1 --max-h-cycles 4 --eval-cycle-sweep 1,2,3,4,6,8,12,16,24,32,48,64}"
 
 mkdir -p "$OUT_DIR" tb
 
