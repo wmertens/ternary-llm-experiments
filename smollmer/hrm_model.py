@@ -45,6 +45,7 @@ class HrmBopConfig:
     tie_word_embeddings: bool = True
     scale_group_size: int = 64
     embedding_scale: float = 1.0
+    share_kv: bool = False     # Q-K=V (arxiv 2606.04032)
 
     @property
     def head_dim(self) -> int:
@@ -121,12 +122,19 @@ class HrmAttention(nn.Module):
         self.kv_groups = self.num_heads // self.num_kv
         self.scale = self.head_dim ** -0.5
         gs = cfg.scale_group_size
+        # Q-K=V (arxiv 2606.04032): when set, W_K and W_V are the same
+        # matrix. K and V are read off the same projection — K then gets
+        # RoPE applied, V doesn't. Saves one QLinear per attention block.
+        self.share_kv = bool(getattr(cfg, "share_kv", False))
         self.q_proj = QLinear(cfg.hidden_size, self.num_heads * self.head_dim,
                               bias=False, levels=3, group_size=gs)
         self.k_proj = QLinear(cfg.hidden_size, self.num_kv * self.head_dim,
                               bias=False, levels=3, group_size=gs)
-        self.v_proj = QLinear(cfg.hidden_size, self.num_kv * self.head_dim,
-                              bias=False, levels=3, group_size=gs)
+        if self.share_kv:
+            self.v_proj = None
+        else:
+            self.v_proj = QLinear(cfg.hidden_size, self.num_kv * self.head_dim,
+                                  bias=False, levels=3, group_size=gs)
         self.o_proj = QLinear(self.num_heads * self.head_dim, cfg.hidden_size,
                               bias=False, levels=3, group_size=gs)
 
@@ -134,8 +142,13 @@ class HrmAttention(nn.Module):
                 sin: torch.Tensor) -> torch.Tensor:
         B, S, _ = x.shape
         q = self.q_proj(x).view(B, S, self.num_heads, self.head_dim).transpose(1, 2)
-        k = self.k_proj(x).view(B, S, self.num_kv, self.head_dim).transpose(1, 2)
-        v = self.v_proj(x).view(B, S, self.num_kv, self.head_dim).transpose(1, 2)
+        kv_or_k = self.k_proj(x).view(B, S, self.num_kv, self.head_dim).transpose(1, 2)
+        if self.share_kv:
+            v = kv_or_k
+            k = kv_or_k
+        else:
+            k = kv_or_k
+            v = self.v_proj(x).view(B, S, self.num_kv, self.head_dim).transpose(1, 2)
         q, k = apply_rope(q, k, cos, sin)
         if self.kv_groups > 1:
             k = k.repeat_interleave(self.kv_groups, dim=1)

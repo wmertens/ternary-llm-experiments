@@ -33,6 +33,7 @@ class GptBopConfig:
     tie_word_embeddings: bool = True
     scale_group_size: int = 64
     embedding_scale: float = 1.0
+    share_kv: bool = False     # Q-K=V (arxiv 2606.04032)
 
     @property
     def head_dim(self) -> int:

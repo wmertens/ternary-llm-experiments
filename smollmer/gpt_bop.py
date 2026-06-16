@@ -303,6 +303,7 @@ def save_safetensors(model: nn.Module, path: Path,
         "tie_word_embeddings": "true" if cfg.tie_word_embeddings else "false",
         "scale_group_size": str(cfg.scale_group_size),
         "embedding_scale": str(cfg.embedding_scale),
+        "share_kv": "true" if cfg.share_kv else "false",
     }
     if extra_meta:
         meta.update({k: str(v) for k, v in extra_meta.items()})
@@ -352,6 +353,11 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--num-kv-heads", type=int, default=8)
     ap.add_argument("--intermediate-size", type=int, default=1408)
     ap.add_argument("--num-layers", type=int, default=6)
+    ap.add_argument("--share-kv", action="store_true", default=False,
+                    help="Q-K=V (arxiv 2606.04032): share the K and V "
+                         "projection weights, keep Q separate. Drops one "
+                         "QLinear per attention block; K gets RoPE, V uses "
+                         "the pre-RoPE output of the same projection.")
     ap.add_argument("--vocab-size", type=int, default=49152)
     ap.add_argument("--max-position-embeddings", type=int, default=1024)
     ap.add_argument("--rope-theta", type=float, default=10000.0)
@@ -539,6 +545,7 @@ def main() -> None:
         max_position_embeddings=args.max_position_embeddings,
         rope_theta=args.rope_theta,
         scale_group_size=args.scale_group_size,
+        share_kv=args.share_kv,
     )
     print(f"[build] cfg={cfg}", flush=True)
     model = GptBopModel(cfg)
