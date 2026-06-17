@@ -25,9 +25,9 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="001"
-RUN_TAG="baseline-fastA-cmuon-ste"
-DESCRIPTION="Baseline ternary GPT: 6 layers, hidden=512, heads=8, ff=1408 (~38M params, matches fast-A's effective depth from HRM Run 33's H=2 L=2 cycles=2x3). Conservative recipe transferred from HRM champion (Run 25/40): random init trits (50pct zero), per-(row, group) lognormal frozen scales, freeze non-embed FP, CMuon-STE with cautious mask, lr=0.20 cosine to 0.02. 5000 steps, bs=2 ga=16 (same as HRM fast-A). FineWeb/Cosmopedia/OpenMath 70/25/5 (default mix). Goal: establish the ternary-GPT leaderboard floor. ETA ~5h."
+RUN_N="002"
+RUN_TAG="sharekv-baseline-fastA"
+DESCRIPTION="Q-K=V (arxiv 2606.04032): share W_K and W_V across attention, keep Q separate. Same recipe as g001 + --share-kv. Param count: 43.14M vs g001 44.74M (-1.60M, -8pct of trits = 1.57M fewer ternary params + ~50K fewer scales). K gets RoPE, V uses pre-RoPE output of k_proj. Paper reports +2.48pct PPL at 1.2B with 50pct KV cache savings; reading at this scale TBD. Pass: val < g001 4.0645 + 5pct (~+0.20 nats absolute) → promote K=V to new baseline and propagate forward; fail: drop and route Phase 2 / 3 exploration without it. 5000 steps, ~2h ETA (faster than g001 since fewer projections)."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
@@ -48,7 +48,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-scales --freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.20 --muon-lr-floor 0.02}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-scales --freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.20 --muon-lr-floor 0.02 --share-kv}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 
