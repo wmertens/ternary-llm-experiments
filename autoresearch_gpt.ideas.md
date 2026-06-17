@@ -108,6 +108,19 @@ P5g. **Block sparsity** (later, after Phases 1-5a settle). Some blocks
 - HRM fast-A champion: Run 25/40 — val 4.16 (5000 steps) / 4.00 (10000 steps) at this recipe.
 - Likely GPT baseline floor: val ≈ 4.5-5.0 at 5000 steps (no recurrence means less effective depth; HRM ran the L_stack 6× and H_stack 2×, far more compute per token than a flat 6-layer GPT). Actual baseline TBD.
 
+## Reference-only (not queued at current scale)
+
+- **Muon momentum spectra at scale (arxiv 2606.04058v2)** — empirical
+  power laws for the per-layer singular-value spectra of Muon's momentum
+  buffer (77M-2.8B). Recipe variant: rank-p truncated Newton-Schulz
+  (p=0.5 ≈ full Muon, p=0.25 -10 to 20% perf, p=0.1 -50%). Could cut NS
+  iteration cost, but NS is not our bottleneck at 6 layers / hidden=512
+  — Lion32 on 25M FP embeds + the STE projection dominate. Scaling law
+  exponents fit on many-layer models, not directly portable to depth=6.
+  Skip; re-evaluate at >150M / 12+ layers, where per-layer NS budgeting
+  could matter. Implementation if needed: ~30 lines in cmuon.py + a
+  --muon-rank-frac flag.
+
 ## Open questions the loop can answer
 - Is CMuon's optimum LR architecture-dependent or recipe-universal?
 - Does per-tensor BitNet scale tie/beat per-(row, group) frozen on a non-recurrent model?
