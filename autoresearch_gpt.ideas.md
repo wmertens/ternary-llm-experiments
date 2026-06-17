@@ -26,7 +26,10 @@ Knobs that change the effective work per step or the optimisation regime, with n
 4. **CMuon LR sweep** on the GPT baseline. HRM hit 0.20 optimal at fast-A; check whether GPT has the same optimum or wants something different (no recurrence = different gradient norm regime).
 5. **LR floor / cosine shape** sweep: cosine→0.02 / →0.01 / →0.05; linear decay / inverse-sqrt comparison.
 6. **Warmup** sweep: 0 / 100 / 400 steps.
-7. **Bigger batch via grad accum** (bs=2 ga=16 → 32 / 64). Tests whether effective batch matters or step count matters.
+7. **Bigger batch via grad accum** (bs=2 ga=16 → 32 / 64). Tests whether effective batch matters or step count matters. **User steer 2026-06-17**: at g003 only 2.5GB / 6.1GB used → 3.3GB headroom available. Two clean experiments isolate the effects:
+   - 7a. **bs=4 ga=8** — effective batch stays 32, pure wall-time win (more sequences per forward, same per-step gradient). Run this FIRST after the LR sweep settles.
+   - 7b. **bs=4 ga=16** — effective batch doubles to 64. Quality effect, may need LR re-tune.
+   - 7c. **bs=8 ga=4** if 7a passes — push the VRAM further.
 
 ### Phase 2 — Quantisation knobs
 After Phase 1 stabilises the compute regime.
