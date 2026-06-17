@@ -25,9 +25,9 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="003"
-RUN_TAG="sharekv-cmuon-bf16-state"
-DESCRIPTION="Phase 1 #2: CMuon momentum dtype fp32 → bf16. Same as g002 (share-kv baseline) + --cmuon-state-dtype bfloat16. Halves CMuon's m buffer memory; NS5 stays fp32 internally (precision-sensitive). bf16 has fp32's range but 8 fewer mantissa bits, so EMA update is ~1e-3 relative error vs fp32. HRM Run 8 at tiny non-loop scale showed fp16-m cost +0.011 nats; bf16 expected to be at-or-better than fp16 (no underflow, no SR needed). Pass: val < g002 4.1335 + 1pct (~+0.04 nats) → adopt bf16 as new baseline. ~2h ETA."
+RUN_N="004"
+RUN_TAG="sharekv-bf16-muonlr0p30"
+DESCRIPTION="Phase 1 #4: CMuon LR sweep, leg 1 — lr=0.30 (up from g003's 0.20). Same baseline as g003 + --muon-lr 0.30 --muon-lr-floor 0.03. HRM found lr=0.20 optimum at fast-A; GPT may want different optimum since gradient-flow regime is different (no full-BPTT-through-cycles). Bisect: if val < g003 4.1281 → optimum > 0.20, sweep to 0.40 next; if > 4.1281 → optimum at or below 0.20, sweep to 0.15. Either direction locks the GPT LR within ~2x. ~2h ETA."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
@@ -48,7 +48,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-scales --freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.20 --muon-lr-floor 0.02 --share-kv --cmuon-state-dtype bfloat16}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-scales --freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.30 --muon-lr-floor 0.03 --share-kv --cmuon-state-dtype bfloat16}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 
