@@ -25,17 +25,17 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="005"
-RUN_TAG="sharekv-bf16-muonlr0p15"
-DESCRIPTION="CMuon LR sweep leg 2: muon-lr=0.15 (down from g003 0.20, after g004 0.30 came in worse). Same baseline + --muon-lr 0.15 --muon-lr-floor 0.015. Bisect: if val < g003 4.1281 → optimum < 0.20, sweep to 0.10; if > 4.1281 → optimum bracketed in (0.15, 0.30) with 0.20 the likely floor. ~2h ETA."
+RUN_N="006"
+RUN_TAG="sharekv-bf16-bs4-muonlr0p10"
+DESCRIPTION="CMuon LR sweep leg 3: muon-lr=0.10 (down from g005's 0.15, which was -0.013 better than g003's 0.20). bs=4 ga=8 baseline now. If g006 < g005 4.1147 → optimum still below 0.10, sweep to 0.05. If > g005 → optimum bracketed in (0.10, 0.20) with g005 0.15 the likely floor. ~1.5h ETA with bs=4."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
 
 # Defaults: fast-A scale (38M ternary). Override per experiment as needed.
 TOTAL_STEPS="${TOTAL_STEPS:-5000}"
-BATCH_SIZE="${BATCH_SIZE:-2}"
-GRAD_ACCUM="${GRAD_ACCUM:-16}"
+BATCH_SIZE="${BATCH_SIZE:-4}"
+GRAD_ACCUM="${GRAD_ACCUM:-8}"
 HIDDEN_SIZE="${HIDDEN_SIZE:-512}"
 NUM_HEADS="${NUM_HEADS:-8}"
 INTERMEDIATE="${INTERMEDIATE:-1408}"
@@ -48,7 +48,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-scales --freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --share-kv --cmuon-state-dtype bfloat16}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-scales --freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.10 --muon-lr-floor 0.01 --share-kv --cmuon-state-dtype bfloat16}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 
