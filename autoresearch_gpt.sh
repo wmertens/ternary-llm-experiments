@@ -25,9 +25,9 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="002"
-RUN_TAG="sharekv-baseline-fastA"
-DESCRIPTION="Q-K=V (arxiv 2606.04032): share W_K and W_V across attention, keep Q separate. Same recipe as g001 + --share-kv. Param count: 43.14M vs g001 44.74M (-1.60M, -8pct of trits = 1.57M fewer ternary params + ~50K fewer scales). K gets RoPE, V uses pre-RoPE output of k_proj. Paper reports +2.48pct PPL at 1.2B with 50pct KV cache savings; reading at this scale TBD. Pass: val < g001 4.0645 + 5pct (~+0.20 nats absolute) → promote K=V to new baseline and propagate forward; fail: drop and route Phase 2 / 3 exploration without it. 5000 steps, ~2h ETA (faster than g001 since fewer projections)."
+RUN_N="003"
+RUN_TAG="sharekv-cmuon-bf16-state"
+DESCRIPTION="Phase 1 #2: CMuon momentum dtype fp32 → bf16. Same as g002 (share-kv baseline) + --cmuon-state-dtype bfloat16. Halves CMuon's m buffer memory; NS5 stays fp32 internally (precision-sensitive). bf16 has fp32's range but 8 fewer mantissa bits, so EMA update is ~1e-3 relative error vs fp32. HRM Run 8 at tiny non-loop scale showed fp16-m cost +0.011 nats; bf16 expected to be at-or-better than fp16 (no underflow, no SR needed). Pass: val < g002 4.1335 + 1pct (~+0.04 nats) → adopt bf16 as new baseline. ~2h ETA."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
@@ -48,7 +48,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-scales --freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.20 --muon-lr-floor 0.02 --share-kv}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-scales --freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.20 --muon-lr-floor 0.02 --share-kv --cmuon-state-dtype bfloat16}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 
