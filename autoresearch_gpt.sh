@@ -25,9 +25,9 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="004"
-RUN_TAG="sharekv-bf16-muonlr0p30"
-DESCRIPTION="Phase 1 #4: CMuon LR sweep, leg 1 — lr=0.30 (up from g003's 0.20). Same baseline as g003 + --muon-lr 0.30 --muon-lr-floor 0.03. HRM found lr=0.20 optimum at fast-A; GPT may want different optimum since gradient-flow regime is different (no full-BPTT-through-cycles). Bisect: if val < g003 4.1281 → optimum > 0.20, sweep to 0.40 next; if > 4.1281 → optimum at or below 0.20, sweep to 0.15. Either direction locks the GPT LR within ~2x. ~2h ETA."
+RUN_N="005"
+RUN_TAG="sharekv-bf16-muonlr0p15"
+DESCRIPTION="CMuon LR sweep leg 2: muon-lr=0.15 (down from g003 0.20, after g004 0.30 came in worse). Same baseline + --muon-lr 0.15 --muon-lr-floor 0.015. Bisect: if val < g003 4.1281 → optimum < 0.20, sweep to 0.10; if > 4.1281 → optimum bracketed in (0.15, 0.30) with 0.20 the likely floor. ~2h ETA."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
@@ -48,7 +48,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-scales --freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.30 --muon-lr-floor 0.03 --share-kv --cmuon-state-dtype bfloat16}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-scales --freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --share-kv --cmuon-state-dtype bfloat16}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 
@@ -84,7 +84,7 @@ python -u -m smollmer.gpt_bop \
     --checkpoint-every "$CHECKPOINT_EVERY" \
     --ema-warmup "$EMA_WARMUP" \
     "${EXTRA_ARGS[@]}" \
-    2>&1 | tee "$OUT_DIR/train.log"
+    2>&1 | tee -a "$OUT_DIR/train.log"
 
 EXIT=${PIPESTATUS[0]}
 END_TIME=$(date +%s)
