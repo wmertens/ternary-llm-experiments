@@ -25,9 +25,9 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="011"
-RUN_TAG="trit-embeddings-unit-scale-init"
-DESCRIPTION="Phase 5 follow-up: trit-emb + unfrozen scales but DROP --random-scales (so scales start at 1.0 instead of lognormal random init). When scales were frozen, lognormal init was a useful 'random projection' priors; now that scales are trainable, the lognormal noise is just a starting offset the model has to undo. Cleaner unit-scale init may train faster. Compare to g009 4.3840 (lognormal init). Pass: val < g009 → unit-scale init wins, becomes new trit-emb baseline. ~2h ETA."
+RUN_N="012"
+RUN_TAG="trit-emb-muonlr0p10"
+DESCRIPTION="Phase 5 + LR re-sweep: trit-emb regime might want a different CMuon LR than FP-emb regime (different gradient stats from embedding backward). Same as g011 + --muon-lr 0.10 (down from 0.15). Compare to g011 4.3731. If g012 < g011 → optimum lr below 0.15 for trit-emb, sweep down. If > g011 → trit-emb keeps lr=0.15 as optimum. ~2h ETA."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
@@ -48,7 +48,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --share-kv --cmuon-state-dtype bfloat16 --trit-embeddings}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.10 --muon-lr-floor 0.01 --share-kv --cmuon-state-dtype bfloat16 --trit-embeddings}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 
