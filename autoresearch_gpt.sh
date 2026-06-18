@@ -25,15 +25,15 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="009"
-RUN_TAG="trit-embeddings-unfrozen-scales"
-DESCRIPTION="Phase 5a follow-up: trit-embeddings with UNFROZEN scales (drop --freeze-scales). g008 showed identical training slope but +0.67 nat flat offset, suggesting init mismatch — frozen lognormal random scales may not be the right embedding parameterisation. With trainable scales, ~670K FP params become Lion-managed (still 98.5pct ternary). Compare against g008 4.7801 (frozen scales) and g005 4.1147 (FP embeddings). Pass: closes ≥30pct of the 0.67-nat gap → scale-precision is the lever. Fail: no improvement → init mismatch isn't about scales, try longer training or different init scheme. ~2h ETA."
+RUN_N="010"
+RUN_TAG="trit-embeddings-unfrozen-10k-steps"
+DESCRIPTION="Phase 5a final test: g009 recipe (trit-embeddings + unfrozen scales) at 10000 steps. g009 closed 60pct of the FP-embed gap and was still descending at -0.049/500 at step 5000 (steeper than g005's end-slope -0.027/500). 10000 steps should largely close the remaining 0.27 nats. If g010 lands below g005's 4.1147 → Phase 5a is COMPLETE and 98.5pct-ternary fast-A matches FP-embed baseline at extended compute. ~4h ETA at 10000 steps."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
 
 # Defaults: fast-A scale (38M ternary). Override per experiment as needed.
-TOTAL_STEPS="${TOTAL_STEPS:-5000}"
+TOTAL_STEPS="${TOTAL_STEPS:-10000}"
 BATCH_SIZE="${BATCH_SIZE:-4}"
 GRAD_ACCUM="${GRAD_ACCUM:-8}"
 HIDDEN_SIZE="${HIDDEN_SIZE:-512}"
