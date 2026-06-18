@@ -304,6 +304,7 @@ def save_safetensors(model: nn.Module, path: Path,
         "scale_group_size": str(cfg.scale_group_size),
         "embedding_scale": str(cfg.embedding_scale),
         "share_kv": "true" if cfg.share_kv else "false",
+        "trit_embeddings": "true" if cfg.trit_embeddings else "false",
     }
     if extra_meta:
         meta.update({k: str(v) for k, v in extra_meta.items()})
@@ -358,6 +359,13 @@ def build_argparser() -> argparse.ArgumentParser:
                          "projection weights, keep Q separate. Drops one "
                          "QLinear per attention block; K gets RoPE, V uses "
                          "the pre-RoPE output of the same projection.")
+    ap.add_argument("--trit-embeddings", action="store_true", default=False,
+                    help="Phase 5a: replace the FP nn.Embedding with a "
+                         "ternary QEmbedding (latent FP, per-(row, group) "
+                         "scale, STE in backward). With tie_word_embeddings "
+                         "the tied lm_head matmul uses the quantised+scaled "
+                         "table too. Cuts ~25M FP params at fast-A; per-row "
+                         "scales (49152 × 8 ≈ 400KB FP residual).")
     ap.add_argument("--vocab-size", type=int, default=49152)
     ap.add_argument("--max-position-embeddings", type=int, default=1024)
     ap.add_argument("--rope-theta", type=float, default=10000.0)
@@ -546,6 +554,7 @@ def main() -> None:
         rope_theta=args.rope_theta,
         scale_group_size=args.scale_group_size,
         share_kv=args.share_kv,
+        trit_embeddings=args.trit_embeddings,
     )
     print(f"[build] cfg={cfg}", flush=True)
     model = GptBopModel(cfg)

@@ -16,6 +16,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .hrm_model import (HrmDecoderLayer, RMSNorm, RotaryEmbedding)
+from .qlinear import QEmbedding
 
 
 @dataclass
@@ -34,6 +35,7 @@ class GptBopConfig:
     scale_group_size: int = 64
     embedding_scale: float = 1.0
     share_kv: bool = False     # Q-K=V (arxiv 2606.04032)
+    trit_embeddings: bool = False   # Phase 5a: ternary token embedding
 
     @property
     def head_dim(self) -> int:
@@ -48,7 +50,12 @@ class GptBopModel(nn.Module):
     def __init__(self, cfg: GptBopConfig) -> None:
         super().__init__()
         self.cfg = cfg
-        self.embed_tokens = nn.Embedding(cfg.vocab_size, cfg.hidden_size)
+        if cfg.trit_embeddings:
+            self.embed_tokens = QEmbedding(
+                cfg.vocab_size, cfg.hidden_size,
+                group_size=cfg.scale_group_size, levels=3)
+        else:
+            self.embed_tokens = nn.Embedding(cfg.vocab_size, cfg.hidden_size)
         self.layers = nn.ModuleList(
             [HrmDecoderLayer(cfg) for _ in range(cfg.num_layers)])
         self.final_norm = RMSNorm(cfg.hidden_size, eps=cfg.rms_norm_eps)
@@ -82,5 +89,13 @@ class GptBopModel(nn.Module):
             x = layer(x, cos, sin)
         x = self.final_norm(x)
         if self.lm_head is None:
-            return F.linear(x, self.embed_tokens.weight)
+            # Tied. If the embed is QEmbedding the matmul target is the
+            # ternary-quantised+scaled table so input and output projections
+            # share the same coarse weights. Plain nn.Embedding falls back
+            # to the raw FP weight.
+            if hasattr(self.embed_tokens, "quantized_scaled_weight"):
+                w = self.embed_tokens.quantized_scaled_weight()
+            else:
+                w = self.embed_tokens.weight
+            return F.linear(x, w)
         return self.lm_head(x)

@@ -25,17 +25,17 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="007"
-RUN_TAG="sharekv-bf16-effbatch64"
-DESCRIPTION="Phase 1 #7b: effective-batch sweep. lr=0.15 winner + bs=2 ga=32 (effective batch 64, doubled from 32). NO VRAM increase (bs unchanged). Tests whether larger gradient denoising helps quality at this scale. Pass: val < g005 4.1147 → eff=64 wins, adopt and re-sweep LR (larger batch tolerates higher LR). Fail: val > g005 → eff=32 sticks, move to Phase 2 (per-tensor BitNet scale) or Phase 5 (tritise embeddings). ~2h ETA at bs=2."
+RUN_N="008"
+RUN_TAG="trit-embeddings-lr0p15-bs4"
+DESCRIPTION="Phase 5a: TRITISE THE EMBEDDINGS. Same baseline as g005 (lr=0.15 + share-kv + bf16 m + bs=4 ga=8) + --trit-embeddings. New QEmbedding class: 25M FP embedding → 25M ternary latents + 393K FP per-(row,group) scales. Tied lm_head sees the quantised+scaled table too (no asymmetric ternary-in/FP-out). FP residual drops from 25.45M → 0.68M (-97pct of FP). Compare against g005 4.1147 (best eff=32 baseline). Pass: any val < ~4.5 means tritised embeddings work; <4.2 means competitive. Fail: model collapses or val > 5 → likely need unfrozen scales or different init scheme. ~2h ETA."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
 
 # Defaults: fast-A scale (38M ternary). Override per experiment as needed.
 TOTAL_STEPS="${TOTAL_STEPS:-5000}"
-BATCH_SIZE="${BATCH_SIZE:-2}"
-GRAD_ACCUM="${GRAD_ACCUM:-32}"
+BATCH_SIZE="${BATCH_SIZE:-4}"
+GRAD_ACCUM="${GRAD_ACCUM:-8}"
 HIDDEN_SIZE="${HIDDEN_SIZE:-512}"
 NUM_HEADS="${NUM_HEADS:-8}"
 INTERMEDIATE="${INTERMEDIATE:-1408}"
@@ -48,7 +48,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-scales --freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --share-kv --cmuon-state-dtype bfloat16}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-scales --freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --share-kv --cmuon-state-dtype bfloat16 --trit-embeddings}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 

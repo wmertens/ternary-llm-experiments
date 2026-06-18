@@ -922,3 +922,55 @@ def invalidate_q_cache(model: nn.Module) -> int:
             m.invalidate_q_cache()
             n += 1
     return n
+
+
+class QEmbedding(QLinear):
+    """Ternary token embedding. Subclasses QLinear so every QLinear-aware
+    helper in the codebase (init_trits_random, init_scales_*, freeze_scales,
+    split_params, BopTernary opt scanning, ckpt code) treats it identically
+    — the only difference is the forward path does an embedding lookup
+    instead of a matmul.
+
+    Latent weight is [vocab_size, hidden_size] (interpreted as
+    [out_features, in_features] from QLinear's perspective). Per-(row, group)
+    scales tensor [vocab_size, n_groups] is shared with the same machinery.
+
+    For Phase 5a of autoresearch_gpt: replace the FP nn.Embedding with this
+    to make the 25M-param token-embedding tensor ternary.
+    """
+
+    def __init__(self, num_embeddings: int, embedding_dim: int,
+                 group_size: int = 64, levels: int = 3) -> None:
+        super().__init__(in_features=embedding_dim,
+                         out_features=num_embeddings,
+                         bias=False, levels=levels,
+                         group_size=group_size)
+
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
+        # FP control path: just lookup the latent FP weight.
+        if getattr(self, "fp_weights", False):
+            return F.embedding(input_ids, self.weight)
+        # Look up the FP latent rows actually used in this batch.
+        w_rows = F.embedding(input_ids, self.weight)  # [B, S, H]
+        # STE-quantize the looked-up rows; quantize_levels is a no-grad
+        # round and the (q - w).detach() bridges the autograd graph so
+        # the latent receives the gradient of the consumer.
+        with torch.no_grad():
+            q_rows = quantize_levels(w_rows, self.levels)
+        q_ste = w_rows + (q_rows - w_rows).detach()
+        # Look up the per-row scales for the same tokens, broadcast each
+        # group-scale across its in_features-group columns.
+        s_rows = F.embedding(input_ids, self.scales)  # [B, S, n_groups]
+        s_full = s_rows.repeat_interleave(self.group_size, dim=-1)
+        return q_ste * s_full
+
+    def quantized_scaled_weight(self) -> torch.Tensor:
+        """Full [V, H] quantised + scaled embedding table. Used by the
+        tied-lm_head matmul path so the output projection sees the same
+        ternary weights as the input lookup. Not cached (called once per
+        forward, identical to forward()'s lookup-then-scale)."""
+        if getattr(self, "fp_weights", False):
+            return self.weight
+        q = self.quantized_weight()  # [V, H], STE-bridged
+        s_full = self.scales.repeat_interleave(self.group_size, dim=-1)
+        return q * s_full
