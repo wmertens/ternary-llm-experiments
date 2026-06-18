@@ -25,9 +25,9 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="008"
-RUN_TAG="trit-embeddings-lr0p15-bs4"
-DESCRIPTION="Phase 5a: TRITISE THE EMBEDDINGS. Same baseline as g005 (lr=0.15 + share-kv + bf16 m + bs=4 ga=8) + --trit-embeddings. New QEmbedding class: 25M FP embedding → 25M ternary latents + 393K FP per-(row,group) scales. Tied lm_head sees the quantised+scaled table too (no asymmetric ternary-in/FP-out). FP residual drops from 25.45M → 0.68M (-97pct of FP). Compare against g005 4.1147 (best eff=32 baseline). Pass: any val < ~4.5 means tritised embeddings work; <4.2 means competitive. Fail: model collapses or val > 5 → likely need unfrozen scales or different init scheme. ~2h ETA."
+RUN_N="009"
+RUN_TAG="trit-embeddings-unfrozen-scales"
+DESCRIPTION="Phase 5a follow-up: trit-embeddings with UNFROZEN scales (drop --freeze-scales). g008 showed identical training slope but +0.67 nat flat offset, suggesting init mismatch — frozen lognormal random scales may not be the right embedding parameterisation. With trainable scales, ~670K FP params become Lion-managed (still 98.5pct ternary). Compare against g008 4.7801 (frozen scales) and g005 4.1147 (FP embeddings). Pass: closes ≥30pct of the 0.67-nat gap → scale-precision is the lever. Fail: no improvement → init mismatch isn't about scales, try longer training or different init scheme. ~2h ETA."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
@@ -48,7 +48,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-scales --freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --share-kv --cmuon-state-dtype bfloat16 --trit-embeddings}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --share-kv --cmuon-state-dtype bfloat16 --trit-embeddings}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 
