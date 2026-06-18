@@ -46,6 +46,7 @@ class HrmBopConfig:
     scale_group_size: int = 64
     embedding_scale: float = 1.0
     share_kv: bool = False     # Q-K=V (arxiv 2606.04032)
+    sandwich_norm: bool = False     # RMSNorm before AND after attn/mlp output
 
     @property
     def head_dim(self) -> int:
@@ -181,7 +182,14 @@ class HrmMLP(nn.Module):
 
 
 class HrmDecoderLayer(nn.Module):
-    """HF-Llama style: pre-norm → attn → residual → pre-norm → mlp → residual."""
+    """HF-Llama style: pre-norm → attn → residual → pre-norm → mlp → residual.
+
+    With cfg.sandwich_norm=True, RMSNorm is also applied to the attn and
+    MLP OUTPUTS before adding to the residual, sandwiching each sublayer:
+    pre-norm → attn → post-norm → residual → pre-norm → mlp → post-norm → residual.
+    Modest extra param cost (2 extra RMSNorms per block); often
+    stabilises training in small/quantised models.
+    """
 
     def __init__(self, cfg: HrmBopConfig) -> None:
         super().__init__()
@@ -189,11 +197,24 @@ class HrmDecoderLayer(nn.Module):
         self.self_attn = HrmAttention(cfg)
         self.post_attn_norm = RMSNorm(cfg.hidden_size, eps=cfg.rms_norm_eps)
         self.mlp = HrmMLP(cfg)
+        self.sandwich = bool(getattr(cfg, "sandwich_norm", False))
+        if self.sandwich:
+            self.attn_out_norm = RMSNorm(cfg.hidden_size, eps=cfg.rms_norm_eps)
+            self.mlp_out_norm = RMSNorm(cfg.hidden_size, eps=cfg.rms_norm_eps)
+        else:
+            self.attn_out_norm = None
+            self.mlp_out_norm = None
 
     def forward(self, x: torch.Tensor, cos: torch.Tensor,
                 sin: torch.Tensor) -> torch.Tensor:
-        x = x + self.self_attn(self.input_norm(x), cos, sin)
-        x = x + self.mlp(self.post_attn_norm(x))
+        attn_out = self.self_attn(self.input_norm(x), cos, sin)
+        if self.attn_out_norm is not None:
+            attn_out = self.attn_out_norm(attn_out)
+        x = x + attn_out
+        mlp_out = self.mlp(self.post_attn_norm(x))
+        if self.mlp_out_norm is not None:
+            mlp_out = self.mlp_out_norm(mlp_out)
+        x = x + mlp_out
         return x
 
 

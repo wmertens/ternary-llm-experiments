@@ -366,6 +366,11 @@ def build_argparser() -> argparse.ArgumentParser:
                          "the tied lm_head matmul uses the quantised+scaled "
                          "table too. Cuts ~25M FP params at fast-A; per-row "
                          "scales (49152 × 8 ≈ 400KB FP residual).")
+    ap.add_argument("--sandwich-norm", action="store_true", default=False,
+                    help="Add an extra RMSNorm to the attn output and to "
+                         "the MLP output (in addition to the existing pre-"
+                         "norms). 4 norms per block instead of 2. Cheap "
+                         "stabiliser sometimes useful for quantised models.")
     ap.add_argument("--vocab-size", type=int, default=49152)
     ap.add_argument("--max-position-embeddings", type=int, default=1024)
     ap.add_argument("--rope-theta", type=float, default=10000.0)
@@ -555,6 +560,7 @@ def main() -> None:
         scale_group_size=args.scale_group_size,
         share_kv=args.share_kv,
         trit_embeddings=args.trit_embeddings,
+        sandwich_norm=args.sandwich_norm,
     )
     print(f"[build] cfg={cfg}", flush=True)
     model = GptBopModel(cfg)

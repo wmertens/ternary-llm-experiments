@@ -36,6 +36,7 @@ class GptBopConfig:
     embedding_scale: float = 1.0
     share_kv: bool = False     # Q-K=V (arxiv 2606.04032)
     trit_embeddings: bool = False   # Phase 5a: ternary token embedding
+    sandwich_norm: bool = False     # Pre+post RMSNorm around attn/mlp
 
     @property
     def head_dim(self) -> int:
