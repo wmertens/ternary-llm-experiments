@@ -25,17 +25,17 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="014"
-RUN_TAG="trit-emb-sandwich-norm"
-DESCRIPTION="Phase 3 #14: sandwich norm — extra RMSNorm on attn output and MLP output (4 norms per block instead of 2). Cheap (+12.8K params) stabiliser; some lit shows it helps quantised models. On the g011 baseline (trit-emb, lr=0.15, bs=4 ga=8 eff=32). Compare to g011 4.3731. If g014 < 4.3731 → architectural win, propagate. ~2h ETA."
+RUN_N="015"
+RUN_TAG="phase5-all-wins-eff64-10k"
+DESCRIPTION="Phase 5 ASYMPTOTE: combine all keepers (trit-emb + unfrozen scales + share-kv + bf16 m + lr=0.15 + eff=64) at 10000 steps. Tells us where the full-stack Phase 1+5 recipe lands at extended compute. Compare to g013 (5k steps, same recipe) 4.2016 — should see another ~0.15 nat drop based on the trit-emb 5k→10k g010 trajectory (4.37→4.16 = -0.21). Predict val ~4.05-4.10. If meets, the Phase 5 recipe asymptote is competitive with FP baseline. ~8h ETA overnight."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
 
 # Defaults: fast-A scale (38M ternary). Override per experiment as needed.
-TOTAL_STEPS="${TOTAL_STEPS:-5000}"
-BATCH_SIZE="${BATCH_SIZE:-4}"
-GRAD_ACCUM="${GRAD_ACCUM:-8}"
+TOTAL_STEPS="${TOTAL_STEPS:-10000}"
+BATCH_SIZE="${BATCH_SIZE:-2}"
+GRAD_ACCUM="${GRAD_ACCUM:-32}"
 HIDDEN_SIZE="${HIDDEN_SIZE:-512}"
 NUM_HEADS="${NUM_HEADS:-8}"
 INTERMEDIATE="${INTERMEDIATE:-1408}"
@@ -48,7 +48,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --share-kv --cmuon-state-dtype bfloat16 --trit-embeddings --sandwich-norm}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --share-kv --cmuon-state-dtype bfloat16 --trit-embeddings}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 
