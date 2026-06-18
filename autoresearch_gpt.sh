@@ -25,17 +25,17 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="012"
-RUN_TAG="trit-emb-muonlr0p10"
-DESCRIPTION="Phase 5 + LR re-sweep: trit-emb regime might want a different CMuon LR than FP-emb regime (different gradient stats from embedding backward). Same as g011 + --muon-lr 0.10 (down from 0.15). Compare to g011 4.3731. If g012 < g011 → optimum lr below 0.15 for trit-emb, sweep down. If > g011 → trit-emb keeps lr=0.15 as optimum. ~2h ETA."
+RUN_N="013"
+RUN_TAG="trit-emb-effbatch64"
+DESCRIPTION="COMPOUND wins: trit-embeddings (Phase 5a) + eff batch 64 (Phase 1 #7b). Same recipe as g011 but bs=2 ga=32. If eff=64's -0.10 nat win at FP-emb (g007 4.0085 vs g005 4.1147) compounds with trit-emb (g011 4.3731), g013 should hit ~4.27. Tests whether the wins are additive across phases. ~4h ETA at bs=2 doubled accum."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
 
 # Defaults: fast-A scale (38M ternary). Override per experiment as needed.
 TOTAL_STEPS="${TOTAL_STEPS:-5000}"
-BATCH_SIZE="${BATCH_SIZE:-4}"
-GRAD_ACCUM="${GRAD_ACCUM:-8}"
+BATCH_SIZE="${BATCH_SIZE:-2}"
+GRAD_ACCUM="${GRAD_ACCUM:-32}"
 HIDDEN_SIZE="${HIDDEN_SIZE:-512}"
 NUM_HEADS="${NUM_HEADS:-8}"
 INTERMEDIATE="${INTERMEDIATE:-1408}"
@@ -48,7 +48,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.10 --muon-lr-floor 0.01 --share-kv --cmuon-state-dtype bfloat16 --trit-embeddings}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --share-kv --cmuon-state-dtype bfloat16 --trit-embeddings}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 
