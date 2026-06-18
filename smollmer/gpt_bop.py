@@ -706,13 +706,16 @@ def main() -> None:
         lion_groups.append({"params": scale_params, "lr": args.lr})
     if fp_params:
         lion_groups.append({"params": fp_params, "lr": args.lr})
-    if not lion_groups:
-        raise RuntimeError(
-            "Lion has zero parameters to train after --freeze-* flags. "
-            "Trainer assumes at least one FP-class param is live; if you "
-            "really want pure-Bop, comment out the opt_lion.step() call.")
-    opt_lion = Lion32(lion_groups, lr=args.lr, betas=tuple(args.lion_betas),
-                      weight_decay=args.lion_wd)
+    if lion_groups:
+        opt_lion = Lion32(lion_groups, lr=args.lr, betas=tuple(args.lion_betas),
+                          weight_decay=args.lion_wd)
+    else:
+        # Pure-Bop: every FP-class param frozen (e.g. --freeze-scales
+        # --freeze-non-embed-fp + --trit-embeddings leaves nothing). The
+        # step path below skips opt_lion.step() when this is None.
+        opt_lion = None
+        print("[opt] Lion: no params (pure-Bop / all-FP-frozen mode)",
+              flush=True)
     print(f"[opt] Bop(Bet1) γ={args.gamma:g} γv={args.gamma_v:g} "
           f"τ_norm={args.tau_norm:g}; Lion lr={args.lr:g} "
           f"betas={tuple(args.lion_betas)}", flush=True)
@@ -743,8 +746,11 @@ def main() -> None:
         if opt_lion_trits is not None and "opt_lion_trits" in interrupted_state:
             opt_lion_trits.load_state_dict(interrupted_state["opt_lion_trits"])
             del interrupted_state["opt_lion_trits"]
-        opt_lion.load_state_dict(interrupted_state["opt_lion"])
-        del interrupted_state["opt_lion"]
+        if opt_lion is not None and "opt_lion" in interrupted_state:
+            opt_lion.load_state_dict(interrupted_state["opt_lion"])
+            del interrupted_state["opt_lion"]
+        elif "opt_lion" in interrupted_state:
+            del interrupted_state["opt_lion"]
         # PyTorch's load_state_dict restores param_groups from the resume
         # file, clobbering the CLI-set hyperparams. Re-apply them so a
         # mid-run retune actually takes effect on the warm-resumed run.
@@ -758,8 +764,9 @@ def main() -> None:
             for g in opt_cmuon.param_groups:
                 g["lr"] = args.muon_lr
                 g["beta"] = args.muon_beta
-        for g in opt_lion.param_groups:
-            g["lr"] = args.lr     # cosine sched re-applies each step anyway
+        if opt_lion is not None:
+            for g in opt_lion.param_groups:
+                g["lr"] = args.lr     # cosine sched re-applies each step anyway
         print(f"[resume] reapplied trit-opt + lion hyperparams over loaded "
               f"opt state", flush=True)
         global_step = int(interrupted_state.get("next_step", 0))
@@ -859,7 +866,8 @@ def main() -> None:
         opt_cmuon.zero_grad(set_to_none=True)
     if opt_lion_trits is not None:
         opt_lion_trits.zero_grad(set_to_none=True)
-    opt_lion.zero_grad(set_to_none=True)
+    if opt_lion is not None:
+        opt_lion.zero_grad(set_to_none=True)
     # For STE mode: snapshot quantized codes once at fresh start so the
     # first window's code_flip_count has a baseline.
     prev_codes: dict[int, torch.Tensor] = {}
@@ -891,8 +899,9 @@ def main() -> None:
             # --- LR schedule on Lion ---
             cur_lr = lr_at(global_step, args.total_steps, args.lr,
                            args.warmup_steps, floor=args.lr_floor)
-            for g in opt_lion.param_groups:
-                g["lr"] = cur_lr
+            if opt_lion is not None:
+                for g in opt_lion.param_groups:
+                    g["lr"] = cur_lr
             # --- LR schedule on CMuon (if active) ---
             if opt_cmuon is not None and (args.muon_lr_floor != 1.0
                                           or args.muon_warmup_steps > 0):
@@ -923,7 +932,8 @@ def main() -> None:
                 n_flips, n_elems = 0, 0
             else:
                 n_flips, n_elems = 0, 0
-            opt_lion.step()
+            if opt_lion is not None:
+                opt_lion.step()
             # Constrain per-(row, group) scales to be strictly positive.
             # Lion's sign update has no positivity bias, so without this clamp
             # scales drift through zero (see hrm_bop_spec.md "negative scales"
@@ -947,7 +957,8 @@ def main() -> None:
                 opt_cmuon.zero_grad(set_to_none=True)
             if opt_lion_trits is not None:
                 opt_lion_trits.zero_grad(set_to_none=True)
-            opt_lion.zero_grad(set_to_none=True)
+            if opt_lion is not None:
+                opt_lion.zero_grad(set_to_none=True)
             global_step += 1
 
             step_loss = running_loss / max(1, running_n)
@@ -1136,7 +1147,7 @@ def _save_resume(path: Path, model, opt_bop, opt_cmuon, opt_lion_trits,
     atomic .tmp rename."""
     payload = {
         "model": {k: v.detach().cpu() for k, v in model.state_dict().items()},
-        "opt_lion": opt_lion.state_dict(),
+        "opt_lion": opt_lion.state_dict() if opt_lion is not None else None,
         "next_step": int(next_step),
         "samples_consumed": int(samples_consumed),
         "best_snapshot": best_snapshot,
