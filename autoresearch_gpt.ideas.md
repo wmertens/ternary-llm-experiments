@@ -107,6 +107,14 @@ P5g. **Block sparsity** (later, after Phases 1-5a settle). Some blocks
      blocker but the natural follow-up once trit density is the binding
      constraint.
 
+P5h. **Re-evaluate share-kv at trit-emb regime.** g017 partial (step
+     1500 truncated): trit-emb WITHOUT share-kv beat trit-emb WITH
+     share-kv by -0.143 nats. Suggests coarse ternary embeddings need
+     more K/V degrees of freedom than FP embeddings. Full 5000-step run
+     + 10k extended needed before locking. Tradeoff: dropping share-kv
+     costs 1.6M extra trits (-8pct savings reversed) for potentially
+     -0.1 to -0.2 nat val improvement.
+
 ## Reference points from HRM line
 - HRM fast-A champion: Run 25/40 — val 4.16 (5000 steps) / 4.00 (10000 steps) at this recipe.
 - Likely GPT baseline floor: val ≈ 4.5-5.0 at 5000 steps (no recurrence means less effective depth; HRM ran the L_stack 6× and H_stack 2×, far more compute per token than a flat 6-layer GPT). Actual baseline TBD.

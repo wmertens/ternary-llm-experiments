@@ -25,9 +25,9 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="017"
-RUN_TAG="trit-emb-no-sharekv"
-DESCRIPTION="Re-validate share-kv with trit-emb. We adopted --share-kv as baseline after g002 (FP-emb, +1.7pct tax). The trit-emb regime has coarser K/V projections, so the K-V correlation that share-kv exploits may differ. g017 = same as g011 (trit-emb, lr=0.15, bs=4 ga=8, eff=32) but WITHOUT --share-kv. Compare to g011 4.3731. If g017 < g011 by meaningful margin → drop share-kv for trit-emb regime. If g017 ≥ g011 → share-kv decision still holds. ~2h ETA."
+RUN_N="018"
+RUN_TAG="trit-emb-scale-group-128"
+DESCRIPTION="Phase 5d direction: scale group size sweep. Baseline scale_group_size=64 gives ~670K FP scales. Double to 128: halves scale count to ~335K. Tests scale granularity sensitivity. Pushes further toward 'only trits + scales where needed' — fewer scales per the user's goal. Compare to g011 (gs=64) 4.3731. If g018 ≤ g011 + 0.05 → gs=128 is free, adopt and try gs=256. If g018 worse → gs=64 is right granularity at this scale. ~2h ETA."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
@@ -48,7 +48,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --cmuon-state-dtype bfloat16 --trit-embeddings}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --share-kv --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 
