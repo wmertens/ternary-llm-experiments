@@ -25,9 +25,9 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="015"
-RUN_TAG="phase5-all-wins-eff64-10k"
-DESCRIPTION="Phase 5 ASYMPTOTE: combine all keepers (trit-emb + unfrozen scales + share-kv + bf16 m + lr=0.15 + eff=64) at 10000 steps. Tells us where the full-stack Phase 1+5 recipe lands at extended compute. Compare to g013 (5k steps, same recipe) 4.2016 — should see another ~0.15 nat drop based on the trit-emb 5k→10k g010 trajectory (4.37→4.16 = -0.21). Predict val ~4.05-4.10. If meets, the Phase 5 recipe asymptote is competitive with FP baseline. ~8h ETA overnight."
+RUN_N="016"
+RUN_TAG="fp-emb-eff64-10k-control"
+DESCRIPTION="FP-embedding control at matched compute. Same as g015 but DROP --trit-embeddings (back to nn.Embedding FP). Tells us the absolute baseline at eff=64 + 10k steps. Then trit-emb (g015 4.0090) vs FP-emb (this) IS the true precision tax at extended compute. If g016 ≈ 4.00 → no precision tax, Phase 5 recipe is as good as FP at the asymptote. If g016 < 4.00 → real precision tax of (4.0090 - g016) nats. ~9h ETA overnight."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
@@ -48,7 +48,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --share-kv --cmuon-state-dtype bfloat16 --trit-embeddings}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-scales --freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --share-kv --cmuon-state-dtype bfloat16}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 
