@@ -25,17 +25,17 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="016"
-RUN_TAG="fp-emb-eff64-10k-control"
-DESCRIPTION="FP-embedding control at matched compute. Same as g015 but DROP --trit-embeddings (back to nn.Embedding FP). Tells us the absolute baseline at eff=64 + 10k steps. Then trit-emb (g015 4.0090) vs FP-emb (this) IS the true precision tax at extended compute. If g016 ≈ 4.00 → no precision tax, Phase 5 recipe is as good as FP at the asymptote. If g016 < 4.00 → real precision tax of (4.0090 - g016) nats. ~9h ETA overnight."
+RUN_N="017"
+RUN_TAG="trit-emb-no-sharekv"
+DESCRIPTION="Re-validate share-kv with trit-emb. We adopted --share-kv as baseline after g002 (FP-emb, +1.7pct tax). The trit-emb regime has coarser K/V projections, so the K-V correlation that share-kv exploits may differ. g017 = same as g011 (trit-emb, lr=0.15, bs=4 ga=8, eff=32) but WITHOUT --share-kv. Compare to g011 4.3731. If g017 < g011 by meaningful margin → drop share-kv for trit-emb regime. If g017 ≥ g011 → share-kv decision still holds. ~2h ETA."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
 
 # Defaults: fast-A scale (38M ternary). Override per experiment as needed.
-TOTAL_STEPS="${TOTAL_STEPS:-10000}"
-BATCH_SIZE="${BATCH_SIZE:-2}"
-GRAD_ACCUM="${GRAD_ACCUM:-32}"
+TOTAL_STEPS="${TOTAL_STEPS:-5000}"
+BATCH_SIZE="${BATCH_SIZE:-4}"
+GRAD_ACCUM="${GRAD_ACCUM:-8}"
 HIDDEN_SIZE="${HIDDEN_SIZE:-512}"
 NUM_HEADS="${NUM_HEADS:-8}"
 INTERMEDIATE="${INTERMEDIATE:-1408}"
@@ -48,7 +48,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---random-scales --freeze-scales --freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --share-kv --cmuon-state-dtype bfloat16}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --cmuon-state-dtype bfloat16 --trit-embeddings}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 
