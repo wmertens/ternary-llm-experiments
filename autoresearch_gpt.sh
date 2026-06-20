@@ -25,15 +25,15 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="020"
-RUN_TAG="trit-emb-gs128-nosharekv-eff64"
-DESCRIPTION="Compound g019 (no share-kv, -0.049 nats) with eff=64 (g013 vs g011 was -0.17 nats). g019 4.3313 - 0.17 = predict ~4.16. Tests whether the two wins are additive at the new no-share-kv baseline. New Phase 5 champion candidate at fixed-step protocol. ~4h ETA at bs=2 ga=32."
+RUN_N="021"
+RUN_TAG="trit-emb-gs128-nosharekv-eff64-10k"
+DESCRIPTION="Phase 5 asymptote with the latest no-share-kv recipe + eff=64 + 10k steps. g015 with share-kv was 4.0090 at 10k; g020 (no share-kv, eff=64, 5k) was 4.2215. If the extension scales like g010→g015 did (-0.18 nat from 5k→10k), predict ~4.04. ~8h ETA overnight."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
 
 # Defaults: fast-A scale (38M ternary). Override per experiment as needed.
-TOTAL_STEPS="${TOTAL_STEPS:-5000}"
+TOTAL_STEPS="${TOTAL_STEPS:-10000}"
 BATCH_SIZE="${BATCH_SIZE:-2}"
 GRAD_ACCUM="${GRAD_ACCUM:-32}"
 HIDDEN_SIZE="${HIDDEN_SIZE:-512}"
