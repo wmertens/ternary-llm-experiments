@@ -154,16 +154,9 @@ echo "METRIC wall_seconds=${WALL}"
 [ -n "$EMA" ]      && echo "METRIC loss_ema=${EMA}"
 echo "METRIC val_loss=${VAL_LOSS}"
 
-# Belt-and-braces cleanup: hrm_bop.py deletes interrupted.pt on success,
-# but if the parse above failed for any reason we'd leave one around.
-# IMPORTANT: don't delete here if total_steps wasn't reached. The trainer
-# exits success (sys.exit(0)) after SIGINT too — in that case we want to
-# keep interrupted.pt for resume.
-LAST_STEP=$(tr '\r' '\n' < "$OUT_DIR/train.log" \
-    | grep -oE 'step=[0-9]+' | tail -1 | sed 's/step=//')
-if [ -n "$LAST_STEP" ] && [ "$LAST_STEP" -ge "$TOTAL_STEPS" ]; then
-    rm -f "$OUT_DIR/interrupted.pt" "$OUT_DIR/interrupted.pt.tmp"
-fi
+# interrupted.pt is now preserved at end-of-run by hrm_bop.py itself so
+# follow-up runs can extend training with full optimiser state intact.
+# Use tools/dump_interrupted.py to extract a safetensors-only weight file.
 
 # Each run writes ~200-400 MB of final*.safetensors. We don't need them
 # between experiments — TB scalars are the durable signal, and the

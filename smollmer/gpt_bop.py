@@ -1141,8 +1141,19 @@ def main() -> None:
                     global_step)
     writer.flush()
     writer.close()
-    if interrupted_path.exists():
-        interrupted_path.unlink()
+    # Final on-disk save of the full training state so a follow-up run can
+    # extend training from this exact step with optimiser momentum, LR
+    # phase, and EMA tracker preserved. Without this the cosine schedule
+    # and CMuon/Bop/Lion buffers would reset on resume, wasting effective
+    # steps. Convert to safetensors-only via tools/dump_interrupted.py
+    # if you need a deployment artifact.
+    _save_resume(interrupted_path, model, opt_bop, opt_cmuon,
+                 opt_lion_trits, opt_lion, global_step,
+                 best_snapshot, ctrl, run_name,
+                 global_step * args.grad_accum * args.batch_size)
+    print(f"[done] preserved {interrupted_path} (full opt state for "
+          f"resume; use tools/dump_interrupted.py to extract weights)",
+          flush=True)
 
 
 def _save_resume(path: Path, model, opt_bop, opt_cmuon, opt_lion_trits,
