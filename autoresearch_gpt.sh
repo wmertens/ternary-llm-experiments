@@ -25,17 +25,17 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="019"
-RUN_TAG="trit-emb-gs128-no-sharekv"
-DESCRIPTION="Confirm g017 partial finding: trit-emb without share-kv beat trit-emb with share-kv by -0.14 nats at step 1500 (partial). Full 5000-step run with g018 baseline (trit-emb + gs=128) but drop --share-kv. If val < g018 4.3803 by >0.05 → share-kv is the wrong decision for trit-emb (drop it); the -8pct param savings isn't worth the val cost. ~2h ETA."
+RUN_N="020"
+RUN_TAG="trit-emb-gs128-nosharekv-eff64"
+DESCRIPTION="Compound g019 (no share-kv, -0.049 nats) with eff=64 (g013 vs g011 was -0.17 nats). g019 4.3313 - 0.17 = predict ~4.16. Tests whether the two wins are additive at the new no-share-kv baseline. New Phase 5 champion candidate at fixed-step protocol. ~4h ETA at bs=2 ga=32."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
 
 # Defaults: fast-A scale (38M ternary). Override per experiment as needed.
 TOTAL_STEPS="${TOTAL_STEPS:-5000}"
-BATCH_SIZE="${BATCH_SIZE:-4}"
-GRAD_ACCUM="${GRAD_ACCUM:-8}"
+BATCH_SIZE="${BATCH_SIZE:-2}"
+GRAD_ACCUM="${GRAD_ACCUM:-32}"
 HIDDEN_SIZE="${HIDDEN_SIZE:-512}"
 NUM_HEADS="${NUM_HEADS:-8}"
 INTERMEDIATE="${INTERMEDIATE:-1408}"
