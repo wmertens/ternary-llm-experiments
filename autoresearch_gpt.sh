@@ -25,9 +25,9 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="025"
-RUN_TAG="trit-emb-init-zerofrac0p67"
-DESCRIPTION="Init zero-frac sweep. Currently 50pct; BitNet literature reports 33-67pct works. Test 67pct: more trits start at 0, model has cleaner initial direction but lower effective rank. Compare to g023 4.3290. If val < g023 → adopt new init; if > g023 → 50pct is right. ~2h ETA."
+RUN_N="026"
+RUN_TAG="trit-emb-init-zerofrac0p33"
+DESCRIPTION="Init zero-frac bracket: 0.33 (other end from g025's 0.67). If g026 < g023 (0.50) → init zerofrac irrelevant (both extremes win, middle is noise). If g026 > g023 → 0.67 is the right direction, bracket it. ~2h ETA."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
@@ -48,7 +48,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.67}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.33}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 
