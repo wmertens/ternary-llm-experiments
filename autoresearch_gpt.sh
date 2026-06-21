@@ -25,9 +25,9 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="028"
-RUN_TAG="trit-emb-init-zerofrac0p90"
-DESCRIPTION="Init zero-frac: bracket 0.80 with 0.90 (extreme — nearly all weights start at 0, model learns from sparse seed). If g028 < g027 4.3023 → keep going to 0.95; if > → 0.80 is the optimum, lock it in. ~2h ETA."
+RUN_N="029"
+RUN_TAG="trit-emb-init-zerofrac0p95"
+DESCRIPTION="Init zero-frac: extend monotone trend. Sweep: 0.33→4.35, 0.50→4.33, 0.67→4.32, 0.80→4.30, 0.90→4.28. Try 0.95: 95pct of trits start at 0, only 5pct seeded ±1. Model has very sparse starting structure. If g029 < g028 → keep going (try 0.98 / 1.0); if > → 0.90 brackets optimum. ~2h ETA."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
@@ -48,7 +48,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.95}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 
