@@ -25,17 +25,17 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="029"
-RUN_TAG="trit-emb-init-zerofrac0p95"
-DESCRIPTION="Init zero-frac: extend monotone trend. Sweep: 0.33→4.35, 0.50→4.33, 0.67→4.32, 0.80→4.30, 0.90→4.28. Try 0.95: 95pct of trits start at 0, only 5pct seeded ±1. Model has very sparse starting structure. If g029 < g028 → keep going (try 0.98 / 1.0); if > → 0.90 brackets optimum. ~2h ETA."
+RUN_N="030"
+RUN_TAG="phase5-best-eff64-10k"
+DESCRIPTION="Phase 5 NEW ASYMPTOTE with accumulated wins: trit-emb + gs=128 + no share-kv + trainable norms + init-zerofrac=0.90 + eff=64 + 10k steps. Each piece independently validated. Predict ~3.94 (g021 best at 10k was 3.9941; new init alone is -0.04). ~9h ETA overnight."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
 
 # Defaults: fast-A scale (38M ternary). Override per experiment as needed.
-TOTAL_STEPS="${TOTAL_STEPS:-5000}"
-BATCH_SIZE="${BATCH_SIZE:-4}"
-GRAD_ACCUM="${GRAD_ACCUM:-8}"
+TOTAL_STEPS="${TOTAL_STEPS:-10000}"
+BATCH_SIZE="${BATCH_SIZE:-2}"
+GRAD_ACCUM="${GRAD_ACCUM:-32}"
 HIDDEN_SIZE="${HIDDEN_SIZE:-512}"
 NUM_HEADS="${NUM_HEADS:-8}"
 INTERMEDIATE="${INTERMEDIATE:-1408}"
@@ -48,7 +48,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.95}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 
