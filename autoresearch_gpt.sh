@@ -25,9 +25,9 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="023"
-RUN_TAG="trit-emb-norms-trainable"
-DESCRIPTION="Drop --freeze-non-embed-fp. Currently norms and (untied) lm_head are frozen — legacy from HRM Bop-isolation. With trit-emb the FP residual is dominated by norms (~6K each, 7 norms = 42K params); letting them train gives the model finer control over residual magnitudes at trivial param cost. Compare to g019 4.3313. Pass: val ≤ g019 → trainable norms are free or better, adopt; <-0.05 → real win. ~2h ETA."
+RUN_N="024"
+RUN_TAG="trit-emb-no-cautious-muon"
+DESCRIPTION="Re-validate cautious mask on GPT-trit-emb. HRM Run 14 showed cautious on (default) wins +0.11 over off; never tested at this recipe. g024 = --no-cautious-muon on g023 baseline. If val significantly worse → cautious confirmed important; if similar/better → drop the flag. ~2h ETA."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
@@ -48,7 +48,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --no-cautious-muon --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 
