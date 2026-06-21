@@ -25,9 +25,9 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="022"
-RUN_TAG="trit-emb-bf16-scales"
-DESCRIPTION="Phase 5d: bf16 scales. Half the FP residual (335K → ~168KB at fast-A). Lion32 keeps fp32 momentum internally and casts on update, so bf16 scales train fine. Compare to g019 (fp32 scales, same recipe otherwise) 4.3313. Pass: val ≤ 4.3313 + 0.05 → bf16 scales is free, adopt as new baseline. ~2h ETA at bs=4 ga=8."
+RUN_N="023"
+RUN_TAG="trit-emb-norms-trainable"
+DESCRIPTION="Drop --freeze-non-embed-fp. Currently norms and (untied) lm_head are frozen — legacy from HRM Bop-isolation. With trit-emb the FP residual is dominated by norms (~6K each, 7 norms = 42K params); letting them train gives the model finer control over residual magnitudes at trivial param cost. Compare to g019 4.3313. Pass: val ≤ g019 → trainable norms are free or better, adopt; <-0.05 → real win. ~2h ETA."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
@@ -48,7 +48,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --scales-dtype bfloat16}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 
