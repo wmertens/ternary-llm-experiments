@@ -25,17 +25,17 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="021"
-RUN_TAG="trit-emb-gs128-nosharekv-eff64-10k"
-DESCRIPTION="Phase 5 asymptote with the latest no-share-kv recipe + eff=64 + 10k steps. g015 with share-kv was 4.0090 at 10k; g020 (no share-kv, eff=64, 5k) was 4.2215. If the extension scales like g010→g015 did (-0.18 nat from 5k→10k), predict ~4.04. ~8h ETA overnight."
+RUN_N="022"
+RUN_TAG="trit-emb-bf16-scales"
+DESCRIPTION="Phase 5d: bf16 scales. Half the FP residual (335K → ~168KB at fast-A). Lion32 keeps fp32 momentum internally and casts on update, so bf16 scales train fine. Compare to g019 (fp32 scales, same recipe otherwise) 4.3313. Pass: val ≤ 4.3313 + 0.05 → bf16 scales is free, adopt as new baseline. ~2h ETA at bs=4 ga=8."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
 
 # Defaults: fast-A scale (38M ternary). Override per experiment as needed.
-TOTAL_STEPS="${TOTAL_STEPS:-10000}"
-BATCH_SIZE="${BATCH_SIZE:-2}"
-GRAD_ACCUM="${GRAD_ACCUM:-32}"
+TOTAL_STEPS="${TOTAL_STEPS:-5000}"
+BATCH_SIZE="${BATCH_SIZE:-4}"
+GRAD_ACCUM="${GRAD_ACCUM:-8}"
 HIDDEN_SIZE="${HIDDEN_SIZE:-512}"
 NUM_HEADS="${NUM_HEADS:-8}"
 INTERMEDIATE="${INTERMEDIATE:-1408}"
@@ -48,7 +48,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---freeze-non-embed-fp --ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --scales-dtype bfloat16}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 

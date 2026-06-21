@@ -504,6 +504,14 @@ def build_argparser() -> argparse.ArgumentParser:
                     help="Storage dtype for trits. fp16 saves 200 MB and the "
                          "value set is exactly {-1,0,+1} so there's no "
                          "rounding-regime concern.")
+    ap.add_argument("--scales-dtype", default="float32",
+                    choices=["float32", "float16", "bfloat16"],
+                    help="Storage dtype for QLinear scales. Default fp32 "
+                         "is safe for Lion32 (fp32 momentum, casts on "
+                         "update). bf16 halves scale memory; the per-row "
+                         "QEmbedding scales become the dominant FP "
+                         "residual and shrinking them is the Phase 5d "
+                         "lever per user goal.")
     ap.add_argument("--grad-checkpointing",
                     action=argparse.BooleanOptionalAction, default=False,
                     help="Activation checkpointing inside the 1-step grad "
@@ -565,9 +573,16 @@ def main() -> None:
     print(f"[build] cfg={cfg}", flush=True)
     model = GptBopModel(cfg)
     # Trit storage: switch each QLinear.weight to latent_dtype.
+    scales_dtype = {"float32": torch.float32, "float16": torch.float16,
+                    "bfloat16": torch.bfloat16}[args.scales_dtype]
     for m in model.modules():
         if isinstance(m, QLinear):
             m.weight.data = m.weight.data.to(latent_dtype)
+            if scales_dtype != torch.float32:
+                # Lion32 keeps fp32 momentum internally and casts back to
+                # p.dtype on the update, so bf16/fp16 scales train fine
+                # without underflow. Saves up to 2x scale memory.
+                m.scales.data = m.scales.data.to(scales_dtype)
     model.to(args.device)
     n_params = sum(p.numel() for p in model.parameters())
     n_trits = sum(m.weight.numel() for m in model.modules()
