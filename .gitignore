@@ -24,3 +24,6 @@ wandb/
 cache_corpus/
 
 .DS_Store
+
+# ONNX model export (build artifact; was wrongly committed, not real LFS)
+docs/model/onnx/

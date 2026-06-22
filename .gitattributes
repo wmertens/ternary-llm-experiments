@@ -1,3 +1,0 @@
-# GitHub Pages serves LFS files transparently; tracked here so the >100 MB
-# ONNX weight blob can be committed without hitting the hard size cap.
-docs/model/onnx/*.onnx_data filter=lfs diff=lfs merge=lfs -text
