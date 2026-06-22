@@ -518,11 +518,22 @@ class QLinear(nn.Linear):
                 q_ste = self._qat_effective_weight()
             else:
                 q_ste = self.quantized_weight()  # [out, in], in [-1, 1]
-        # Apply per-(row, group) scales: expand scales [out, n_groups] to
-        # [out, in] by broadcasting along the group's columns.
-        q_blocks = q_ste.view(self.out_features, self.n_groups, self.group_size)
-        scales_b = self.scales.unsqueeze(-1).to(q_blocks.dtype)
-        w_scaled = (q_blocks * scales_b).view(self.out_features, self.in_features)
+        if getattr(self, "computed_scale", False):
+            # BitNet-style: scalar γ = mean(|w_latent|) per tensor, recomputed
+            # each forward. NO learnable scale param, NO Lion32 momentum.
+            # Detached so γ is a constant from autograd's view (matches the
+            # BitNet b1.58 paper §3.1 absmean quantizer treatment).
+            with torch.no_grad():
+                gamma = self.weight.abs().mean().clamp_min(1e-6).to(q_ste.dtype)
+            w_scaled = q_ste * gamma
+        else:
+            # Apply per-(row, group) scales: expand scales [out, n_groups] to
+            # [out, in] by broadcasting along the group's columns.
+            q_blocks = q_ste.view(self.out_features, self.n_groups,
+                                  self.group_size)
+            scales_b = self.scales.unsqueeze(-1).to(q_blocks.dtype)
+            w_scaled = (q_blocks * scales_b).view(self.out_features,
+                                                  self.in_features)
         # F.linear requires matching dtypes; outside autocast (or with
         # latent-dtype != activation dtype) we have to align. .to() is a
         # no-op when dtypes already match.
@@ -958,6 +969,13 @@ class QEmbedding(QLinear):
         with torch.no_grad():
             q_rows = quantize_levels(w_rows, self.levels)
         q_ste = w_rows + (q_rows - w_rows).detach()
+        if getattr(self, "computed_scale", False):
+            # BitNet-style: scalar γ = mean(|w_latent|) over the full
+            # embedding table, recomputed per forward. NO learnable scale.
+            with torch.no_grad():
+                gamma = (self.weight.abs().mean().clamp_min(1e-6)
+                         .to(q_ste.dtype))
+            return q_ste * gamma
         # Look up the per-row scales for the same tokens, broadcast each
         # group-scale across its in_features-group columns.
         s_rows = F.embedding(input_ids, self.scales)  # [B, S, n_groups]
@@ -972,5 +990,9 @@ class QEmbedding(QLinear):
         if getattr(self, "fp_weights", False):
             return self.weight
         q = self.quantized_weight()  # [V, H], STE-bridged
+        if getattr(self, "computed_scale", False):
+            with torch.no_grad():
+                gamma = self.weight.abs().mean().clamp_min(1e-6).to(q.dtype)
+            return q * gamma
         s_full = self.scales.repeat_interleave(self.group_size, dim=-1)
         return q * s_full

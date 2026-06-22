@@ -366,6 +366,14 @@ def build_argparser() -> argparse.ArgumentParser:
                          "the tied lm_head matmul uses the quantised+scaled "
                          "table too. Cuts ~25M FP params at fast-A; per-row "
                          "scales (49152 × 8 ≈ 400KB FP residual).")
+    ap.add_argument("--computed-scale", action="store_true", default=False,
+                    help="BitNet-style absmean: replace per-(row, group) "
+                         "learnable scales with γ = mean(|w_latent|) "
+                         "computed per forward (no learnable scale, no "
+                         "Lion32 momentum on scales). One implicit scalar "
+                         "per QLinear. Strips ~0.35M FP scale params + "
+                         "their opt state. Forces --freeze-scales-effective "
+                         "since the scales tensor becomes unused.")
     ap.add_argument("--sandwich-norm", action="store_true", default=False,
                     help="Add an extra RMSNorm to the attn output and to "
                          "the MLP output (in addition to the existing pre-"
@@ -664,6 +672,20 @@ def main() -> None:
                 m.int8_activations = True
                 n += 1
         print(f"[init] int8 activations enabled on {n} QLinears", flush=True)
+
+    # ---- BitNet-style computed scale (no learnable scale tensor) ----
+    if args.computed_scale:
+        n = 0
+        for m in model.modules():
+            if isinstance(m, QLinear):
+                m.computed_scale = True
+                n += 1
+        # Force scales freeze: the .scales tensor is unused by the forward
+        # but still exists as a buffer; freezing keeps split_params from
+        # handing it to Lion32.
+        args.freeze_scales = True
+        print(f"[init] computed-scale (BitNet absmean) on {n} QLinears: "
+              f"γ = mean(|w|) per forward, no learnable scale", flush=True)
 
     # ---- Freezing ----
     if args.freeze_scales:
