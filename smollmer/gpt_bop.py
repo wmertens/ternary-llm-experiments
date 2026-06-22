@@ -794,6 +794,12 @@ def main() -> None:
         samples_consumed = int(interrupted_state.get(
             "samples_consumed",
             global_step * args.grad_accum * args.batch_size))
+        # Re-anchor the LR schedule from this resume point so a CLI bump
+        # to --total-steps doesn't reshape the in-progress cosine and
+        # jump LR by 10-30x (g030→g030-ext incident, 2026-06-22). The
+        # saved lr_snapshot becomes the new "peak" of a fresh cosine
+        # decaying over the remaining (total-step) steps.
+        resumed_lr_snapshot = interrupted_state.get("lr_snapshot")
         invalidate_all_q_caches(model)
         if args.device.startswith("cuda"):
             torch.cuda.empty_cache()
@@ -819,6 +825,57 @@ def main() -> None:
                              for c in train_components)
     else:
         mix_desc = "fineweb=0.70, cosmopedia=0.25, openmath=0.05 (default)"
+    # ---- LR schedule anchoring ----
+    # Default: fresh schedule from CLI args. On resume: re-anchor each
+    # optimiser's cosine to its saved LR at this step so a CLI bump to
+    # --total-steps doesn't reshape the in-progress cosine.
+    lion_lr_base = args.lr
+    lion_lr_total = args.total_steps
+    lion_lr_warmup = args.warmup_steps
+    lion_lr_floor = args.lr_floor
+    muon_lr_base = args.muon_lr
+    muon_lr_total = args.total_steps
+    muon_lr_warmup = args.muon_warmup_steps
+    muon_lr_floor = args.muon_lr_floor
+    if interrupted_state is not None and resumed_lr_snapshot is not None:
+        # Re-anchor: peak = saved LR at global_step, decay to (peak ×
+        # floor) over the remaining (args.total_steps - global_step)
+        # steps. Setting `total = remaining` plus passing the saved
+        # peak as base achieves a continuation cosine that starts at
+        # the saved LR and ends at args.lr × args.lr_floor.
+        # lr_at uses `progress = (step - warmup) / max(1, total - warmup)`
+        # so we shift `step` and `total` by global_step to make the
+        # remaining steps the full cosine domain.
+        if (sv := resumed_lr_snapshot.get("lion_lr")) is not None:
+            lion_lr_base = float(sv)
+            lion_lr_total = max(1, args.total_steps - global_step)
+            lion_lr_warmup = 0
+            # Floor stays as args.lr_floor — but applied relative to the
+            # NEW base (saved peak). Net effect: at remaining-step 0 the
+            # LR is the saved peak; at remaining-step total it is
+            # saved_peak × args.lr_floor.
+            print(f"[resume-lr] Lion re-anchored: base={lion_lr_base:.3e} "
+                  f"× cosine over {lion_lr_total} remaining steps to "
+                  f"floor={lion_lr_floor}", flush=True)
+        if (sv := resumed_lr_snapshot.get("muon_lr")) is not None:
+            muon_lr_base = float(sv)
+            muon_lr_total = max(1, args.total_steps - global_step)
+            muon_lr_warmup = 0
+            print(f"[resume-lr] CMuon re-anchored: base={muon_lr_base:.3e} "
+                  f"× cosine over {muon_lr_total} remaining steps to "
+                  f"floor={muon_lr_floor}", flush=True)
+    # When LR schedule was re-anchored, the lr_at call uses (step -
+    # global_step) as its position into the new cosine. Wrap it.
+    if interrupted_state is not None and resumed_lr_snapshot is not None:
+        _resume_step_offset = global_step
+    else:
+        _resume_step_offset = 0
+    _lr_at_orig = lr_at
+    def lr_at(step: int, total: int, base_lr: float, warmup: int,
+              floor: float = 0.1) -> float:  # noqa: F811
+        return _lr_at_orig(step - _resume_step_offset, total, base_lr,
+                           warmup, floor=floor)
+
     train_loader = make_train_loader(
         tok, seq_len=args.max_position_embeddings,
         batch_size=args.batch_size, seed=args.seed,
@@ -881,6 +938,12 @@ def main() -> None:
     window_t0 = time.time()
     pbar = tqdm(desc="hrmbop", dynamic_ncols=True,
                 initial=global_step, total=args.total_steps)
+    # Pre-init the LR vars so emergency / end-of-run saves before the
+    # first per-step schedule application still have a value to snapshot.
+    cur_lr = lr_at(global_step, lion_lr_total, lion_lr_base,
+                   lion_lr_warmup, floor=lion_lr_floor)
+    cur_muon_lr = lr_at(global_step, muon_lr_total, muon_lr_base,
+                        muon_lr_warmup, floor=muon_lr_floor)
     if opt_bop is not None:
         opt_bop.zero_grad(set_to_none=True)
     if opt_cmuon is not None:
@@ -918,20 +981,22 @@ def main() -> None:
                 tokens_window += ids.numel()
 
             # --- LR schedule on Lion ---
-            cur_lr = lr_at(global_step, args.total_steps, args.lr,
-                           args.warmup_steps, floor=args.lr_floor)
+            cur_lr = lr_at(global_step, lion_lr_total, lion_lr_base,
+                           lion_lr_warmup, floor=lion_lr_floor)
             if opt_lion is not None:
                 for g in opt_lion.param_groups:
                     g["lr"] = cur_lr
             # --- LR schedule on CMuon (if active) ---
             if opt_cmuon is not None and (args.muon_lr_floor != 1.0
                                           or args.muon_warmup_steps > 0):
-                cur_muon_lr = lr_at(global_step, args.total_steps,
-                                    args.muon_lr,
-                                    args.muon_warmup_steps,
-                                    floor=args.muon_lr_floor)
+                cur_muon_lr = lr_at(global_step, muon_lr_total,
+                                    muon_lr_base,
+                                    muon_lr_warmup,
+                                    floor=muon_lr_floor)
                 for g in opt_cmuon.param_groups:
                     g["lr"] = cur_muon_lr
+            else:
+                cur_muon_lr = args.muon_lr
 
             # --- FP grad clip (skip trits) ---
             fp_gnorm = None
@@ -1109,13 +1174,17 @@ def main() -> None:
                     and global_step % args.checkpoint_every == 0):
                 _save_resume(interrupted_path, model, opt_bop, opt_cmuon,
                              opt_lion_trits, opt_lion, global_step,
-                             best_snapshot, ctrl, run_name, samples_at_save)
+                             best_snapshot, ctrl, run_name, samples_at_save,
+                             lr_snapshot={"lion_lr": cur_lr,
+                                          "muon_lr": cur_muon_lr})
                 tqdm.write(f"[ckpt] {interrupted_path} @ step {global_step}")
 
             if _INTERRUPT["flag"]:
                 _save_resume(interrupted_path, model, opt_bop, opt_cmuon,
                              opt_lion_trits, opt_lion, global_step,
-                             best_snapshot, ctrl, run_name, samples_at_save)
+                             best_snapshot, ctrl, run_name, samples_at_save,
+                             lr_snapshot={"lion_lr": cur_lr,
+                                          "muon_lr": cur_muon_lr})
                 writer.flush()
                 writer.close()
                 pbar.close()
@@ -1173,10 +1242,18 @@ def main() -> None:
 
 def _save_resume(path: Path, model, opt_bop, opt_cmuon, opt_lion_trits,
                  opt_lion, next_step: int, best_snapshot, ctrl,
-                 run_name: str, samples_consumed: int) -> None:
+                 run_name: str, samples_consumed: int,
+                 lr_snapshot: dict | None = None) -> None:
     """hrm_bop-flavored resume save: trit-opt (Bop or CMuon or Lion-STE,
     whichever is live) + FP Lion. interrupted.pt is the only on-disk file;
-    atomic .tmp rename."""
+    atomic .tmp rename.
+
+    `lr_snapshot` captures the LR-schedule state of every active optimiser
+    AT THIS STEP so a resume can re-anchor the cosine from this point
+    forward (cosine peak = saved lr, decay over remaining steps to floor).
+    Without this, extending --total-steps reshapes the cosine and the LR
+    can jump 10-30x at resume (g030→g030-ext incident, 2026-06-22).
+    """
     payload = {
         "model": {k: v.detach().cpu() for k, v in model.state_dict().items()},
         "opt_lion": opt_lion.state_dict() if opt_lion is not None else None,
@@ -1192,6 +1269,8 @@ def _save_resume(path: Path, model, opt_bop, opt_cmuon, opt_lion_trits,
         payload["opt_cmuon"] = opt_cmuon.state_dict()
     if opt_lion_trits is not None:
         payload["opt_lion_trits"] = opt_lion_trits.state_dict()
+    if lr_snapshot is not None:
+        payload["lr_snapshot"] = lr_snapshot
     tmp = path.with_suffix(path.suffix + ".tmp")
     torch.save(payload, str(tmp))
     tmp.replace(path)
