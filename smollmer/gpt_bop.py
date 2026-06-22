@@ -865,16 +865,19 @@ def main() -> None:
                   f"× cosine over {muon_lr_total} remaining steps to "
                   f"floor={muon_lr_floor}", flush=True)
     # When LR schedule was re-anchored, the lr_at call uses (step -
-    # global_step) as its position into the new cosine. Wrap it.
+    # global_step) as its position into the new cosine. Define a local
+    # wrapper under a NEW name (assigning to `lr_at` inside this
+    # function would shadow the module-level binding and break earlier
+    # references via UnboundLocalError).
     if interrupted_state is not None and resumed_lr_snapshot is not None:
         _resume_step_offset = global_step
     else:
         _resume_step_offset = 0
-    _lr_at_orig = lr_at
-    def lr_at(step: int, total: int, base_lr: float, warmup: int,
-              floor: float = 0.1) -> float:  # noqa: F811
-        return _lr_at_orig(step - _resume_step_offset, total, base_lr,
-                           warmup, floor=floor)
+    _lr_at_module = lr_at  # capture the module-level lr_at
+    def lr_at_local(step: int, total: int, base_lr: float, warmup: int,
+                    floor: float = 0.1) -> float:
+        return _lr_at_module(step - _resume_step_offset, total, base_lr,
+                             warmup, floor=floor)
 
     train_loader = make_train_loader(
         tok, seq_len=args.max_position_embeddings,
@@ -940,10 +943,10 @@ def main() -> None:
                 initial=global_step, total=args.total_steps)
     # Pre-init the LR vars so emergency / end-of-run saves before the
     # first per-step schedule application still have a value to snapshot.
-    cur_lr = lr_at(global_step, lion_lr_total, lion_lr_base,
-                   lion_lr_warmup, floor=lion_lr_floor)
-    cur_muon_lr = lr_at(global_step, muon_lr_total, muon_lr_base,
-                        muon_lr_warmup, floor=muon_lr_floor)
+    cur_lr = lr_at_local(global_step, lion_lr_total, lion_lr_base,
+                         lion_lr_warmup, floor=lion_lr_floor)
+    cur_muon_lr = lr_at_local(global_step, muon_lr_total, muon_lr_base,
+                              muon_lr_warmup, floor=muon_lr_floor)
     if opt_bop is not None:
         opt_bop.zero_grad(set_to_none=True)
     if opt_cmuon is not None:
@@ -981,18 +984,18 @@ def main() -> None:
                 tokens_window += ids.numel()
 
             # --- LR schedule on Lion ---
-            cur_lr = lr_at(global_step, lion_lr_total, lion_lr_base,
-                           lion_lr_warmup, floor=lion_lr_floor)
+            cur_lr = lr_at_local(global_step, lion_lr_total, lion_lr_base,
+                                 lion_lr_warmup, floor=lion_lr_floor)
             if opt_lion is not None:
                 for g in opt_lion.param_groups:
                     g["lr"] = cur_lr
             # --- LR schedule on CMuon (if active) ---
             if opt_cmuon is not None and (args.muon_lr_floor != 1.0
                                           or args.muon_warmup_steps > 0):
-                cur_muon_lr = lr_at(global_step, muon_lr_total,
-                                    muon_lr_base,
-                                    muon_lr_warmup,
-                                    floor=muon_lr_floor)
+                cur_muon_lr = lr_at_local(global_step, muon_lr_total,
+                                          muon_lr_base,
+                                          muon_lr_warmup,
+                                          floor=muon_lr_floor)
                 for g in opt_cmuon.param_groups:
                     g["lr"] = cur_muon_lr
             else:
