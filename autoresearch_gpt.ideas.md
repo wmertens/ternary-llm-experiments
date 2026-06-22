@@ -121,7 +121,23 @@ P5h. **Re-evaluate share-kv at trit-emb regime.** g017 partial (step
 
 ### Phase 6 — Architectural (queue once Phase 5 recipe is locked)
 
-P6a. **Variable-width "⊗-former" layers (arxiv 2606.18246v1).** Per-layer width follows an ⊗-shape (wide ends, ~30pct width at ~75pct depth). Residual stream stays at max d; each block reads/writes a slice with **carry-forward** copy of untouched coords (beats zero-pad/learned-projection). Reported -0.6 to -1.3pct loss, -4 to -9pct PPL, +1 pt NLU acc, param-matched (also -2-4.6pct FLOPs, -10.5pct KV). Validated 200M-3B; no quantization data. Composes cleanly with our stack (ternary QLinear/STE, RoPE, RMSNorm, SwiGLU, GQA with divisibility constraint on d_ℓ × n_kv). Per-layer scale buffers must be sized to d_ℓ. Implementation ~120-180 LOC + carry-forward state, ~6h. Caveat: 43M is below the validated range, expected gap ≤1pct could be lost in seed noise. Queue as **g040+** once current sweep is closed; run 2-seed A/B with ⊗ schedule (d=512 ends, ~160 mid at L=5/6); kill if no visible improvement by 30pct of budget.
+**User scope reminder (2026-06-22)**: end goal is fastest wall-clock to high-quality ternary on currently limited hardware, with planned scale-up. Don't dismiss architectural wins for being "scale-marginal at 43M" — if they compound at the eventual target scale, validating cheap at 43M is the right move.
+
+P6a. **Variable-width "⊗-former" layers (arxiv 2606.18246v1).** Per-layer width follows an ⊗-shape (wide ends, ~30pct width at ~75pct depth). Residual stream stays at max d; each block reads/writes a slice with **carry-forward** copy of untouched coords (beats zero-pad/learned-projection). Reported -0.6 to -1.3pct loss, -4 to -9pct PPL, +1 pt NLU acc, param-matched (also -2-4.6pct FLOPs, -10.5pct KV). Validated 200M-3B; no quantization data. Composes cleanly with our stack (ternary QLinear/STE, RoPE, RMSNorm, SwiGLU, GQA with divisibility constraint on d_ℓ × n_kv). Per-layer scale buffers must be sized to d_ℓ. Implementation ~120-180 LOC + carry-forward state, ~6h. **Worth running at 43M even though below validated range** — likely small absolute gain here but the architectural change should compound at our scale-up target.
+
+P6b. **Fixed-Point Reasoners (arxiv 2606.18206v1) — re-opens HRM recurrence line.** Movahedi et al. show looped depth-recurrence DOES recruit deeper computation for reasoning at **7M params** (below our fast-A 38M), but only with:
+- Per-layer learnable α₁,β₁ residual scalars
+- Per-iteration learnable α₂,β₂ residual scalars
+- **Adaptive halting at inference** via damped fixed-point solver (criterion ||z_i − f_θ(z_i;x)||∞ / ||f_θ(z_i;x)||∞ < 0.1)
+- Training: fixed BPTT window of k iters, NOT variable-cycles supervision
+
+Numbers vs TRM at 7M: Sudoku-Extreme 94.2 vs 74.7 (+19.5), A₅ state-tracking 98.1 vs ~65, ARC-1 47.5 vs 44.6, length-generalizes to 4× training. FP32, no quantization, but architecture transfers cleanly to ternary.
+
+**Revises the parked HRM-line conclusion**: r043 phase B failure wasn't "depth-recurrence structurally insufficient" — it was missing residual scalars + adaptive halting AND was tested on OpenMath (open-form) instead of symbolic-reasoning evals where FPRM's wins are. The "Topological Trouble" verdict was overgeneralized.
+
+Recommended re-entry: ONE targeted run at fast-A geometry (38M), pre-norm + α/β scalars + damped-fixpoint inference, on **Sudoku-Extreme** or synthetic state-tracking (NOT OpenMath). Implementation ~200-300 LOC (new HrmDecoderLayer variant + solver) + new eval pipeline for symbolic tasks + dataset. ~2 days. If 38M shows signal on Sudoku → expand to scale-up target; if not → close for real.
+
+**Queue priority**: Phase 6, after current ternary recipe sweep closes. Could be parallel to P6a since they're in different files (HrmDecoderLayer vs new symbolic-eval).
 
 ## Reference-only (not queued at current scale)
 
