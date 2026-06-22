@@ -25,9 +25,9 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="030"
-RUN_TAG="phase5-best-eff64-10k"
-DESCRIPTION="EXTEND g030 to 20000 steps via the new preserved-interrupted.pt path. Same OUT_DIR, just bump --total-steps to 20000; trainer detects interrupted.pt and resumes from step 10000 with full opt state. Tests whether compute keeps closing the FP gap (g030 reached 3.93 at 10k; FP-emb at 10k was 3.88 = +0.05 gap). LR caveat: cosine was scheduled for 10k, so steps 0..10000 saw faster decay than they would have on a 20k schedule; from step 10000 the resumed 20k schedule reapplies (lr at step 10000/20000 = mid-cosine). Acceptable for one-shot extension. ~9h ETA."
+RUN_N="031"
+RUN_TAG="phase5-best-eff64-20k-fresh"
+DESCRIPTION="Phase 5 ASYMPTOTE clean 20k run. Same recipe as g030 (trit-emb + gs=128 + no share-kv + trainable norms + init=0.90 + lr=0.15 + eff=64) but starts FRESH at 20k schedule — no resume, no LR spike. g030-ext hit val 3.89 at 20k but suffered a 10k-step LR-spike recovery (cosine reshape pre-lr-snapshot fix). Predicts ~3.85 with clean cosine. Tests the true Phase 5 asymptote on the no-share-kv recipe. ~18h ETA."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
