@@ -125,7 +125,8 @@ P5h. **Re-evaluate share-kv at trit-emb regime.** g017 partial (step
 
 P6a. **Variable-width "⊗-former" layers (arxiv 2606.18246v1).** Per-layer width follows an ⊗-shape (wide ends, ~30pct width at ~75pct depth). Residual stream stays at max d; each block reads/writes a slice with **carry-forward** copy of untouched coords (beats zero-pad/learned-projection). Reported -0.6 to -1.3pct loss, -4 to -9pct PPL, +1 pt NLU acc, param-matched (also -2-4.6pct FLOPs, -10.5pct KV). Validated 200M-3B; no quantization data. Composes cleanly with our stack (ternary QLinear/STE, RoPE, RMSNorm, SwiGLU, GQA with divisibility constraint on d_ℓ × n_kv). Per-layer scale buffers must be sized to d_ℓ. Implementation ~120-180 LOC + carry-forward state, ~6h. **Worth running at 43M even though below validated range** — likely small absolute gain here but the architectural change should compound at our scale-up target.
 
-P6b. **Fixed-Point Reasoners (arxiv 2606.18206v1) — re-opens HRM recurrence line.** Movahedi et al. show looped depth-recurrence DOES recruit deeper computation for reasoning at **7M params** (below our fast-A 38M), but only with:
+P6b. **Fixed-Point Reasoners (arxiv 2606.18206v1) — single-loop recurrence + adaptive halting.** Movahedi et al. show looped depth-recurrence DOES recruit deeper computation for reasoning at **7M params**, with:
+- **Single weight-tied block, looped k times** (NOT HRM's H+L dual-stack). Paper explicitly outperforms HRM at this size — **park the HRM dual-stack design**.
 - Per-layer learnable α₁,β₁ residual scalars
 - Per-iteration learnable α₂,β₂ residual scalars
 - **Adaptive halting at inference** via damped fixed-point solver (criterion ||z_i − f_θ(z_i;x)||∞ / ||f_θ(z_i;x)||∞ < 0.1)
@@ -133,11 +134,20 @@ P6b. **Fixed-Point Reasoners (arxiv 2606.18206v1) — re-opens HRM recurrence li
 
 Numbers vs TRM at 7M: Sudoku-Extreme 94.2 vs 74.7 (+19.5), A₅ state-tracking 98.1 vs ~65, ARC-1 47.5 vs 44.6, length-generalizes to 4× training. FP32, no quantization, but architecture transfers cleanly to ternary.
 
-**Revises the parked HRM-line conclusion**: r043 phase B failure wasn't "depth-recurrence structurally insufficient" — it was missing residual scalars + adaptive halting AND was tested on OpenMath (open-form) instead of symbolic-reasoning evals where FPRM's wins are. The "Topological Trouble" verdict was overgeneralized.
+**Revises the parked HRM-line conclusion**: r043 phase B failure wasn't "depth-recurrence structurally insufficient" — it was the HRM dual-stack AND missing residual scalars AND adaptive halting AND tested on OpenMath (open-form) instead of symbolic-reasoning evals where FPRM's wins are. The "Topological Trouble" verdict was overgeneralized.
 
-Recommended re-entry: ONE targeted run at fast-A geometry (38M), pre-norm + α/β scalars + damped-fixpoint inference, on **Sudoku-Extreme** or synthetic state-tracking (NOT OpenMath). Implementation ~200-300 LOC (new HrmDecoderLayer variant + solver) + new eval pipeline for symbolic tasks + dataset. ~2 days. If 38M shows signal on Sudoku → expand to scale-up target; if not → close for real.
+**User design questions (2026-06-22), worth experimental ablation:**
+- **Pre/post non-looped layers**: should the first and/or last transformer layers be unlooped (different weights, applied once), with only the middle k layers being weight-tied and looped? Symmetric: input-conditioning prefix and output-decoding suffix outside the recurrence, computation in the middle. Easy ablation: --unlooped-prefix N, --unlooped-suffix N.
+- **X-former + looped block = big BPTT win**: variable-width with narrow middle (~30pct) means the looped block has ~3x smaller activations than fixed-width. Full BPTT through k=8 iters of an ⊗-shape costs ~3x less activation memory than fixed-width. Combined with adaptive halting at inference, this could let us train deeper *effective* compute on the same 6GB VRAM. This is the multiplier — P6a × P6b together, not either alone.
 
-**Queue priority**: Phase 6, after current ternary recipe sweep closes. Could be parallel to P6a since they're in different files (HrmDecoderLayer vs new symbolic-eval).
+Recommended re-entry sequence:
+1. **Re-implement single-loop recurrence** (single weight-tied transformer block, loop k times, α/β scalars). Park HrmBopModel; build new LoopedGptModel reusing HrmDecoderLayer as the inner block. Test on Sudoku-Extreme.
+2. If signal at 38M → add ⊗-shape width schedule to looped block (cheap activation memory, deeper k for same VRAM).
+3. If signal at 38M → ablate unlooped prefix/suffix.
+
+Implementation ~250-400 LOC (LoopedGptModel + α/β params + damped solver + Sudoku data + eval) ~2-3 days. Queue after current ternary recipe sweep closes.
+
+**Queue priority**: Phase 6, after current sweep closes. Best paired with P6a (X-former) for the BPTT memory win.
 
 ## Reference-only (not queued at current scale)
 
