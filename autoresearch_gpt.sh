@@ -27,13 +27,13 @@ source .venv/bin/activate
 # Always advance RUN_N + RUN_TAG for each new experiment.
 RUN_N="030"
 RUN_TAG="phase5-best-eff64-10k"
-DESCRIPTION="Phase 5 NEW ASYMPTOTE with accumulated wins: trit-emb + gs=128 + no share-kv + trainable norms + init-zerofrac=0.90 + eff=64 + 10k steps. Each piece independently validated. Predict ~3.94 (g021 best at 10k was 3.9941; new init alone is -0.04). ~9h ETA overnight."
+DESCRIPTION="EXTEND g030 to 20000 steps via the new preserved-interrupted.pt path. Same OUT_DIR, just bump --total-steps to 20000; trainer detects interrupted.pt and resumes from step 10000 with full opt state. Tests whether compute keeps closing the FP gap (g030 reached 3.93 at 10k; FP-emb at 10k was 3.88 = +0.05 gap). LR caveat: cosine was scheduled for 10k, so steps 0..10000 saw faster decay than they would have on a 20k schedule; from step 10000 the resumed 20k schedule reapplies (lr at step 10000/20000 = mid-cosine). Acceptable for one-shot extension. ~9h ETA."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
 
 # Defaults: fast-A scale (38M ternary). Override per experiment as needed.
-TOTAL_STEPS="${TOTAL_STEPS:-10000}"
+TOTAL_STEPS="${TOTAL_STEPS:-20000}"
 BATCH_SIZE="${BATCH_SIZE:-2}"
 GRAD_ACCUM="${GRAD_ACCUM:-32}"
 HIDDEN_SIZE="${HIDDEN_SIZE:-512}"
