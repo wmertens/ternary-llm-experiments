@@ -119,6 +119,10 @@ P5h. **Re-evaluate share-kv at trit-emb regime.** g017 partial (step
 - HRM fast-A champion: Run 25/40 — val 4.16 (5000 steps) / 4.00 (10000 steps) at this recipe.
 - Likely GPT baseline floor: val ≈ 4.5-5.0 at 5000 steps (no recurrence means less effective depth; HRM ran the L_stack 6× and H_stack 2×, far more compute per token than a flat 6-layer GPT). Actual baseline TBD.
 
+### Phase 6 — Architectural (queue once Phase 5 recipe is locked)
+
+P6a. **Variable-width "⊗-former" layers (arxiv 2606.18246v1).** Per-layer width follows an ⊗-shape (wide ends, ~30pct width at ~75pct depth). Residual stream stays at max d; each block reads/writes a slice with **carry-forward** copy of untouched coords (beats zero-pad/learned-projection). Reported -0.6 to -1.3pct loss, -4 to -9pct PPL, +1 pt NLU acc, param-matched (also -2-4.6pct FLOPs, -10.5pct KV). Validated 200M-3B; no quantization data. Composes cleanly with our stack (ternary QLinear/STE, RoPE, RMSNorm, SwiGLU, GQA with divisibility constraint on d_ℓ × n_kv). Per-layer scale buffers must be sized to d_ℓ. Implementation ~120-180 LOC + carry-forward state, ~6h. Caveat: 43M is below the validated range, expected gap ≤1pct could be lost in seed noise. Queue as **g040+** once current sweep is closed; run 2-seed A/B with ⊗ schedule (d=512 ends, ~160 mid at L=5/6); kill if no visible improvement by 30pct of budget.
+
 ## Reference-only (not queued at current scale)
 
 - **Muon momentum spectra at scale (arxiv 2606.04058v2)** — empirical
