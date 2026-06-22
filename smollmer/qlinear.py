@@ -518,13 +518,21 @@ class QLinear(nn.Linear):
                 q_ste = self._qat_effective_weight()
             else:
                 q_ste = self.quantized_weight()  # [out, in], in [-1, 1]
-        if getattr(self, "computed_scale", False):
-            # BitNet-style: scalar γ = mean(|w_latent|) per tensor, recomputed
-            # each forward. NO learnable scale param, NO Lion32 momentum.
-            # Detached so γ is a constant from autograd's view (matches the
-            # BitNet b1.58 paper §3.1 absmean quantizer treatment).
+        cs = getattr(self, "computed_scale", False)
+        if cs:
+            # BitNet-style absmean: γ = mean(|w_latent|), recomputed per
+            # forward, detached so γ is constant from autograd's view (cf.
+            # BitNet b1.58 §3.1). No learnable scale, no Lion32 momentum.
+            # cs='tensor' (one γ for the whole tensor) or cs='row' /
+            # cs=True (one γ per output row — tracks per-row magnitude
+            # heterogeneity that per-tensor collapses, g032 failure).
             with torch.no_grad():
-                gamma = self.weight.abs().mean().clamp_min(1e-6).to(q_ste.dtype)
+                if cs == "tensor":
+                    gamma = (self.weight.abs().mean().clamp_min(1e-6)
+                             .to(q_ste.dtype))
+                else:  # 'row' or True
+                    gamma = (self.weight.abs().mean(dim=-1, keepdim=True)
+                             .clamp_min(1e-6).to(q_ste.dtype))
             w_scaled = q_ste * gamma
         else:
             # Apply per-(row, group) scales: expand scales [out, n_groups] to
@@ -969,12 +977,18 @@ class QEmbedding(QLinear):
         with torch.no_grad():
             q_rows = quantize_levels(w_rows, self.levels)
         q_ste = w_rows + (q_rows - w_rows).detach()
-        if getattr(self, "computed_scale", False):
-            # BitNet-style: scalar γ = mean(|w_latent|) over the full
-            # embedding table, recomputed per forward. NO learnable scale.
+        cs = getattr(self, "computed_scale", False)
+        if cs:
+            # BitNet-style absmean over the LOOKED-UP rows only (per-row γ).
+            # 'tensor' takes the table-wide mean for a single γ — risky for
+            # 50k-row embeddings whose magnitudes vary by token frequency.
             with torch.no_grad():
-                gamma = (self.weight.abs().mean().clamp_min(1e-6)
-                         .to(q_ste.dtype))
+                if cs == "tensor":
+                    gamma = (self.weight.abs().mean().clamp_min(1e-6)
+                             .to(q_ste.dtype))
+                else:  # per-row
+                    gamma = (w_rows.abs().mean(dim=-1, keepdim=True)
+                             .clamp_min(1e-6).to(q_ste.dtype))
             return q_ste * gamma
         # Look up the per-row scales for the same tokens, broadcast each
         # group-scale across its in_features-group columns.
@@ -990,9 +1004,15 @@ class QEmbedding(QLinear):
         if getattr(self, "fp_weights", False):
             return self.weight
         q = self.quantized_weight()  # [V, H], STE-bridged
-        if getattr(self, "computed_scale", False):
+        cs = getattr(self, "computed_scale", False)
+        if cs:
             with torch.no_grad():
-                gamma = self.weight.abs().mean().clamp_min(1e-6).to(q.dtype)
+                if cs == "tensor":
+                    gamma = (self.weight.abs().mean().clamp_min(1e-6)
+                             .to(q.dtype))
+                else:
+                    gamma = (self.weight.abs().mean(dim=-1, keepdim=True)
+                             .clamp_min(1e-6).to(q.dtype))
             return q * gamma
         s_full = self.scales.repeat_interleave(self.group_size, dim=-1)
         return q * s_full

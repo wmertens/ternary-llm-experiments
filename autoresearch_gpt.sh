@@ -25,9 +25,9 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="032"
-RUN_TAG="computed-scale-bitnet-absmean"
-DESCRIPTION="Phase 2 #8 / Phase 5d: BitNet-style absmean computed scale. γ = mean(|w_latent|) per QLinear/QEmbedding, recomputed per forward, NO learnable scale tensor, NO Lion32 momentum on scales. Strips ~0.35M trainable FP scale params + ~1.4MB Lion momentum. Implicit scalar per tensor → ~50 numbers total (vs 350K learned). User goal 2026-06-22: 'are there no avenues for less memory while maintaining quality'. This is the biggest remaining FP-reduction lever. Pass: val ≤ g023 4.3290 + 0.15 (max ~4.48) → computed scale viable; lower the FP residual to ~50 numbers. Fail: revisit Lion-on-scales sensitivity. Same recipe as g023 baseline (trit-emb + gs=128 + no share-kv + trainable norms + init=0.90 + lr=0.15 + bs=4 ga=8 eff=32 + 5000 steps). ~2h ETA."
+RUN_N="033"
+RUN_TAG="computed-scale-row"
+DESCRIPTION="Phase 5d continued: per-ROW computed γ instead of g032's per-tensor (which failed +2.23 nats — single γ can't track row-magnitude heterogeneity). γ = mean(|w_row|) per output row, recomputed per forward. Storage cost: out_features γs per tensor (~50K total across model) vs g023's per-(row, group) 350K (7x reduction). Still no learnable scale, no Lion32 momentum. Same recipe as g023 baseline. Pass: val ≤ g023 4.3290 + 0.10 → per-row computed γ viable, biggest FP residual cut. ~2h ETA."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
@@ -48,7 +48,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --computed-scale}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --computed-scale row}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 
