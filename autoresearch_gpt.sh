@@ -25,17 +25,17 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="037"
-RUN_TAG="cmuon-ns2"
-DESCRIPTION="NS sweep extension: ns=2 (final bracket). Current sweep: NS=3 4.3632 > NS=5 4.3290 > NS=4 4.2824 (winner). Test ns=2 to confirm we found the optimum (not monotone decay below 4). If ns=2 > 4.2824 → NS=4 confirmed optimum. If ns=2 < 4.2824 → NS=2 wins, even bigger wall savings. ~2h ETA."
+RUN_N="038"
+RUN_TAG="bs8-ga4-ns4"
+DESCRIPTION="Throughput dial: bs=8 ga=4 (eff batch unchanged at 32). g006 tested bs=4 vs bs=2 at the old recipe, saw -5pct wall. Now with the NS=4 baseline and the larger trit-emb model, kernel-launch overhead may differ. If bs=8 fits VRAM and saves real wall, adopt. Same recipe as g036 (NS=4 baseline) + bs=8 ga=4. ~1.7h ETA hopefully."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
 
 # Defaults: fast-A scale (38M ternary). Override per experiment as needed.
 TOTAL_STEPS="${TOTAL_STEPS:-5000}"
-BATCH_SIZE="${BATCH_SIZE:-4}"
-GRAD_ACCUM="${GRAD_ACCUM:-8}"
+BATCH_SIZE="${BATCH_SIZE:-8}"
+GRAD_ACCUM="${GRAD_ACCUM:-4}"
 HIDDEN_SIZE="${HIDDEN_SIZE:-512}"
 NUM_HEADS="${NUM_HEADS:-8}"
 INTERMEDIATE="${INTERMEDIATE:-1408}"
@@ -48,7 +48,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 2 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 
