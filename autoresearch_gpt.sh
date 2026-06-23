@@ -25,9 +25,9 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="039"
-RUN_TAG="cmuon-ns-per-layer"
-DESCRIPTION="Per-layer NS schedule (Muon-spectra paper, arxiv 2606.04058v2): ns = clamp(2, 6, ceil(log2(max_dim/256))). Schedule: embed ns=6 (1 matrix), mlp ns=3 (18), attn ns=2 (24). Average NS=2.5 vs g036 global NS=4. Tests whether per-layer NS captures the spectral-norm scaling structure: large embed needs more iters to orthogonalize, small attn matrices need fewer. If val ≤ g036 4.2824 → adopt; the wall savings come from doing less NS on the bulk of matrices. Compatible with our STE+ternary because NS operates only on Muon's FP momentum buffer. Resets bs=4 ga=8 (g038 OOM'd bs=8). ~1.5-2h ETA."
+RUN_N="040"
+RUN_TAG="cmuon-ns-per-layer-cap4"
+DESCRIPTION="Per-layer NS schedule v2 (fixed): cap clamp at 4 instead of 6. Schedule: ns=2 attn (24) / ns=3 mlp (18) / ns=4 embed (1). Avg ≈ 2.5, total ≈ 1.2e11 FLOPs (~33pct less than g036 NS=4 global 1.8e11). g039 v1 was slower because clamp=6 on the dominant embed wiped out attn savings. v2 uses NS=4 (the proven optimum) on the embed but saves on small attn. Pass: val ≤ g036 4.2824 + 0.03 AND wall < g036 8472s → real wall-time win. ~1.5h ETA."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"

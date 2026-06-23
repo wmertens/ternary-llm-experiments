@@ -733,17 +733,19 @@ def main() -> None:
         if args.muon_ns_per_layer:
             # Per-layer NS schedule (Muon-spectra paper, arxiv 2606.04058v2):
             # bigger matrices need more NS to maintain orthogonalisation.
-            # Heuristic: ns = clamp(ceil(log2(max(dim)/256)), 2, 6).
-            # 49152×512 embed → ns=6 (clamped from 8); 512×1408 mlp → ns=3;
-            # 512×512 attn → ns=2. g036 showed global NS=4 beats NS=5 at our
-            # scale, so small matrices want low NS, only embed wants high.
+            # Heuristic: ns = clamp(ceil(log2(max(dim)/256)), 2, 4).
+            # 49152×512 embed → ns=4 (clamped from 8); 512×1408 mlp → ns=3;
+            # 512×512 attn → ns=2. g036 showed global NS=4 = optimum, so we
+            # CAP at 4 — going higher on the embed (ns=6 in g039) costs more
+            # FLOPs than the savings on small attn matrices since embed
+            # dominates NS budget (49152×512 NS-iter ≈ 35x a 512×512 iter).
             import math
             groups = {}  # ns_int -> [params]
             for p in trit_params:
                 if p.ndim != 2:
                     continue
                 m = max(p.shape)
-                ns = max(2, min(6, math.ceil(math.log2(m / 256.0))))
+                ns = max(2, min(4, math.ceil(math.log2(m / 256.0))))
                 groups.setdefault(ns, []).append(p)
             param_groups = [{"params": ps, "ns_steps": ns}
                             for ns, ps in sorted(groups.items())]
