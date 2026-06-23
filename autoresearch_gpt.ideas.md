@@ -149,18 +149,39 @@ Implementation ~250-400 LOC (LoopedGptModel + α/β params + damped solver + Sud
 
 **Queue priority**: Phase 6, after current sweep closes. Best paired with P6a (X-former) for the BPTT memory win.
 
+## Queued-after-current-sweep (user steers 2026-06-23)
+
+### Per-row scales at bigger model size (revisit g034)
+g034 at 43M fast-A: per-row scales (81K) cost +0.131 nats vs per-(row,
+gs=128) 350K — 4.3x storage win, +3% PPL fail at this scale. User
+hypothesis: at bigger model, per-row gap may shrink because row
+capacity becomes less restrictive relative to representation depth.
+Worth testing on first scale-up (e.g. 8 layers, hidden=768, ~80M).
+If gap shrinks to <+0.05 nats, adopt per-row as new baseline since
+scale storage matters more in absolute terms at scale.
+
+### Per-layer NS step count (Muon-spectra paper, arxiv 2606.04058v2)
+g035 currently tests a global ns=3. The paper shows NS iter count
+should be per-layer because spectral norm decay follows a power law
+in model size with layer-type-dependent exponents (final output proj
+needs more iters, mid-late layers fewer). Implementation:
+- Per-QLinear `ns_steps` override, or
+- Auto-schedule in CMuon: ns = base + extra_for_top_K_layers
+For us: embed_tokens (49152×512) is much bigger than the rest (512×512
+to 512×1408). Heuristic: assign higher ns to embed and output (if
+untied), lower to mid-layers. Total NS FLOPs could go DOWN while
+quality goes UP. ~30 LOC in cmuon.py + a CLI flag.
+
+Both queued for after current Phase 5d/compute-dial sweep closes.
+
 ## Reference-only (not queued at current scale)
 
 - **Muon momentum spectra at scale (arxiv 2606.04058v2)** — empirical
   power laws for the per-layer singular-value spectra of Muon's momentum
   buffer (77M-2.8B). Recipe variant: rank-p truncated Newton-Schulz
   (p=0.5 ≈ full Muon, p=0.25 -10 to 20% perf, p=0.1 -50%). Could cut NS
-  iteration cost, but NS is not our bottleneck at 6 layers / hidden=512
-  — Lion32 on 25M FP embeds + the STE projection dominate. Scaling law
-  exponents fit on many-layer models, not directly portable to depth=6.
-  Skip; re-evaluate at >150M / 12+ layers, where per-layer NS budgeting
-  could matter. Implementation if needed: ~30 lines in cmuon.py + a
-  --muon-rank-frac flag.
+  iteration cost. **User correction 2026-06-23**: per-layer NS schedule
+  is the actionable insight. Moved to Queued-after-current-sweep above.
 
 ## Open questions the loop can answer
 - Is CMuon's optimum LR architecture-dependent or recipe-universal?
