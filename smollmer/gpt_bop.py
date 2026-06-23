@@ -448,6 +448,12 @@ def build_argparser() -> argparse.ArgumentParser:
                          "sqrt(max(m,n)).")
     ap.add_argument("--muon-beta", type=float, default=0.95,
                     help="CMuon first-moment EMA.")
+    ap.add_argument("--muon-ns-per-layer", action="store_true", default=False,
+                    help="Per-layer NS schedule (Muon-spectra paper, "
+                         "arxiv 2606.04058v2): ns = clamp(round(log2("
+                         "max(dim)/256) + 4), 2, 6). Big matrices need "
+                         "more NS to orthogonalize cleanly. Overrides "
+                         "--muon-ns-steps for matched-shape params.")
     ap.add_argument("--muon-ns-steps", type=int, default=5,
                     help="Newton-Schulz iterations per CMuon step.")
     ap.add_argument("--no-cautious-muon", action="store_true", default=False,
@@ -724,10 +730,38 @@ def main() -> None:
                              "float16": torch.float16,
                              "bfloat16": torch.bfloat16}[args.cmuon_state_dtype]
         cmuon_cautious = not args.no_cautious_muon
-        opt_cmuon = CMuon(trit_params, lr=args.muon_lr, beta=args.muon_beta,
-                          ns_steps=args.muon_ns_steps,
-                          cautious=cmuon_cautious,
-                          state_dtype=cmuon_state_dtype)
+        if args.muon_ns_per_layer:
+            # Per-layer NS schedule (Muon-spectra paper, arxiv 2606.04058v2):
+            # bigger matrices need more NS to maintain orthogonalisation.
+            # Heuristic: ns = clamp(ceil(log2(max(dim)/256)), 2, 6).
+            # 49152×512 embed → ns=6 (clamped from 8); 512×1408 mlp → ns=3;
+            # 512×512 attn → ns=2. g036 showed global NS=4 beats NS=5 at our
+            # scale, so small matrices want low NS, only embed wants high.
+            import math
+            groups = {}  # ns_int -> [params]
+            for p in trit_params:
+                if p.ndim != 2:
+                    continue
+                m = max(p.shape)
+                ns = max(2, min(6, math.ceil(math.log2(m / 256.0))))
+                groups.setdefault(ns, []).append(p)
+            param_groups = [{"params": ps, "ns_steps": ns}
+                            for ns, ps in sorted(groups.items())]
+            opt_cmuon = CMuon(param_groups, lr=args.muon_lr,
+                              beta=args.muon_beta,
+                              ns_steps=args.muon_ns_steps,  # default for unset
+                              cautious=cmuon_cautious,
+                              state_dtype=cmuon_state_dtype)
+            print(f"[opt] CMuon per-layer NS schedule: " +
+                  ", ".join(f"ns={ns}×{len(ps)}"
+                            for ns, ps in sorted(groups.items())),
+                  flush=True)
+        else:
+            opt_cmuon = CMuon(trit_params, lr=args.muon_lr,
+                              beta=args.muon_beta,
+                              ns_steps=args.muon_ns_steps,
+                              cautious=cmuon_cautious,
+                              state_dtype=cmuon_state_dtype)
         print(f"[opt] CMuon trit opt lr={args.muon_lr:g} "
               f"beta={args.muon_beta:g} ns={args.muon_ns_steps} "
               f"cautious={cmuon_cautious} state_dtype={args.cmuon_state_dtype}",

@@ -25,17 +25,17 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="038"
-RUN_TAG="bs8-ga4-ns4"
-DESCRIPTION="Throughput dial: bs=8 ga=4 (eff batch unchanged at 32). g006 tested bs=4 vs bs=2 at the old recipe, saw -5pct wall. Now with the NS=4 baseline and the larger trit-emb model, kernel-launch overhead may differ. If bs=8 fits VRAM and saves real wall, adopt. Same recipe as g036 (NS=4 baseline) + bs=8 ga=4. ~1.7h ETA hopefully."
+RUN_N="039"
+RUN_TAG="cmuon-ns-per-layer"
+DESCRIPTION="Per-layer NS schedule (Muon-spectra paper, arxiv 2606.04058v2): ns = clamp(2, 6, ceil(log2(max_dim/256))). Schedule: embed ns=6 (1 matrix), mlp ns=3 (18), attn ns=2 (24). Average NS=2.5 vs g036 global NS=4. Tests whether per-layer NS captures the spectral-norm scaling structure: large embed needs more iters to orthogonalize, small attn matrices need fewer. If val ≤ g036 4.2824 → adopt; the wall savings come from doing less NS on the bulk of matrices. Compatible with our STE+ternary because NS operates only on Muon's FP momentum buffer. Resets bs=4 ga=8 (g038 OOM'd bs=8). ~1.5-2h ETA."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
 
 # Defaults: fast-A scale (38M ternary). Override per experiment as needed.
 TOTAL_STEPS="${TOTAL_STEPS:-5000}"
-BATCH_SIZE="${BATCH_SIZE:-8}"
-GRAD_ACCUM="${GRAD_ACCUM:-4}"
+BATCH_SIZE="${BATCH_SIZE:-4}"
+GRAD_ACCUM="${GRAD_ACCUM:-8}"
 HIDDEN_SIZE="${HIDDEN_SIZE:-512}"
 NUM_HEADS="${NUM_HEADS:-8}"
 INTERMEDIATE="${INTERMEDIATE:-1408}"
@@ -48,7 +48,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-per-layer --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 
