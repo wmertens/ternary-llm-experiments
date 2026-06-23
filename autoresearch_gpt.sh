@@ -25,17 +25,17 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="040"
-RUN_TAG="cmuon-ns-per-layer-cap4"
-DESCRIPTION="Per-layer NS schedule v2 (fixed): cap clamp at 4 instead of 6. Schedule: ns=2 attn (24) / ns=3 mlp (18) / ns=4 embed (1). Avg ≈ 2.5, total ≈ 1.2e11 FLOPs (~33pct less than g036 NS=4 global 1.8e11). g039 v1 was slower because clamp=6 on the dominant embed wiped out attn savings. v2 uses NS=4 (the proven optimum) on the embed but saves on small attn. Pass: val ≤ g036 4.2824 + 0.03 AND wall < g036 8472s → real wall-time win. ~1.5h ETA."
+RUN_N="041"
+RUN_TAG="all-wins-ns4-10k"
+DESCRIPTION="ALL-WINS CHAMPION at 10k: trit-emb + gs=128 + no share-kv + trainable norms + init=0.90 + NS=4 (g036's discovery) + lr=0.15 cosine + eff=64 + bf16 m. g030 ran the same recipe minus NS=4 at 10k → 3.93. NS=4 alone gave -0.047 at 5k. Predict ~3.88 at 10k. New all-time champion candidate. ~9h ETA."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
 
 # Defaults: fast-A scale (38M ternary). Override per experiment as needed.
-TOTAL_STEPS="${TOTAL_STEPS:-5000}"
-BATCH_SIZE="${BATCH_SIZE:-4}"
-GRAD_ACCUM="${GRAD_ACCUM:-8}"
+TOTAL_STEPS="${TOTAL_STEPS:-10000}"
+BATCH_SIZE="${BATCH_SIZE:-2}"
+GRAD_ACCUM="${GRAD_ACCUM:-32}"
 HIDDEN_SIZE="${HIDDEN_SIZE:-512}"
 NUM_HEADS="${NUM_HEADS:-8}"
 INTERMEDIATE="${INTERMEDIATE:-1408}"
@@ -48,7 +48,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-per-layer --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 
