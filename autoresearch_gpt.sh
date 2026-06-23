@@ -25,9 +25,9 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="034"
-RUN_TAG="per-row-learnable-scales"
-DESCRIPTION="Phase 5d: per-ROW LEARNABLE scales (one γ per output row, Lion-managed). --scale-group-size 0 → QLinear interprets as per-row. Storage ~50K vs g023's gs=128 350K (7x reduction). Learnable so it carries the magnitude gradient signal that pure-computed killed (g032/g033 both ~+2 nats fail). Pass: val ≤ g023 4.3290 + 0.05 → per-row learnable viable, real FP reduction. ~2h ETA."
+RUN_N="035"
+RUN_TAG="cmuon-ns3"
+DESCRIPTION="Compute reduction: CMuon Newton-Schulz iterations 5 → 3. Each NS iter is two N×N matmuls; cutting 5→3 saves ~40pct of NS FLOPs. NS is small absolute fraction of wall but free if quality holds. Same recipe as g023 + --muon-ns-steps 3. Pass: val ≤ g023 4.3290 + 0.05 → adopt ns=3 baseline. ~2h ETA."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
@@ -48,7 +48,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 0 --init-zero-frac 0.90}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 3 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 
