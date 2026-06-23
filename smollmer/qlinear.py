@@ -254,11 +254,16 @@ class QLinear(nn.Linear):
                  target_zero_frac: float | None = None,
                  **kwargs) -> None:
         super().__init__(in_features, out_features, bias=bias, **kwargs)
+        if group_size <= 0:
+            # Per-row scale: one scale per output row, full in_features in
+            # one group. Minimum scale count per tensor (out_features × 1).
+            group_size = in_features
         if in_features % group_size != 0:
             raise ValueError(
                 f"in_features={in_features} not divisible by group_size={group_size}; "
                 "pick a group_size that divides every projection's in_features "
-                "(SmolLM2-135M: try 32 or 64; Qwen3-1.7B: 128)")
+                "(SmolLM2-135M: try 32 or 64; Qwen3-1.7B: 128). "
+                "Use group_size=0 for per-row scales (one scale per output row).")
         if mode not in ("levels", "soft"):
             raise ValueError(f"mode must be 'levels' or 'soft', got {mode!r}")
         self.group_size = int(group_size)

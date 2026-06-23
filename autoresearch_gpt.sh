@@ -25,9 +25,9 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="033"
-RUN_TAG="computed-scale-row"
-DESCRIPTION="Phase 5d continued: per-ROW computed γ instead of g032's per-tensor (which failed +2.23 nats — single γ can't track row-magnitude heterogeneity). γ = mean(|w_row|) per output row, recomputed per forward. Storage cost: out_features γs per tensor (~50K total across model) vs g023's per-(row, group) 350K (7x reduction). Still no learnable scale, no Lion32 momentum. Same recipe as g023 baseline. Pass: val ≤ g023 4.3290 + 0.10 → per-row computed γ viable, biggest FP residual cut. ~2h ETA."
+RUN_N="034"
+RUN_TAG="per-row-learnable-scales"
+DESCRIPTION="Phase 5d: per-ROW LEARNABLE scales (one γ per output row, Lion-managed). --scale-group-size 0 → QLinear interprets as per-row. Storage ~50K vs g023's gs=128 350K (7x reduction). Learnable so it carries the magnitude gradient signal that pure-computed killed (g032/g033 both ~+2 nats fail). Pass: val ≤ g023 4.3290 + 0.05 → per-row learnable viable, real FP reduction. ~2h ETA."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
@@ -48,7 +48,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --computed-scale row}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 0 --init-zero-frac 0.90}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 
