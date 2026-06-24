@@ -1298,7 +1298,8 @@ def main() -> None:
     _save_resume(interrupted_path, model, opt_bop, opt_cmuon,
                  opt_lion_trits, opt_lion, global_step,
                  best_snapshot, ctrl, run_name,
-                 global_step * args.grad_accum * args.batch_size)
+                 global_step * args.grad_accum * args.batch_size,
+                 lr_snapshot={"lion_lr": cur_lr, "muon_lr": cur_muon_lr})
     print(f"[done] preserved {interrupted_path} (full opt state for "
           f"resume; use tools/dump_interrupted.py to extract weights)",
           flush=True)
