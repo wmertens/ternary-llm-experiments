@@ -27,15 +27,15 @@ source .venv/bin/activate
 # Always advance RUN_N + RUN_TAG for each new experiment.
 RUN_N="041"
 RUN_TAG="all-wins-ns4-10k"
-DESCRIPTION="ALL-WINS CHAMPION at 10k: trit-emb + gs=128 + no share-kv + trainable norms + init=0.90 + NS=4 (g036's discovery) + lr=0.15 cosine + eff=64 + bf16 m. g030 ran the same recipe minus NS=4 at 10k → 3.93. NS=4 alone gave -0.047 at 5k. Predict ~3.88 at 10k. New all-time champion candidate. ~9h ETA."
+DESCRIPTION="EXTEND g041 to 20000 steps via the clean lr-snapshot resume path. g041 hit val 3.9096 at 10k, still descending -0.018 last 500. With lr-snapshot the cosine continues smoothly from current LR over remaining 10k. Predict val 3.83-3.86. Compare to FP-emb baseline g016 10k 3.8806 — extended ternary may match or beat. ~9h ETA."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
 
 # Defaults: fast-A scale (38M ternary). Override per experiment as needed.
-TOTAL_STEPS="${TOTAL_STEPS:-10000}"
-BATCH_SIZE="${BATCH_SIZE:-2}"
-GRAD_ACCUM="${GRAD_ACCUM:-32}"
+TOTAL_STEPS="${TOTAL_STEPS:-20000}"
+BATCH_SIZE="${BATCH_SIZE:-4}"
+GRAD_ACCUM="${GRAD_ACCUM:-16}"
 HIDDEN_SIZE="${HIDDEN_SIZE:-512}"
 NUM_HEADS="${NUM_HEADS:-8}"
 INTERMEDIATE="${INTERMEDIATE:-1408}"
