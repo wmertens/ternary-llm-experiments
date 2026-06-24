@@ -25,15 +25,15 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="041"
-RUN_TAG="all-wins-ns4-10k"
-DESCRIPTION="EXTEND g041 to 20000 steps via the clean lr-snapshot resume path. g041 hit val 3.9096 at 10k, still descending -0.018 last 500. With lr-snapshot the cosine continues smoothly from current LR over remaining 10k. Predict val 3.83-3.86. Compare to FP-emb baseline g016 10k 3.8806 — extended ternary may match or beat. ~9h ETA."
+RUN_N="042"
+RUN_TAG="xformer-512-384-256"
+DESCRIPTION="Phase 6 P6a: X-former (arxiv 2606.18246v1). Same recipe as g041 (trit-emb + gs=128 + no share-kv + init=0.90 + NS=4 + eff=64 + bf16 m) + layer_widths=[512,384,256,256,384,512] (⊗ profile, wide ends narrow middle). Wide residual carries forward untouched coords. -13pct params (44.8M → 39.0M). Test at 5k steps first (cheap signal); if competitive, push to 10k. Pass: val ≤ g041 5k extrapolation (~4.20-4.25 estimated). ~2h ETA."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
 
 # Defaults: fast-A scale (38M ternary). Override per experiment as needed.
-TOTAL_STEPS="${TOTAL_STEPS:-20000}"
+TOTAL_STEPS="${TOTAL_STEPS:-5000}"
 BATCH_SIZE="${BATCH_SIZE:-4}"
 GRAD_ACCUM="${GRAD_ACCUM:-16}"
 HIDDEN_SIZE="${HIDDEN_SIZE:-512}"
@@ -48,7 +48,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --layer-widths 512,384,256,256,384,512}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 

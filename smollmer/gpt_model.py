@@ -9,7 +9,7 @@ clamp helpers all work unchanged.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 
 import torch
 import torch.nn as nn
@@ -37,6 +37,12 @@ class GptBopConfig:
     share_kv: bool = False     # Q-K=V (arxiv 2606.04032)
     trit_embeddings: bool = False   # Phase 5a: ternary token embedding
     sandwich_norm: bool = False     # Pre+post RMSNorm around attn/mlp
+    # X-former (arxiv 2606.18246v1): per-layer widths along an ⊗ profile,
+    # wide residual stream, narrow middle. Each layer reads/writes a slice
+    # of the first d_ℓ coords; the rest carry forward. List must be
+    # num_layers long. head_dim stays at 64 (cfg.hidden_size//cfg.num_attention_heads)
+    # so each d_ℓ must be a multiple of 64 AND of scale_group_size.
+    layer_widths: list[int] = field(default_factory=list)
 
     @property
     def head_dim(self) -> int:
@@ -57,8 +63,29 @@ class GptBopModel(nn.Module):
                 group_size=cfg.scale_group_size, levels=3)
         else:
             self.embed_tokens = nn.Embedding(cfg.vocab_size, cfg.hidden_size)
-        self.layers = nn.ModuleList(
-            [HrmDecoderLayer(cfg) for _ in range(cfg.num_layers)])
+        head_dim = cfg.head_dim
+        if cfg.layer_widths:
+            widths = list(cfg.layer_widths)
+            assert len(widths) == cfg.num_layers, (
+                f"layer_widths {widths} must have {cfg.num_layers} entries")
+            for d in widths:
+                assert d <= cfg.hidden_size and d % head_dim == 0 and (
+                    d % cfg.scale_group_size == 0), (
+                    f"layer width {d} must be ≤ hidden_size={cfg.hidden_size} "
+                    f"and divisible by head_dim={head_dim} and "
+                    f"scale_group_size={cfg.scale_group_size}")
+        else:
+            widths = [cfg.hidden_size] * cfg.num_layers
+        self.widths = widths
+        layers = []
+        for d in widths:
+            sub = replace(cfg,
+                          hidden_size=d,
+                          num_attention_heads=d // head_dim,
+                          num_kv_heads=d // head_dim,
+                          layer_widths=[])  # no recursion
+            layers.append(HrmDecoderLayer(sub))
+        self.layers = nn.ModuleList(layers)
         self.final_norm = RMSNorm(cfg.hidden_size, eps=cfg.rms_norm_eps)
         if cfg.tie_word_embeddings:
             self.lm_head = None
@@ -86,8 +113,18 @@ class GptBopModel(nn.Module):
         x = self.embed_tokens(input_ids) * self.cfg.embedding_scale
         cos = self.rotary.cos_cached[:S].to(x.dtype)
         sin = self.rotary.sin_cached[:S].to(x.dtype)
-        for layer in self.layers:
-            x = layer(x, cos, sin)
+        H = self.cfg.hidden_size
+        for layer, d in zip(self.layers, self.widths):
+            if d == H:
+                x = layer(x, cos, sin)
+            else:
+                # X-former: feed a [:, :, :d] slice; carry forward [:, :, d:].
+                # The layer's internal residual works on the d-wide slice;
+                # the wide-residual coords beyond d stay from the previous
+                # layer that touched them. RoPE buffers are head_dim-shaped
+                # so they don't need slicing.
+                head = layer(x[..., :d].contiguous(), cos, sin)
+                x = torch.cat([head, x[..., d:]], dim=-1)
         x = self.final_norm(x)
         if self.lm_head is None:
             # Tied. If the embed is QEmbedding the matmul target is the

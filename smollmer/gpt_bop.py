@@ -305,6 +305,7 @@ def save_safetensors(model: nn.Module, path: Path,
         "embedding_scale": str(cfg.embedding_scale),
         "share_kv": "true" if cfg.share_kv else "false",
         "trit_embeddings": "true" if cfg.trit_embeddings else "false",
+        "layer_widths": ",".join(str(w) for w in cfg.layer_widths),
     }
     if extra_meta:
         meta.update({k: str(v) for k, v in extra_meta.items()})
@@ -381,6 +382,13 @@ def build_argparser() -> argparse.ArgumentParser:
                          "the MLP output (in addition to the existing pre-"
                          "norms). 4 norms per block instead of 2. Cheap "
                          "stabiliser sometimes useful for quantised models.")
+    ap.add_argument("--layer-widths", type=str, default="",
+                    help="X-former (arxiv 2606.18246v1): comma-sep per-layer "
+                         "widths along the residual stream (e.g. "
+                         "'512,384,256,256,384,512'). Each width must be ≤ "
+                         "--hidden-size, divisible by head_dim and "
+                         "scale_group_size. Wide residual carries forward "
+                         "the untouched coords. Empty = constant width.")
     ap.add_argument("--vocab-size", type=int, default=49152)
     ap.add_argument("--max-position-embeddings", type=int, default=1024)
     ap.add_argument("--rope-theta", type=float, default=10000.0)
@@ -585,6 +593,8 @@ def main() -> None:
         share_kv=args.share_kv,
         trit_embeddings=args.trit_embeddings,
         sandwich_norm=args.sandwich_norm,
+        layer_widths=([int(w) for w in args.layer_widths.split(",")]
+                      if args.layer_widths else []),
     )
     print(f"[build] cfg={cfg}", flush=True)
     model = GptBopModel(cfg)
