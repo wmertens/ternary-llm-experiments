@@ -25,9 +25,9 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="042"
-RUN_TAG="xformer-512-384-256"
-DESCRIPTION="EXTEND g042 to 10000 steps via interrupted.pt resume (lr-snapshot fix is in place — no spike). g042 at 5k: val 4.1487 vs g041 flat 4.2198 = -0.071 nats win at -13pct params and -12pct wall. Predict 10k val ~3.84 if 5k→10k drop matches g041's -0.31. Would be new ternary champion at 39M, beating g041 (44.7M, val 3.9096). ~7h ETA for 5k more steps."
+RUN_N="043"
+RUN_TAG="xformer-512-384-256-10k-fresh"
+DESCRIPTION="X-former ⊗ 10k FRESH. g042's lr-snapshot resume saved cosine-floor LR (2.25e-3) → extension would train at floor LR (no useful learning). Restart with proper 10k cosine. g042 5k: val 4.1487. Predict 10k val ~3.84 → new ternary champion at 39M, beating g041 (44.7M, val 3.9096). ~8h ETA. Note for harness design: lr_snapshot is right for SIGINT mid-run, wrong for total-steps bumps past the original schedule end."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
