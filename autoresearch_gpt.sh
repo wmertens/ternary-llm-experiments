@@ -25,21 +25,21 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="044"
-RUN_TAG="xformer-gentle-2narrow-384"
-DESCRIPTION="Gentler ⊗: [512,512,384,384,512,512] — only middle 2 layers narrowed (gs=128 forces multiples of 128, so 384 is the only available narrower step). 42.8M total (vs flat 44.8M = -4pct, vs g043 39.0M = +10pct). Tests whether less aggressive narrowing keeps quality near flat while saving some wall. Pass: val ≤ g041 3.9096 OR better val-per-wall than g041. ~9h ETA."
+RUN_N="045"
+RUN_TAG="8layer-flat-gs128-5k"
+DESCRIPTION="Scale-up baseline: 8 layers (51.3M total). Same recipe as g036 (trit-emb + gs=128 + no share-kv + init=0.90 + NS=4 + bf16 m). Establishes 8L flat as the reference for the per-row-scales-at-scale test (g046 will use gs=0 at same 8L). g034 showed per-row +0.13 nats penalty at 6L; user hypothesis: penalty shrinks at scale. ~5h ETA."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
 
 # Defaults: fast-A scale (38M ternary). Override per experiment as needed.
-TOTAL_STEPS="${TOTAL_STEPS:-10000}"
+TOTAL_STEPS="${TOTAL_STEPS:-5000}"
 BATCH_SIZE="${BATCH_SIZE:-4}"
-GRAD_ACCUM="${GRAD_ACCUM:-16}"
+GRAD_ACCUM="${GRAD_ACCUM:-8}"
 HIDDEN_SIZE="${HIDDEN_SIZE:-512}"
 NUM_HEADS="${NUM_HEADS:-8}"
 INTERMEDIATE="${INTERMEDIATE:-1408}"
-NUM_LAYERS="${NUM_LAYERS:-6}"
+NUM_LAYERS="${NUM_LAYERS:-8}"
 TAU_NORM="${TAU_NORM:-0.15}"
 GAMMA="${GAMMA:-1e-3}"
 GAMMA_V="${GAMMA_V:-1e-3}"
@@ -48,7 +48,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --layer-widths 512,512,384,384,512,512}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 
