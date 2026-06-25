@@ -25,9 +25,9 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="043"
-RUN_TAG="xformer-512-384-256-10k-fresh"
-DESCRIPTION="X-former ⊗ 10k FRESH. g042's lr-snapshot resume saved cosine-floor LR (2.25e-3) → extension would train at floor LR (no useful learning). Restart with proper 10k cosine. g042 5k: val 4.1487. Predict 10k val ~3.84 → new ternary champion at 39M, beating g041 (44.7M, val 3.9096). ~8h ETA. Note for harness design: lr_snapshot is right for SIGINT mid-run, wrong for total-steps bumps past the original schedule end."
+RUN_N="044"
+RUN_TAG="xformer-gentle-2narrow-384"
+DESCRIPTION="Gentler ⊗: [512,512,384,384,512,512] — only middle 2 layers narrowed (gs=128 forces multiples of 128, so 384 is the only available narrower step). 42.8M total (vs flat 44.8M = -4pct, vs g043 39.0M = +10pct). Tests whether less aggressive narrowing keeps quality near flat while saving some wall. Pass: val ≤ g041 3.9096 OR better val-per-wall than g041. ~9h ETA."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
@@ -48,7 +48,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --layer-widths 512,384,256,256,384,512}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --layer-widths 512,512,384,384,512,512}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 
