@@ -25,9 +25,9 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="045"
-RUN_TAG="8layer-flat-gs128-5k"
-DESCRIPTION="Scale-up baseline: 8 layers (51.3M total). Same recipe as g036 (trit-emb + gs=128 + no share-kv + init=0.90 + NS=4 + bf16 m). Establishes 8L flat as the reference for the per-row-scales-at-scale test (g046 will use gs=0 at same 8L). g034 showed per-row +0.13 nats penalty at 6L; user hypothesis: penalty shrinks at scale. ~5h ETA."
+RUN_N="046"
+RUN_TAG="8layer-per-row-gs0-5k"
+DESCRIPTION="Per-row scales at scale-up: 8L + --scale-group-size 0 (per-row). Compare delta to g045 (8L gs=128 4.2390) and to 6L baselines: g023 4.3290 (gs=128) → g034 4.4600 (gs=0) = +0.131. If 8L delta < 0.131, scale-up shrinks the per-row penalty as user predicted. Scales: 92K (vs 397K gs=128 — 4.3x reduction). ~5h ETA."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
@@ -48,7 +48,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 0 --init-zero-frac 0.90}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 
