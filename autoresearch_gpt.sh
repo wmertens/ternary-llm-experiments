@@ -27,13 +27,13 @@ source .venv/bin/activate
 # Always advance RUN_N + RUN_TAG for each new experiment.
 RUN_N="042"
 RUN_TAG="xformer-512-384-256"
-DESCRIPTION="Phase 6 P6a: X-former (arxiv 2606.18246v1). Same recipe as g041 (trit-emb + gs=128 + no share-kv + init=0.90 + NS=4 + eff=64 + bf16 m) + layer_widths=[512,384,256,256,384,512] (⊗ profile, wide ends narrow middle). Wide residual carries forward untouched coords. -13pct params (44.8M → 39.0M). Test at 5k steps first (cheap signal); if competitive, push to 10k. Pass: val ≤ g041 5k extrapolation (~4.20-4.25 estimated). ~2h ETA."
+DESCRIPTION="EXTEND g042 to 10000 steps via interrupted.pt resume (lr-snapshot fix is in place — no spike). g042 at 5k: val 4.1487 vs g041 flat 4.2198 = -0.071 nats win at -13pct params and -12pct wall. Predict 10k val ~3.84 if 5k→10k drop matches g041's -0.31. Would be new ternary champion at 39M, beating g041 (44.7M, val 3.9096). ~7h ETA for 5k more steps."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
 
 # Defaults: fast-A scale (38M ternary). Override per experiment as needed.
-TOTAL_STEPS="${TOTAL_STEPS:-5000}"
+TOTAL_STEPS="${TOTAL_STEPS:-10000}"
 BATCH_SIZE="${BATCH_SIZE:-4}"
 GRAD_ACCUM="${GRAD_ACCUM:-16}"
 HIDDEN_SIZE="${HIDDEN_SIZE:-512}"
