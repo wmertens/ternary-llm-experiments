@@ -25,15 +25,15 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="047"
-RUN_TAG="8layer-flat-gs128-10k"
-DESCRIPTION="Scale-up champion: 8L flat gs=128 at 10k. g045 5k = 4.24, g041 6L 10k = 3.9096. Predict 8L 10k ~3.85. Tests whether the 6L → 8L improvement holds at extended compute (50pct more params, ~15pct more wall). New all-time ternary champion candidate at 51M. ~10h ETA."
+RUN_N="048"
+RUN_TAG="8layer-flat-gs128-20k-fresh"
+DESCRIPTION="Champion + extended compute. Fresh 20k run of the g047 recipe (no resume — floor-LR extension issue). Tests whether 8L flat keeps gaining with 2x compute. Predict ~3.78. ~20h ETA overnight."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
 
 # Defaults: fast-A scale (38M ternary). Override per experiment as needed.
-TOTAL_STEPS="${TOTAL_STEPS:-10000}"
+TOTAL_STEPS="${TOTAL_STEPS:-20000}"
 BATCH_SIZE="${BATCH_SIZE:-4}"
 GRAD_ACCUM="${GRAD_ACCUM:-16}"
 HIDDEN_SIZE="${HIDDEN_SIZE:-512}"
