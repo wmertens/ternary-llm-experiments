@@ -25,21 +25,21 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="048"
-RUN_TAG="8layer-flat-gs128-20k-fresh"
-DESCRIPTION="Champion + extended compute. Fresh 20k run of the g047 recipe (no resume — floor-LR extension issue). Tests whether 8L flat keeps gaining with 2x compute. Predict ~3.78. ~20h ETA overnight."
+RUN_N="049"
+RUN_TAG="12layer-flat-gs128-5k"
+DESCRIPTION="Depth scaling probe: 12L flat 5k. 64.2M params (vs 8L 51.3M = +25pct). g045 6L→8L at 5k: 4.28→4.24 = -0.04. Predict 12L 5k ~4.20. If meaningful gain, do 12L 10k as new champion. ~7h ETA at bs=4."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
 
 # Defaults: fast-A scale (38M ternary). Override per experiment as needed.
-TOTAL_STEPS="${TOTAL_STEPS:-20000}"
+TOTAL_STEPS="${TOTAL_STEPS:-5000}"
 BATCH_SIZE="${BATCH_SIZE:-4}"
 GRAD_ACCUM="${GRAD_ACCUM:-16}"
 HIDDEN_SIZE="${HIDDEN_SIZE:-512}"
 NUM_HEADS="${NUM_HEADS:-8}"
 INTERMEDIATE="${INTERMEDIATE:-1408}"
-NUM_LAYERS="${NUM_LAYERS:-8}"
+NUM_LAYERS="${NUM_LAYERS:-12}"
 TAU_NORM="${TAU_NORM:-0.15}"
 GAMMA="${GAMMA:-1e-3}"
 GAMMA_V="${GAMMA_V:-1e-3}"
