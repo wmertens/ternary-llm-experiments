@@ -25,15 +25,15 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="049"
-RUN_TAG="12layer-flat-gs128-5k"
-DESCRIPTION="Depth scaling probe: 12L flat 5k. 64.2M params (vs 8L 51.3M = +25pct). g045 6L→8L at 5k: 4.28→4.24 = -0.04. Predict 12L 5k ~4.20. If meaningful gain, do 12L 10k as new champion. ~7h ETA at bs=4."
+RUN_N="050"
+RUN_TAG="12layer-flat-gs128-10k"
+DESCRIPTION="12L flat gs=128 10k fresh — depth-scaling champion candidate. g049 5k landed 3.9884 (vs predicted 4.20), beat 8L 5k by -0.25 nats. 12L scaling has NOT plateaued. At 10k extrapolates to ~3.70-3.75 — would match or beat g048 (8L 20k = 3.7272) at HALF the steps. Fresh start (clean cosine over 10k), no resume LR snapshot games. 64.2M params. ~10h ETA at bs=4."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
 
 # Defaults: fast-A scale (38M ternary). Override per experiment as needed.
-TOTAL_STEPS="${TOTAL_STEPS:-5000}"
+TOTAL_STEPS="${TOTAL_STEPS:-10000}"
 BATCH_SIZE="${BATCH_SIZE:-4}"
 GRAD_ACCUM="${GRAD_ACCUM:-16}"
 HIDDEN_SIZE="${HIDDEN_SIZE:-512}"
