@@ -25,21 +25,21 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="050"
-RUN_TAG="12layer-flat-gs128-10k"
-DESCRIPTION="12L flat gs=128 10k fresh — depth-scaling champion candidate. g049 5k landed 3.9884 (vs predicted 4.20), beat 8L 5k by -0.25 nats. 12L scaling has NOT plateaued. At 10k extrapolates to ~3.70-3.75 — would match or beat g048 (8L 20k = 3.7272) at HALF the steps. Fresh start (clean cosine over 10k), no resume LR snapshot games. 64.2M params. ~10h ETA at bs=4."
+RUN_N="051"
+RUN_TAG="8layer-flat-gs128-30k"
+DESCRIPTION="8L flat gs=128 30k fresh — push champion recipe further. g048 (8L 20k) at 3.7272 still descending (-0.16 over last 5k). g050 (12L 10k) at 3.7674 lost per-wall to g048. 8L 30k extrapolates to ~3.60-3.65 at similar wall to 12L 10k (~13-14h). Best wall-clock bet for chasing sub-3.7. Fresh cosine 0→30k for clean schedule."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
 
 # Defaults: fast-A scale (38M ternary). Override per experiment as needed.
-TOTAL_STEPS="${TOTAL_STEPS:-10000}"
+TOTAL_STEPS="${TOTAL_STEPS:-30000}"
 BATCH_SIZE="${BATCH_SIZE:-4}"
 GRAD_ACCUM="${GRAD_ACCUM:-16}"
 HIDDEN_SIZE="${HIDDEN_SIZE:-512}"
 NUM_HEADS="${NUM_HEADS:-8}"
 INTERMEDIATE="${INTERMEDIATE:-1408}"
-NUM_LAYERS="${NUM_LAYERS:-12}"
+NUM_LAYERS="${NUM_LAYERS:-8}"
 TAU_NORM="${TAU_NORM:-0.15}"
 GAMMA="${GAMMA:-1e-3}"
 GAMMA_V="${GAMMA_V:-1e-3}"
