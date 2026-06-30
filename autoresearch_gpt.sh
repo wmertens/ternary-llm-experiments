@@ -25,15 +25,15 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="053"
-RUN_TAG="8layer-bf16-latents-scales-5k"
-DESCRIPTION="P5c.1: stack bf16 scales on top of g052's bf16 latents. g052 won by -0.098 nats. Lion's sign(beta·m+(1-beta)·g) rule depends only on EMA sign, not magnitude — first-principles free lunch (no paper). Bar: within +0.02 of g052 (4.1409) → adopt; >+0.05 → fp32 scales kept. If win: g054 = 8L 20k all-bf16 as new champion attempt vs g048 (3.7272)."
+RUN_N="054"
+RUN_TAG="8layer-bf16-latents-20k"
+DESCRIPTION="CHAMPION ATTEMPT: 8L 20k flat with bf16 latents (fp32 scales). g052 confirmed bf16-latents-only wins -0.098 nats at 5k vs g045 fp16. If the gain compounds at 20k: 3.7272 - 0.10 ≈ 3.63 (would beat g048). g053 already proved bf16 scales hurt — keep fp32 scales. Recipe = g048's exact recipe + --latent-dtype bfloat16. ~9h ETA."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
 
 # Defaults: fast-A scale (38M ternary). Override per experiment as needed.
-TOTAL_STEPS="${TOTAL_STEPS:-5000}"
+TOTAL_STEPS="${TOTAL_STEPS:-20000}"
 BATCH_SIZE="${BATCH_SIZE:-4}"
 GRAD_ACCUM="${GRAD_ACCUM:-16}"
 HIDDEN_SIZE="${HIDDEN_SIZE:-512}"
@@ -48,7 +48,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --latent-dtype bfloat16 --scales-dtype bfloat16}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --latent-dtype bfloat16}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 
