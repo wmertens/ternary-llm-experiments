@@ -25,9 +25,9 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="052"
-RUN_TAG="8layer-bf16-latents-5k"
-DESCRIPTION="P5b probe: bf16 latents at 8L 5k. Baseline g045 (8L 5k, default fp16 latents) = 4.2390. SURPRISE: all prior runs have been fp16 latents (--latent-dtype default), not fp32. So this is a 7-bit-mantissa probe against 11-bit-mantissa baseline. bf16 has ~128 distinct values in [-1,1] vs fp16's ~1024 — concern is whether STE's small gradient updates across the {-0.5,+0.5} trit boundaries get lost in bf16 rounding. Bar: within +0.02 nats of g045 → adopt for memory/throughput; >+0.05 → fp16 stays."
+RUN_N="053"
+RUN_TAG="8layer-bf16-latents-scales-5k"
+DESCRIPTION="P5c.1: stack bf16 scales on top of g052's bf16 latents. g052 won by -0.098 nats. Lion's sign(beta·m+(1-beta)·g) rule depends only on EMA sign, not magnitude — first-principles free lunch (no paper). Bar: within +0.02 of g052 (4.1409) → adopt; >+0.05 → fp32 scales kept. If win: g054 = 8L 20k all-bf16 as new champion attempt vs g048 (3.7272)."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
@@ -48,7 +48,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --latent-dtype bfloat16}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --latent-dtype bfloat16 --scales-dtype bfloat16}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 
