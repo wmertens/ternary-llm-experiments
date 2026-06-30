@@ -25,15 +25,15 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="051"
-RUN_TAG="8layer-flat-gs128-30k"
-DESCRIPTION="8L flat gs=128 30k fresh — push champion recipe further. g048 (8L 20k) at 3.7272 still descending (-0.16 over last 5k). g050 (12L 10k) at 3.7674 lost per-wall to g048. 8L 30k extrapolates to ~3.60-3.65 at similar wall to 12L 10k (~13-14h). Best wall-clock bet for chasing sub-3.7. Fresh cosine 0→30k for clean schedule."
+RUN_N="052"
+RUN_TAG="8layer-bf16-latents-5k"
+DESCRIPTION="P5b probe: bf16 latents at 8L 5k. Baseline g045 (8L 5k, default fp16 latents) = 4.2390. SURPRISE: all prior runs have been fp16 latents (--latent-dtype default), not fp32. So this is a 7-bit-mantissa probe against 11-bit-mantissa baseline. bf16 has ~128 distinct values in [-1,1] vs fp16's ~1024 — concern is whether STE's small gradient updates across the {-0.5,+0.5} trit boundaries get lost in bf16 rounding. Bar: within +0.02 nats of g045 → adopt for memory/throughput; >+0.05 → fp16 stays."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
 
 # Defaults: fast-A scale (38M ternary). Override per experiment as needed.
-TOTAL_STEPS="${TOTAL_STEPS:-30000}"
+TOTAL_STEPS="${TOTAL_STEPS:-5000}"
 BATCH_SIZE="${BATCH_SIZE:-4}"
 GRAD_ACCUM="${GRAD_ACCUM:-16}"
 HIDDEN_SIZE="${HIDDEN_SIZE:-512}"
@@ -48,7 +48,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --latent-dtype bfloat16}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 
