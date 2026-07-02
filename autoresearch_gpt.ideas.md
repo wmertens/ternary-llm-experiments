@@ -149,6 +149,98 @@ Implementation ~250-400 LOC (LoopedGptModel + α/β params + damped solver + Sud
 
 **Queue priority**: Phase 6, after current sweep closes. Best paired with P6a (X-former) for the BPTT memory win.
 
+**Decision pinned 2026-06-28**: build P6b *immediately after g051 (8L 30k) completes*. That run locks the flat-recipe ceiling as the baseline FPRM has to beat on language-modeling val loss, then we pivot to the build (~2-3 days). At that point, kill the loss-sweep cadence — FPRM evaluates on Sudoku-Extreme + A₅ state-tracking, not fineweb perplexity.
+
+**Steer 2026-06-28**: BEFORE FPRM, run the latent-precision sweep below — un-played knob, cheap to try (recipe-only changes, no new code beyond a CLI flag), and the answer informs whether FPRM's BPTT memory budget gets even cheaper.
+
+## P5b — Latent precision sweep (queued before P6b)
+
+**Motivation**: trit latents are 63.7M fp32 params (~255MB). If bf16 latents give equivalent loss curves we save ~125MB and free VRAM for bigger effective batch / deeper FPRM unroll. CMuon optimizer state is already bf16; latents themselves are still fp32 by default. Unknown whether the small gradient updates the STE needs survive bf16's 7-bit mantissa.
+
+Queue order (each ~5k probe, compare to g045 8L 5k baseline 4.2390; promote winners to 10k):
+1. **bf16 latents only** (scales fp32, opt state stays bf16). Wall: same as baseline. Quality: ?
+2. **bf16 latents + bf16 scales** (full bf16 trainable params). Maximally lazy.
+3. **If (1) muddled**: per-block-type dtype sweep — embed-trit / attn-trit / MLP-trit / scales / final-norm individually as fp32 vs bf16 vs fp16. Identifies which block tolerates low precision and which doesn't.
+4. **8-bit latents** (int8 with fp scale, custom): only if (1)/(2) shows quality survives precision drop — then we know there's slack to push further.
+
+Implementation: ~30-60 LOC for `--latent-dtype {fp32,bf16,fp16}` flag in `gpt_bop` + dtype cast in QLinear `__init__`. Per-block-type would be an extra ~50 LOC of per-module dispatch.
+
+Closes when: (a) bf16 latents within +0.02 nats of fp32 → adopt bf16 as new baseline before FPRM build; or (b) any precision drop costs >0.05 nats → fp32 stays, FPRM builds on fp32 latents.
+
+## P5c — Optimizer state quantization (queued after P5b)
+
+ml-research survey 2026-06-30 returned three actionable items, ranked:
+
+**P5c.1 — Lion scales bf16 momentum (FREE LUNCH, zero code)**. Use existing `--scales-dtype bfloat16`. Lion's `sign(beta·m + (1-beta)·g)` rule depends only on the EMA *sign*, not magnitude precision — so bf16 momentum is theoretically the easiest sub-fp32 step among all known optimizers. No paper needed; first-principles argument is unambiguous. Run 8L 5k as a free check vs g045 fp32-scales baseline; if within +0.02 nats, adopt.
+
+**P5c.2 — MuonQ int4 state (arxiv 2605.11396, May 2025)**. Drop-in for CMuon: replaces stored bf16 momentum with int4 via three tricks — (a) per-step gradient normalization so quantization error is direction-uniform, (b) power-iteration to separate dominant singular components and quantize *magnitudes* only, (c) mu-law companding for dense central region. Paper claims ~0 quality cost on GPT/LLaMA pretraining. NS5 runs in fp32 anyway in our CMuon (cmuon.py:141), so int4 only affects the stored buffer. Cuts CMuon state 4x further (bf16 0.5MB/100M→int4 0.13MB). Code: github.com/YupengSu/MuonQ. ~200-400 LOC integration.
+
+**P5c.3 — Theory anchor (arxiv 2510.21314)**. Validates direction: Adam needs tight mantissa-bound second-moment quantization due to β₂→1, but Muon's NS5 acts as a quantization buffer — published convergence rates hold with logarithmically-shrinking mantissa. Cite this in the MuonQ PR.
+
+**Queue order after P5b**: 5c.1 first (zero-code probe), then 5c.2 if 5c.1 confirms Lion's robustness (~2-day commit), then FPRM (P6b).
+
+**Fork audit 2026-07-01** (precision-knob triangulation): three gaps to close before trusting the bf16 verdict. Precision-lever inventory: `--autocast-dtype` (bf16, HIGH conf ✓), `--latent-dtype` (bf16, MODERATE-HIGH after user 07-01 confirm re: g052 resume), `--scales-dtype` (fp32 by g053 rejection of bf16, but fp16 untested — see below), `--cmuon-state-dtype` (bf16, HIGH conf, NS5 always upcasts to fp32 per cmuon.py:141), Lion32 momentum (fp32 hard-coded, NO flag exists).
+
+**User steer 2026-07-01 (priority)**: run **fp16-scales probe FIRST** — shortest of the three, and if it wins it directly helps wall-time via halved scale memory (potentially faster forward on fp16-fast hardware). Reordered gap queue:
+1. **fp16 scales** (g05x, ~3h, no code change — `--scales-dtype float16` already exists)
+2. **fp32-latents control** (~2.5h)
+3. **Lion32 `--lion-state-dtype` flag + bf16 momentum probe** (~30 LOC in distill.py:303/349/405 + 3h)
+4. Then MuonQ (P5c.2), then FPRM (P6b).
+
+Original gap descriptions:
+- **P5b-control**: fp32-latents 8L 5k has never been run. Default was fp16; we jumped to bf16 without triangulating against fp32. The g052 -0.098 win vs g045 may be a mid-run resume artifact (g052 got SIGINT-resumed at step 1500 with lr_snapshot re-anchor). g054 midpoint gap of only -0.017 supports that concern. Run g055 = 8L 5k fp32-latents (~2.5h) as the missing control before scaling bf16 further.
+- **P5c.1 correction**: --scales-dtype (which g053 tested) changes scale STORAGE, not Lion32 momentum. The survey's actual free-lunch is Lion32's internal momentum buffer dtype. Add --lion-state-dtype flag (~30 LOC in distill.py:303/349/405 where Lion32 currently hard-codes fp32 momentum), then re-probe. This is the actual P5c.1 that got misfired.
+- **P5b-scales-fp16**: g053 tested bf16 scales (7-bit mantissa) which lost +0.22 nats. **fp16 scales never tested** (10-bit mantissa, 5-bit exponent). Per-(row, group) scales cluster near 0.01-0.1 — modest dynamic range demand, mantissa resolution matters more. fp16 scales should sit close to fp32 while halving scale memory. Probe: 8L 5k --latent-dtype bfloat16 --scales-dtype float16, ~3h. Bar within +0.02 of g052 (4.1409) → adopt fp16 scales as the memory lever, not bf16.
+
+**Out of scope on this hardware**: FP8-LM (H100-only matmul), bnb 8-bit Adam (we don't use Adam), GaLore (conflicts with NS5), APOLLO/Shampoo (Adam-family alternatives).
+
+## P5d — LR schedule: WSD (Warmup-Stable-Decay, arxiv 2404.06395)
+
+**Motivation from g051 failure**: 30k cosine (38.5h wall) landed 3.7030 vs g048 20k cosine (8.9h wall) 3.7272 — 4.3x wall for -0.024 nats. Postmortem revealed the tail-end floor-LR fine-tune (steps 28k-30k) is where most of the win materialized; the mid-run high-LR phase (5k-25k) largely spun wheels. This is exactly the failure mode WSD is designed to fix.
+
+**Recipe**: warmup ~200 → constant peak LR until val slope < ε over 2 consecutive checkpoints → 15% cosine (or linear) anneal to floor.
+
+**Why it wins over cosine**: (a) no pre-committed step budget — val-plateau-detect decides when to anneal; (b) if plateau comes earlier than expected, save the compute; if later, keep running at productive LR instead of being stuck in the cosine tail; (c) MiniCPM/Deepseek/Hu 2024 all report WSD matches or beats cosine at equal compute with the flexibility to extend.
+
+**Implementation**: ~50-80 LOC in gpt_bop.py — add `--schedule {cosine,wsd}` flag, `--wsd-anneal-frac 0.15`, `--wsd-plateau-tol 0.005`, `--wsd-plateau-window 2`. lr_snapshot works unchanged (WSD is stateful in a different way: which phase, val-history buffer).
+
+**Queue priority**: HIGH — orthogonal to the precision-lever sweep and directly attacks our biggest weakness (guessing total-steps up front). Run once after fp16-scales / fp32-latents / Lion-momentum probes close. First WSD run: same recipe as champion (8L bf16-latents), let val-plateau decide when to anneal, target beating g054 at less wall.
+
+**Alternatives worth considering (fork survey 2026-07-01)**:
+- **Schedule-Free** (Defazio et al., arxiv 2405.15682). No schedule at all — uses a weighted iterate average with a specific momentum formula that provably matches cosine-tuned baseline. Ships in `schedulefree` package. Ideal fit for Lion on scales (drop-in replacement). Weaker composability with CMuon (Muon's orthogonalization changes momentum semantics). Try: Schedule-Free-Lion for scales while keeping CMuon+cosine or CMuon+WSD for trit latents.
+- **AdaLRS** (arxiv 2506.13274, June 2025). Multiplicative velocity-monitor overlay on cosine/WSD with rollback-on-failure. Fork deep-read verdict 2026-07-01: **skip for our regime**. Two of three published failure modes match us — "well-tuned baseline + slight loss spikes" and "aggressive α,β on short training → oscillations". Paper's k window is 1000-2500; our 5k-30k runs would need k≤200 (untested). Rollback snapshots (~313MB each) don't fit our 6GB VRAM. No released code — 2-3 day implementation risk on us. Revisit only if we scale to 60k+ runs.
+- **Prodigy** (arxiv 2306.06101) — no LR to tune, but doesn't compose with orthogonalized momentum (skip for CMuon).
+
+## PRE-CHAMPION-RUN BLOCKER — fix lr_snapshot to preserve original cosine
+
+**Cause of g054's null result**: lr_snapshot is memoryless. On resume it treats snapshot LR as a new "peak" and re-cosines from there over remaining steps to floor. Multiple SIGINTs concatenate multiple shorter cosines with lower-and-lower peaks; composite schedule spends less wall at productive mid-tail LR, more at near-floor. Correct only for "extend past original schedule end" mode; wrong for "clean mid-run continuation" mode. g054 got hit twice, plateaued at 3.77 instead of the projected 3.69.
+
+**Fix (~15 LOC)**: store `(peak_lr, original_total_steps, floor_frac, step_offset)` in interrupted.pt. Add `--resume-schedule {preserve,re-anchor}` flag; default `preserve` for pure mid-run resumes, keep `re-anchor` for the extend-past-end case. On resume with `preserve`, compute `lr_at(current_step)` from stored originals — same math a fresh run would use.
+
+**Why blocker for champion runs**: X-former + long schedules are the highest-signal experiments. Any run that gets SIGINT'd gets silently sabotaged by the current re-anchor. Champion attempts must survive resumes without schedule contamination.
+
+**Must land before g056 (X-former 8L 20k) and any future multi-hour run.**
+
+## P6a-revisit — X-former with champion recipe (fork audit 2026-07-01)
+
+**Gap**: X-former was closed prematurely at 6L fp16 baseline (g042/g043/g044). Never re-tested against the current 8L + bf16-latents + 20k champion recipe.
+
+**What g042 showed at 6L fp16 5k**: 4.1487 val, 39M params (-24% vs 6L flat 51.3M), wall 14009s. Tied on val with g052 (8L flat bf16 5k = 4.1409) at -24% params.
+
+**Compound stack never tried**: X-former ⊗ profile at 8L (e.g. [512,384,256,256,256,256,384,512]) + bf16 latents + 20k schedule. Each of the three levers landed a real win alone; product-of-wins likely lands champion. Projection: if g042 5k → g054-equivalent 20k tracking holds with -24% params and -0.10 bf16 improvement, lands ~3.55-3.65 at ~7h wall (beats g048 champion 3.7272 at less wall).
+
+**Queue priority**: HIGHEST post-g054. Ahead of P5b-scales-fp16, fp32-latents control, Lion-momentum flag — because X-former alone is a bigger swing (-24% params + wall) than any single precision knob. Confirm g054's flat-arch bf16 20k first (~5h remaining) as the comparison baseline, then g055 = X-former 8L bf16 20k as champion attempt.
+
+## lr_snapshot: preserve-vs-re-anchor fix (~15 LOC, blocker for 20k+ champion attempts)
+
+**Problem** (fork 2026-07-02): current lr_snapshot is memoryless — on resume it treats the saved LR as a fresh cosine peak over `total_steps - current_step` remaining. For a single SIGINT this loses the mid-tail LR-time; for two SIGINTs (g054) you get three concatenated shortened cosines, each with its own near-peak start + near-floor end. Composite spends more wall at extremes than a clean cosine.
+
+**Fix**: store `{peak_lr, original_total_steps, floor_frac, step_offset, warmup_steps}` in interrupted.pt. On resume, compute `lr_at(current_step)` from those originals instead of treating snapshot as new peak. Add `--resume-schedule {preserve,re-anchor}` flag; `preserve` = default for mid-run resumes, `re-anchor` = current behavior for extending past original schedule end (where new peak is correct).
+
+**Why blocker**: g054's 3.7742 result is confounded by this — can't isolate "bf16 latents don't compound at 20k" from "double-SIGINT distorted the schedule." Any future 20k+ run with SIGINT contact will have the same artifact. Cheap fix (~15 LOC) that unblocks clean champion-tier data.
+
+**Queue priority**: BEFORE any 20k+ champion attempt (X-former, WSD, or otherwise). ~30min implementation.
+
 ## Queued-after-current-sweep (user steers 2026-06-23)
 
 ### Per-row scales at bigger model size (revisit g034)

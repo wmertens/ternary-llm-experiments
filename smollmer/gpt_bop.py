@@ -542,6 +542,19 @@ def build_argparser() -> argparse.ArgumentParser:
                          "slice. Only ~8 layer-grads worth of activations; "
                          "typically not needed.")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--resume-schedule", default="preserve",
+                    choices=["preserve", "re-anchor"],
+                    help="How LR schedule is reconstructed on resume. "
+                         "'preserve' (default): use the original schedule "
+                         "params saved in interrupted.pt and step forward "
+                         "at global_step — a mid-run SIGINT/resume behaves "
+                         "identically to no interrupt. 're-anchor': treat "
+                         "the saved LR as a fresh cosine peak over "
+                         "(total_steps - global_step) remaining steps — "
+                         "use this when EXTENDING --total-steps past the "
+                         "original schedule end. Fresh runs and pre-fix "
+                         "checkpoints without schedule_original fall back "
+                         "to re-anchor automatically.")
     # Logging
     ap.add_argument("--log-every", type=int, default=25)
     ap.add_argument("--val-every", type=int, default=500)
@@ -578,6 +591,20 @@ def main() -> None:
 
     interrupted_path = args.out / "interrupted.pt"
     fresh_start = (args.resume is None and not interrupted_path.exists())
+
+    # Snapshot of the ORIGINAL cosine schedule params, saved once at fresh
+    # start (or preserved across resumes if already in interrupted.pt).
+    # Used by 'preserve' resume mode to reconstruct the exact same
+    # schedule after SIGINT/resume with no re-anchor artifact.
+    schedule_original_this_run = {
+        "lion_lr_peak": float(args.lr),
+        "muon_lr_peak": float(args.muon_lr),
+        "total_steps": int(args.total_steps),
+        "lion_warmup": int(args.warmup_steps),
+        "muon_warmup": int(args.muon_warmup_steps),
+        "lion_floor": float(args.lr_floor),
+        "muon_floor": float(args.muon_lr_floor),
+    }
 
     # ---- Model ----
     cfg = GptBopConfig(
@@ -871,6 +898,15 @@ def main() -> None:
         # saved lr_snapshot becomes the new "peak" of a fresh cosine
         # decaying over the remaining (total-step) steps.
         resumed_lr_snapshot = interrupted_state.get("lr_snapshot")
+        # schedule_original captures the ORIGINAL cosine params
+        # (peak_lr, total_steps, warmup, floor) so 'preserve' mode can
+        # reconstruct the exact same schedule and step forward — no
+        # reshape, no re-anchor artifact. Missing on pre-fix checkpoints.
+        resumed_schedule_original = interrupted_state.get("schedule_original")
+        # Preserve across future saves — never overwrite with this run's
+        # CLI args (which might extend --total-steps).
+        if resumed_schedule_original is not None:
+            schedule_original_this_run = resumed_schedule_original
         invalidate_all_q_caches(model)
         if args.device.startswith("cuda"):
             torch.cuda.empty_cache()
@@ -908,7 +944,24 @@ def main() -> None:
     muon_lr_total = args.total_steps
     muon_lr_warmup = args.muon_warmup_steps
     muon_lr_floor = args.muon_lr_floor
-    if interrupted_state is not None and resumed_lr_snapshot is not None:
+    # Preserve mode: rebuild the ORIGINAL schedule and step forward at
+    # global_step. Identical to no-interrupt.
+    if (interrupted_state is not None
+            and args.resume_schedule == "preserve"
+            and resumed_schedule_original is not None):
+        lion_lr_base = float(resumed_schedule_original["lion_lr_peak"])
+        lion_lr_total = int(resumed_schedule_original["total_steps"])
+        lion_lr_warmup = int(resumed_schedule_original["lion_warmup"])
+        lion_lr_floor = float(resumed_schedule_original["lion_floor"])
+        muon_lr_base = float(resumed_schedule_original["muon_lr_peak"])
+        muon_lr_total = int(resumed_schedule_original["total_steps"])
+        muon_lr_warmup = int(resumed_schedule_original["muon_warmup"])
+        muon_lr_floor = float(resumed_schedule_original["muon_floor"])
+        print(f"[resume-lr] PRESERVE mode: original schedule "
+              f"(Lion peak={lion_lr_base:.3e}, CMuon peak={muon_lr_base:.3e}, "
+              f"total={lion_lr_total}) continued at step {global_step}",
+              flush=True)
+    elif interrupted_state is not None and resumed_lr_snapshot is not None:
         # Re-anchor: peak = saved LR at global_step, decay to (peak ×
         # floor) over the remaining (args.total_steps - global_step)
         # steps. Setting `total = remaining` plus passing the saved
@@ -940,7 +993,15 @@ def main() -> None:
     # wrapper under a NEW name (assigning to `lr_at` inside this
     # function would shadow the module-level binding and break earlier
     # references via UnboundLocalError).
-    if interrupted_state is not None and resumed_lr_snapshot is not None:
+    # Offset is only applied in re-anchor mode (fresh cosine over remaining
+    # steps). In preserve mode the original schedule is reconstructed and
+    # global_step is used directly.
+    _using_re_anchor = (
+        interrupted_state is not None
+        and resumed_lr_snapshot is not None
+        and not (args.resume_schedule == "preserve"
+                 and resumed_schedule_original is not None))
+    if _using_re_anchor:
         _resume_step_offset = global_step
     else:
         _resume_step_offset = 0
@@ -1250,7 +1311,8 @@ def main() -> None:
                              opt_lion_trits, opt_lion, global_step,
                              best_snapshot, ctrl, run_name, samples_at_save,
                              lr_snapshot={"lion_lr": cur_lr,
-                                          "muon_lr": cur_muon_lr})
+                                          "muon_lr": cur_muon_lr},
+                             schedule_original=schedule_original_this_run)
                 tqdm.write(f"[ckpt] {interrupted_path} @ step {global_step}")
 
             if _INTERRUPT["flag"]:
@@ -1258,7 +1320,8 @@ def main() -> None:
                              opt_lion_trits, opt_lion, global_step,
                              best_snapshot, ctrl, run_name, samples_at_save,
                              lr_snapshot={"lion_lr": cur_lr,
-                                          "muon_lr": cur_muon_lr})
+                                          "muon_lr": cur_muon_lr},
+                             schedule_original=schedule_original_this_run)
                 writer.flush()
                 writer.close()
                 pbar.close()
@@ -1309,7 +1372,8 @@ def main() -> None:
                  opt_lion_trits, opt_lion, global_step,
                  best_snapshot, ctrl, run_name,
                  global_step * args.grad_accum * args.batch_size,
-                 lr_snapshot={"lion_lr": cur_lr, "muon_lr": cur_muon_lr})
+                 lr_snapshot={"lion_lr": cur_lr, "muon_lr": cur_muon_lr},
+                 schedule_original=schedule_original_this_run)
     print(f"[done] preserved {interrupted_path} (full opt state for "
           f"resume; use tools/dump_interrupted.py to extract weights)",
           flush=True)
@@ -1318,7 +1382,8 @@ def main() -> None:
 def _save_resume(path: Path, model, opt_bop, opt_cmuon, opt_lion_trits,
                  opt_lion, next_step: int, best_snapshot, ctrl,
                  run_name: str, samples_consumed: int,
-                 lr_snapshot: dict | None = None) -> None:
+                 lr_snapshot: dict | None = None,
+                 schedule_original: dict | None = None) -> None:
     """hrm_bop-flavored resume save: trit-opt (Bop or CMuon or Lion-STE,
     whichever is live) + FP Lion. interrupted.pt is the only on-disk file;
     atomic .tmp rename.
@@ -1346,6 +1411,8 @@ def _save_resume(path: Path, model, opt_bop, opt_cmuon, opt_lion_trits,
         payload["opt_lion_trits"] = opt_lion_trits.state_dict()
     if lr_snapshot is not None:
         payload["lr_snapshot"] = lr_snapshot
+    if schedule_original is not None:
+        payload["schedule_original"] = schedule_original
     tmp = path.with_suffix(path.suffix + ".tmp")
     torch.save(payload, str(tmp))
     tmp.replace(path)
