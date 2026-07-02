@@ -25,9 +25,9 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="054"
-RUN_TAG="8layer-bf16-latents-20k"
-DESCRIPTION="CHAMPION ATTEMPT: 8L 20k flat with bf16 latents (fp32 scales). g052 confirmed bf16-latents-only wins -0.098 nats at 5k vs g045 fp16. If the gain compounds at 20k: 3.7272 - 0.10 ≈ 3.63 (would beat g048). g053 already proved bf16 scales hurt — keep fp32 scales. Recipe = g048's exact recipe + --latent-dtype bfloat16. ~9h ETA."
+RUN_N="055"
+RUN_TAG="xformer-8layer-bf16-20k"
+DESCRIPTION="P6a-revisit: X-former ⊗ [512,384,256,256,256,256,384,512] at 8L 20k with bf16 latents. X-former was closed prematurely at 6L fp16; never tested with champion recipe. g042 6L X-former 5k = 4.15 tied g052 8L flat bf16 5k = 4.14 at -24% params. Compound stack (X-former + 8L + bf16 + 20k) untested; projection lands ~3.55-3.65 if per-wall wins compose. Beats g048 (3.7272) at less wall = new champion. All widths satisfy head_dim=64 + scale_group=128 divisibility. ~7-10h ETA at reduced avg width."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
@@ -48,7 +48,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --latent-dtype bfloat16}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --latent-dtype bfloat16 --layer-widths 512 384 256 256 256 256 384 512}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 
