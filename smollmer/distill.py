@@ -789,16 +789,31 @@ def kl_with_rest(student_logits: torch.Tensor,
 
 
 def lr_at(step: int, total: int, base_lr: float, warmup: int,
-          floor: float = 0.1) -> float:
-    """Linear warmup → cosine decay to `floor × base_lr`. floor=0.1 is the
-    classic Bonsai recipe; bump it up (e.g. 0.5) when the late-stage flip-rate
-    cliff is locking the codebook into a suboptimal configuration. floor=1.0
-    disables the cosine entirely (flat LR after warmup)."""
+          floor: float = 0.1, schedule: str = "cosine",
+          wsd_anneal_frac: float = 0.15) -> float:
+    """Linear warmup → decay to `floor × base_lr`.
+
+    schedule='cosine' (default): classic warmup + cosine decay. floor=0.1
+    is the Bonsai recipe; floor=1.0 disables decay.
+
+    schedule='wsd' (Warmup-Stable-Decay, arxiv 2404.06395): warmup →
+    constant peak_LR for (1 - wsd_anneal_frac) of total → linear decay
+    to floor over the last wsd_anneal_frac. Directly targets the
+    'long-cosine wastes mid-run LR' failure mode. Default anneal frac
+    matches MiniCPM/DeepSeek published 10-20% guidance.
+    """
     if warmup and step < warmup:
         return base_lr * (step + 1) / max(1, warmup)
     import math
     progress = (step - warmup) / max(1, total - warmup)
     progress = max(0.0, min(1.0, progress))
+    if schedule == "wsd":
+        stable_frac = 1.0 - wsd_anneal_frac
+        if progress <= stable_frac:
+            return base_lr
+        # Linear decay peak → floor*peak over the anneal tail.
+        anneal_progress = (progress - stable_frac) / max(1e-9, wsd_anneal_frac)
+        return base_lr * (1.0 - anneal_progress * (1.0 - floor))
     return base_lr * (floor + (1.0 - floor) * 0.5 * (1.0 + math.cos(math.pi * progress)))
 
 

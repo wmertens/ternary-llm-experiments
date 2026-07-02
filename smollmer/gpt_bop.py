@@ -542,6 +542,18 @@ def build_argparser() -> argparse.ArgumentParser:
                          "slice. Only ~8 layer-grads worth of activations; "
                          "typically not needed.")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--schedule", default="cosine",
+                    choices=["cosine", "wsd"],
+                    help="LR schedule shape. 'cosine' (default): warmup + "
+                         "cosine decay to floor. 'wsd' (Warmup-Stable-Decay, "
+                         "arxiv 2404.06395): warmup + constant peak for "
+                         "(1-anneal_frac) then linear decay to floor. WSD "
+                         "avoids the 'long-cosine wastes mid-run LR' failure "
+                         "we saw in g051. Both Lion and CMuon use the same "
+                         "schedule shape.")
+    ap.add_argument("--wsd-anneal-frac", type=float, default=0.15,
+                    help="Fraction of total steps spent in WSD anneal tail. "
+                         "MiniCPM/DeepSeek report 10-20%%; default 0.15.")
     ap.add_argument("--resume-schedule", default="preserve",
                     choices=["preserve", "re-anchor"],
                     help="How LR schedule is reconstructed on resume. "
@@ -604,6 +616,8 @@ def main() -> None:
         "muon_warmup": int(args.muon_warmup_steps),
         "lion_floor": float(args.lr_floor),
         "muon_floor": float(args.muon_lr_floor),
+        "schedule": str(args.schedule),
+        "wsd_anneal_frac": float(args.wsd_anneal_frac),
     }
 
     # ---- Model ----
@@ -957,7 +971,12 @@ def main() -> None:
         muon_lr_total = int(resumed_schedule_original["total_steps"])
         muon_lr_warmup = int(resumed_schedule_original["muon_warmup"])
         muon_lr_floor = float(resumed_schedule_original["muon_floor"])
-        print(f"[resume-lr] PRESERVE mode: original schedule "
+        # Restore schedule shape (missing on pre-WSD-fix checkpoints).
+        orig_sched = resumed_schedule_original.get("schedule", "cosine")
+        orig_wsd_frac = resumed_schedule_original.get("wsd_anneal_frac", 0.15)
+        args.schedule = orig_sched
+        args.wsd_anneal_frac = float(orig_wsd_frac)
+        print(f"[resume-lr] PRESERVE mode: original {orig_sched} schedule "
               f"(Lion peak={lion_lr_base:.3e}, CMuon peak={muon_lr_base:.3e}, "
               f"total={lion_lr_total}) continued at step {global_step}",
               flush=True)
@@ -1009,7 +1028,9 @@ def main() -> None:
     def lr_at_local(step: int, total: int, base_lr: float, warmup: int,
                     floor: float = 0.1) -> float:
         return _lr_at_module(step - _resume_step_offset, total, base_lr,
-                             warmup, floor=floor)
+                             warmup, floor=floor,
+                             schedule=args.schedule,
+                             wsd_anneal_frac=args.wsd_anneal_frac)
 
     train_loader = make_train_loader(
         tok, seq_len=args.max_position_embeddings,

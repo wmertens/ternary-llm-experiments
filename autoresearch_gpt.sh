@@ -25,15 +25,15 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="055"
-RUN_TAG="xformer-8layer-bf16-20k"
-DESCRIPTION="P6a-revisit: X-former ⊗ [512,384,256,256,256,256,384,512] at 8L 20k with bf16 latents. X-former was closed prematurely at 6L fp16; never tested with champion recipe. g042 6L X-former 5k = 4.15 tied g052 8L flat bf16 5k = 4.14 at -24% params. Compound stack (X-former + 8L + bf16 + 20k) untested; projection lands ~3.55-3.65 if per-wall wins compose. Beats g048 (3.7272) at less wall = new champion. All widths satisfy head_dim=64 + scale_group=128 divisibility. ~7-10h ETA at reduced avg width."
+RUN_N="056"
+RUN_TAG="8layer-wsd-5k"
+DESCRIPTION="P5d.1 WSD schedule probe: 8L flat bf16-latents fp16-scales at 5k with WSD (Warmup-Stable-Decay, arxiv 2404.06395). Warmup 200 → constant peak 4250 steps → linear anneal 750 steps to floor. Bar vs g052 clean-equivalent (~4.17, accounting for its resume boost): ≤4.15 → WSD wins → promote to 20k champion attempt; 4.15-4.20 neutral, try 20k anyway; >4.20 tune anneal_frac. Also verifies lr_snapshot preserve fix in flight."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
 
 # Defaults: fast-A scale (38M ternary). Override per experiment as needed.
-TOTAL_STEPS="${TOTAL_STEPS:-20000}"
+TOTAL_STEPS="${TOTAL_STEPS:-5000}"
 BATCH_SIZE="${BATCH_SIZE:-4}"
 GRAD_ACCUM="${GRAD_ACCUM:-16}"
 HIDDEN_SIZE="${HIDDEN_SIZE:-512}"
@@ -48,7 +48,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --latent-dtype bfloat16 --layer-widths 512,384,256,256,256,256,384,512}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --latent-dtype bfloat16 --scales-dtype float16 --schedule wsd --wsd-anneal-frac 0.15}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 
