@@ -1163,8 +1163,13 @@ def main() -> None:
 
             # --- LR schedule on Lion ---
             if args.lion_schedule_free:
-                # SF handles its own averaging; hold Lion at peak.
-                cur_lr = args.lr
+                # SF handles the anneal; keep the warmup ramp so
+                # 0.4M scales don't overshoot in the first ~200 steps
+                # before the rest of the network stabilizes.
+                if lion_lr_warmup and global_step < lion_lr_warmup:
+                    cur_lr = args.lr * (global_step + 1) / max(1, lion_lr_warmup)
+                else:
+                    cur_lr = args.lr
             else:
                 cur_lr = lr_at_local(global_step, lion_lr_total, lion_lr_base,
                                      lion_lr_warmup, floor=lion_lr_floor)

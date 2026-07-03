@@ -25,9 +25,9 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="057"
-RUN_TAG="8layer-wsd-sf-lion-5k"
-DESCRIPTION="P5d.2 Schedule-Free Lion probe (arxiv 2405.15682): 8L flat bf16-latents fp16-scales at 5k, CMuon keeps WSD, Lion is SF-wrapped (no schedule, weighted-iterate averaging). Bar vs g056 WSD-both (4.0867): within +0.02 → SF Lion holds; better → win; worse than +0.05 → SF Lion doesn't compose well. Only 0.4M scale params under SF, so effect should be small; a hold verdict opens the door for SF CMuon (bigger stake, needs the same probe)."
+RUN_N="058"
+RUN_TAG="8layer-wsd-sf-lion-warmups-5k"
+DESCRIPTION="P5d.2 retry: SF-Lion + explicit Lion warmup (200 steps, ramping the LR SF sees) + CMuon warmup 200 (new — was 0 in all prior runs). User steer 2026-07-03 identified the +0.15 nat gap in g057 at step 1500 was from SF-Lion running at peak from step 0 (no warmup path). Also questioned why CMuon has zero warmup — legacy HRM inheritance. Fixing both. Bar vs g056 (4.0867): confounded by 2 changes (SF + CMuon warmup). Adopt if ≤4.09; disentangle in g059 if surprising."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
@@ -48,7 +48,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --latent-dtype bfloat16 --scales-dtype float16 --schedule wsd --wsd-anneal-frac 0.15 --lion-schedule-free}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --latent-dtype bfloat16 --scales-dtype float16 --schedule wsd --wsd-anneal-frac 0.15 --lion-schedule-free --muon-warmup-steps 200}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 
