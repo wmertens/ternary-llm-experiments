@@ -194,6 +194,8 @@ Original gap descriptions:
 
 **Out of scope on this hardware**: FP8-LM (H100-only matmul), bnb 8-bit Adam (we don't use Adam), GaLore (conflicts with NS5), APOLLO/Shampoo (Adam-family alternatives).
 
+**KNOWN GAP — SF-Lion resume untested**: ScheduleFreeWrapper stores averaging state (the `z` buffer in self.state, plus `k`/`weight_sum`/`lr_max` in param_groups, plus train/eval-mode which determines whether model params are the y-iterate or x-average). `_save_resume` calls `opt_lion.state_dict()` = `base.state_dict()`, which captures state+param_groups but NOT `train_mode`, and the saved MODEL params depend on which mode was active at save time. Until verified round-trip-correct, SF-Lion runs must complete WITHOUT SIGINT/resume (restart fresh on interruption). g058 was restarted fresh after a system crash for exactly this reason. Fix if SF-Lion proves worthwhile: save/restore train_mode + ensure eval() (x-iterate) before checkpoint so saved params are deployment-ready and resumable. ~20 LOC.
+
 ## P5d — LR schedule: WSD (Warmup-Stable-Decay, arxiv 2404.06395)
 
 **Motivation from g051 failure**: 30k cosine (38.5h wall) landed 3.7030 vs g048 20k cosine (8.9h wall) 3.7272 — 4.3x wall for -0.024 nats. Postmortem revealed the tail-end floor-LR fine-tune (steps 28k-30k) is where most of the win materialized; the mid-run high-LR phase (5k-25k) largely spun wheels. This is exactly the failure mode WSD is designed to fix.
