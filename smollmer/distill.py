@@ -299,7 +299,11 @@ class Lion32(torch.optim.Optimizer):
                     continue
                 grad = p.grad
                 state = self.state[p]
-                if not state:
+                # Key-scoped init so we compose with wrappers that share
+                # self.state (e.g. schedulefree.ScheduleFreeWrapper writes
+                # state['z']). A plain `if not state` fails when the wrapper
+                # has already populated other keys.
+                if "exp_avg" not in state:
                     state["exp_avg"] = torch.zeros_like(p, dtype=torch.float32)
                 m = state["exp_avg"]
                 if wd != 0:
