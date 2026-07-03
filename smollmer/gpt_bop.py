@@ -542,6 +542,17 @@ def build_argparser() -> argparse.ArgumentParser:
                          "slice. Only ~8 layer-grads worth of activations; "
                          "typically not needed.")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--lion-schedule-free", action="store_true",
+                    default=False,
+                    help="Wrap Lion (FP scale + FP block optimizer) in "
+                         "ScheduleFreeWrapper (arxiv 2405.15682). SF "
+                         "removes the LR schedule entirely — provably "
+                         "matches cosine-tuned baseline via weighted "
+                         "iterate averaging. Best-fit for Lion because "
+                         "its sign-momentum EMA composes cleanly with "
+                         "SF's outer averaging. Lion's LR schedule "
+                         "(cosine/WSD) is IGNORED when this flag is on; "
+                         "CMuon keeps its own schedule.")
     ap.add_argument("--schedule", default="cosine",
                     choices=["cosine", "wsd"],
                     help="LR schedule shape. 'cosine' (default): warmup + "
@@ -842,6 +853,17 @@ def main() -> None:
     if lion_groups:
         opt_lion = Lion32(lion_groups, lr=args.lr, betas=tuple(args.lion_betas),
                           weight_decay=args.lion_wd)
+        if args.lion_schedule_free:
+            from schedulefree import ScheduleFreeWrapper
+            # Use Lion's beta1 as SF's outer momentum. SF handles the
+            # schedule; the outer LR-mutation loop (below) sets a constant
+            # peak LR that stays flat for the whole run.
+            opt_lion = ScheduleFreeWrapper(
+                opt_lion, momentum=float(args.lion_betas[0]))
+            print(f"[opt] Lion wrapped in ScheduleFreeWrapper "
+                  f"(momentum={args.lion_betas[0]:g}) — Lion LR schedule "
+                  f"is inert while SF is active",
+                  flush=True)
     else:
         # Pure-Bop: every FP-class param frozen (e.g. --freeze-scales
         # --freeze-non-embed-fp + --trit-embeddings leaves nothing). The
@@ -1108,6 +1130,9 @@ def main() -> None:
         opt_lion_trits.zero_grad(set_to_none=True)
     if opt_lion is not None:
         opt_lion.zero_grad(set_to_none=True)
+        if args.lion_schedule_free:
+            # Enter train phase (y-iterate) before first optimizer step.
+            opt_lion.train()
     # For STE mode: snapshot quantized codes once at fresh start so the
     # first window's code_flip_count has a baseline.
     prev_codes: dict[int, torch.Tensor] = {}
@@ -1137,8 +1162,12 @@ def main() -> None:
                 tokens_window += ids.numel()
 
             # --- LR schedule on Lion ---
-            cur_lr = lr_at_local(global_step, lion_lr_total, lion_lr_base,
-                                 lion_lr_warmup, floor=lion_lr_floor)
+            if args.lion_schedule_free:
+                # SF handles its own averaging; hold Lion at peak.
+                cur_lr = args.lr
+            else:
+                cur_lr = lr_at_local(global_step, lion_lr_total, lion_lr_base,
+                                     lion_lr_warmup, floor=lion_lr_floor)
             if opt_lion is not None:
                 for g in opt_lion.param_groups:
                     g["lr"] = cur_lr
@@ -1319,8 +1348,13 @@ def main() -> None:
 
             # --- Validation ---
             if args.val_every and global_step % args.val_every == 0:
+                if args.lion_schedule_free and opt_lion is not None:
+                    # Switch to averaged x-iterate for evaluation.
+                    opt_lion.eval()
                 val_loss = evaluate(model, val_batches, args.device,
                                     autocast_dtype)
+                if args.lion_schedule_free and opt_lion is not None:
+                    opt_lion.train()
                 writer.add_scalar("val/loss", val_loss, global_step)
                 tqdm.write(f"[val] step {global_step} loss={val_loss:.4f}")
 
