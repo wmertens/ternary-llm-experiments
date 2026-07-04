@@ -25,15 +25,15 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="059"
-RUN_TAG="8layer-wsd-cmuon-warmup-5k"
-DESCRIPTION="Disambiguate g058 divergence: CMuon warmup 200 ALONE on the proven g056 WSD recipe (NO SF-Lion — plain cosine-schedule Lion with its normal 200 warmup). g058 (SF-Lion + CMuon-warmup) diverged after step 2000. This isolates whether CMuon warmup is the destabilizer. Bar vs g056 (4.0867): ≤4.11 → CMuon warmup is fine, g058 divergence was SF-Lion-interaction; diverges → CMuon warmup itself is poison (revert to warmup 0)."
+RUN_N="060"
+RUN_TAG="8layer-wsd-20k-champion"
+DESCRIPTION="CHAMPION ATTEMPT: 8L 20k WSD with locked recipe (bf16-latents + fp16-scales + WSD anneal 0.15, no SF-Lion, no CMuon warmup). g056 5k WSD (4.0867) beat g052 cosine 5k (4.14) by -0.05. If WSD's late-anneal advantage holds at 20k: g048 cosine champion 3.7272 - 0.05 ≈ 3.68. First 20k run with preserve-mode lr_snapshot, so SIGINT/resume won't distort the schedule (fixes the g054 contamination). ~9h ETA."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
 
 # Defaults: fast-A scale (38M ternary). Override per experiment as needed.
-TOTAL_STEPS="${TOTAL_STEPS:-5000}"
+TOTAL_STEPS="${TOTAL_STEPS:-20000}"
 BATCH_SIZE="${BATCH_SIZE:-4}"
 GRAD_ACCUM="${GRAD_ACCUM:-16}"
 HIDDEN_SIZE="${HIDDEN_SIZE:-512}"
@@ -48,7 +48,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --latent-dtype bfloat16 --scales-dtype float16 --schedule wsd --wsd-anneal-frac 0.15 --muon-warmup-steps 200}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --latent-dtype bfloat16 --scales-dtype float16 --schedule wsd --wsd-anneal-frac 0.15}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 
