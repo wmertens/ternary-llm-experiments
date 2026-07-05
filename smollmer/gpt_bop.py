@@ -1395,7 +1395,10 @@ def main() -> None:
             samples_at_save = global_step * args.grad_accum * args.batch_size
             _save_resume(interrupted_path, model, opt_bop, opt_cmuon,
                          opt_lion_trits, opt_lion, global_step,
-                         best_snapshot, ctrl, run_name, samples_at_save)
+                         best_snapshot, ctrl, run_name, samples_at_save,
+                         lr_snapshot={"lion_lr": cur_lr,
+                                      "muon_lr": cur_muon_lr},
+                         schedule_original=schedule_original_this_run)
             print(f"[!] emergency save → {interrupted_path} "
                   f"(reason: {type(e).__name__})", flush=True)
         except Exception as save_err:
