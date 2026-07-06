@@ -142,12 +142,18 @@ class MixedStream(IterableDataset):
     def __init__(self, components: list[MixComponent], tokenizer,
                  seq_len: int, seed: int = 0,
                  start_skip: int = 0,
-                 eos_token_id: int | None = None) -> None:
+                 eos_token_id: int | None = None,
+                 shuffle_buffer: int = 1000) -> None:
         self.components = components
         self.tokenizer = tokenizer
         self.seq_len = int(seq_len)
         self.seed = int(seed)
         self.start_skip = int(start_skip)
+        # Shard-order shuffle: different `seed` → different shard order, so a
+        # resume that bumps the seed reads FRESH data at start_skip=0 instead
+        # of replaying (and re-streaming) the consumed prefix. Small buffer =
+        # a few MB; the win is the shard permutation, not the local shuffle.
+        self.shuffle_buffer = int(shuffle_buffer)
         if eos_token_id is None:
             eos_token_id = (tokenizer.eos_token_id
                             if tokenizer.eos_token_id is not None
@@ -168,6 +174,12 @@ class MixedStream(IterableDataset):
                           split=comp.split, streaming=True)
         if nworkers > 1:
             ds = ds.shard(num_shards=nworkers, index=wid, contiguous=True)
+        if self.shuffle_buffer > 0:
+            # Shuffle shard order (+ a small local buffer) so the seed picks
+            # WHICH shards stream first. Cheap, and makes start_skip=0 resume
+            # read different data rather than re-reading shard 0.
+            ds = ds.shuffle(seed=self.seed + wid * 7919,
+                            buffer_size=self.shuffle_buffer)
         fmt = comp.formatter
         # Wrap to a flat text iterator.
         for ex in ds:
@@ -218,12 +230,14 @@ class MixedStream(IterableDataset):
 def make_train_loader(tokenizer, seq_len: int, batch_size: int,
                       seed: int, num_workers: int,
                       start_skip: int = 0,
-                      components: list[MixComponent] | None = None):
+                      components: list[MixComponent] | None = None,
+                      shuffle_buffer: int = 1000):
     """Returns a DataLoader yielding {"input_ids": LongTensor[B, seq_len]}."""
     from torch.utils.data import DataLoader
     comps = components if components is not None else DEFAULT_MIX
     ds = MixedStream(comps, tokenizer=tokenizer, seq_len=seq_len,
-                     seed=seed, start_skip=start_skip)
+                     seed=seed, start_skip=start_skip,
+                     shuffle_buffer=shuffle_buffer)
 
     def _worker_init(_wid: int) -> None:
         import signal as _sig

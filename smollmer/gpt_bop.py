@@ -1054,10 +1054,25 @@ def main() -> None:
                              schedule=args.schedule,
                              wsd_anneal_frac=args.wsd_anneal_frac)
 
+    # On resume: don't replay the consumed prefix (start_skip=samples_consumed
+    # would re-stream ~samples_consumed docs — a multi-GB memory spike + a
+    # multi-minute stall, and worthless for streaming pretraining far from an
+    # epoch). Instead read FRESH data by bumping the seed so the shard-order
+    # shuffle serves different shards. Quality-neutral (still the same mix,
+    # just later data), and safe across repeated resumes.
+    if interrupted_state is not None and samples_consumed > 0:
+        data_seed = args.seed + global_step
+        data_start_skip = 0
+        print(f"[data] resume: fresh-stream (seed={data_seed}, no "
+              f"fast-forward of {samples_consumed} consumed samples)",
+              flush=True)
+    else:
+        data_seed = args.seed
+        data_start_skip = samples_consumed
     train_loader = make_train_loader(
         tok, seq_len=args.max_position_embeddings,
-        batch_size=args.batch_size, seed=args.seed,
-        num_workers=args.num_workers, start_skip=samples_consumed,
+        batch_size=args.batch_size, seed=data_seed,
+        num_workers=args.num_workers, start_skip=data_start_skip,
         components=train_components)
     print(f"[data] train mix at seq={args.max_position_embeddings} "
           f"bs={args.batch_size} workers={args.num_workers}: {mix_desc}",
