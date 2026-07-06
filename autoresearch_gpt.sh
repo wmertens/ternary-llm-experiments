@@ -25,9 +25,9 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="060"
-RUN_TAG="8layer-wsd-20k-champion"
-DESCRIPTION="CHAMPION ATTEMPT: 8L 20k WSD with locked recipe (bf16-latents + fp16-scales + WSD anneal 0.15, no SF-Lion, no CMuon warmup). g056 5k WSD (4.0867) beat g052 cosine 5k (4.14) by -0.05. If WSD's late-anneal advantage holds at 20k: g048 cosine champion 3.7272 - 0.05 ≈ 3.68. First 20k run with preserve-mode lr_snapshot, so SIGINT/resume won't distort the schedule (fixes the g054 contamination). ~9h ETA."
+RUN_N="061"
+RUN_TAG="xformer-8layer-cosine-20k"
+DESCRIPTION="CHAMPION ATTEMPT: X-former ⊗ [512,384,256,256,256,256,384,512] 8L 20k COSINE (WSD lost at 20k per g060, so back to cosine) + adopted precision wins (bf16-latents + fp16-scales). 41.7M params (-19pct vs flat 51.3M). Fork audit flagged X-former never tested with champion recipe — biggest single lever (params+wall). g042 6L X-former 5k tied flat at -24pct params. If per-wall wins compose: beats g048 (3.7272) at less wall = new champion. Widths pass head_dim=64 + scale_group=128 divisibility. ~8h ETA (reduced avg width)."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
@@ -48,7 +48,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --latent-dtype bfloat16 --scales-dtype float16 --schedule wsd --wsd-anneal-frac 0.15}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --latent-dtype bfloat16 --scales-dtype float16 --layer-widths 512,384,256,256,256,256,384,512}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 
