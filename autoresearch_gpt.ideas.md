@@ -217,6 +217,24 @@ Original gap descriptions:
 - **AdaLRS** (arxiv 2506.13274, June 2025). Multiplicative velocity-monitor overlay on cosine/WSD with rollback-on-failure. Fork deep-read verdict 2026-07-01: **skip for our regime**. Two of three published failure modes match us — "well-tuned baseline + slight loss spikes" and "aggressive α,β on short training → oscillations". Paper's k window is 1000-2500; our 5k-30k runs would need k≤200 (untested). Rollback snapshots (~313MB each) don't fit our 6GB VRAM. No released code — 2-3 day implementation risk on us. Revisit only if we scale to 60k+ runs.
 - **Prodigy** (arxiv 2306.06101) — no LR to tune, but doesn't compose with orthogonalized momentum (skip for CMuon).
 
+## P5e — Plateau-triggered LR warm-restart with rollback (user steer 2026-07-06) — NEXT SCHEDULE EXPERIMENT
+
+**Idea (user)**: fixed WSD flat/anneal is too simple. We have EXACT full-state resume (model + all optimizer state in interrupted.pt) and preserve-mode schedule handling. Exploit it: detect a long-term val plateau → snapshot → re-anchor the LR to a *slightly spicier* (higher) point and restart a cosine from there → observe. If val rises over a decent window, REVERT to the snapshot (exact rollback) and either anneal or lower the restart peak. If val improves, keep the escape and continue.
+
+**Why it beats WSD/cosine**: cosine and fixed-WSD are open-loop — they commit a schedule up front and can't react to a plateau. g060's failure was exactly this: 6000 steps stuck at ~4.16 because peak LR had extracted all it could and the fixed schedule wouldn't anneal yet. A warm restart re-injects LR to knock the model out of the basin; the val-gated rollback makes it *safe* (worst case = revert to the plateau snapshot, cost = the observation window). This is SGDR warm-restarts (Loshchilov & Hutter 2017, arxiv 1608.03983) BUT plateau-triggered and accept/reject-gated on validation — the gating is what SGDR lacks and what makes it safe on a tuned recipe.
+
+**Mechanism**:
+1. **Plateau detect**: track val loss over a sliding window of W checkpoints; if best-in-window improvement < ε (e.g. slope flatter than 0.005 nats over 4 vals), declare plateau.
+2. **Snapshot**: save best-so-far full state as `restart_anchor.pt` (we already write interrupted.pt with full opt state — reuse that machinery; keep a separate best-anchor copy).
+3. **Rewarm**: re-anchor LR to `spice × current_LR` (start modest, e.g. spice=2-3×, NOT back to full peak — "slightly spicier"), begin a fresh short cosine over the observation window.
+4. **Observe** N steps (e.g. 1000-2000).
+5. **Accept/reject**: if best val in the observation window < snapshot val by margin → ACCEPT (plateau escaped), continue from the improved state, update anchor. Else → REVERT to `restart_anchor.pt` (exact model+opt rollback), and either (a) retry with lower spice, or (b) if retries exhausted, trigger the final anneal to floor.
+6. **Caps**: max K restart attempts; each accepted restart resets the counter; each rejected one decrements spice.
+
+**Implementation** (~120-180 LOC): plateau detector on the val history (already have val loop), a best-anchor save/load (reuse _save_resume + a copy), LR re-anchor (reuse the existing re-anchor path — this is what re-anchor mode was BUILT for), rollback = load the anchor mid-run. Add flags: `--restart-on-plateau`, `--restart-spice 2.5`, `--restart-observe-steps 1500`, `--restart-plateau-tol 0.005`, `--restart-plateau-window 4`, `--restart-max-attempts 3`, `--restart-accept-margin 0.01`. Rollback fits our 6GB (one extra 312MB anchor on disk, not VRAM — unlike AdaLRS which needed in-VRAM snapshots).
+
+**Queue priority**: HIGHEST schedule experiment — supersedes the two deferred WSD fixes above. Run after g061 (X-former champion) resolves. First test: 8L 20k with restart-on-plateau, compare vs g048 cosine 3.7272 — the plateau that killed g060 is the exact case this should convert into a win. Note: this composes with cosine base schedule (not WSD); the base is cosine, the restarts are the adaptation layer.
+
 ## PRE-CHAMPION-RUN BLOCKER — fix lr_snapshot to preserve original cosine
 
 **Cause of g054's null result**: lr_snapshot is memoryless. On resume it treats snapshot LR as a new "peak" and re-cosines from there over remaining steps to floor. Multiple SIGINTs concatenate multiple shorter cosines with lower-and-lower peaks; composite schedule spends less wall at productive mid-tail LR, more at near-floor. Correct only for "extend past original schedule end" mode; wrong for "clean mid-run continuation" mode. g054 got hit twice, plateaued at 3.77 instead of the projected 3.69.
