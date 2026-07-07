@@ -255,6 +255,8 @@ Original gap descriptions:
 
 **Queue priority**: HIGHEST post-g054. Ahead of P5b-scales-fp16, fp32-latents control, Lion-momentum flag — because X-former alone is a bigger swing (-24% params + wall) than any single precision knob. Confirm g054's flat-arch bf16 20k first (~5h remaining) as the comparison baseline, then g055 = X-former 8L bf16 20k as champion attempt.
 
+**CLOSED 2026-07-07 (g061)**: X-former ⊗[512,384,256,256,256,256,384,512] 8L 20k cosine, bf16-latents+fp16-scales, 41.7M params. val 3.9033 vs g048 flat 3.7272 = +0.176. Capacity-limited: tracked +0.06 behind flat to step 15k, then PLATEAUED at ~3.90 while flat descended to 3.7272. The 256-wide middle (4/8 layers at half-width) saturates at convergence. +24% throughput / -19% params can't offset +0.176 nats. g042's 5k tie was a mirage (neither converged at 5k). Both aggressive (g061) and gentle (g044) ⊗ profiles lose at convergence. X-former CLOSED for champion. Would only revisit at much larger scale where the residual-stream-vs-compute tradeoff differs.
+
 ## lr_snapshot: preserve-vs-re-anchor fix (~15 LOC, blocker for 20k+ champion attempts)
 
 **Problem** (fork 2026-07-02): current lr_snapshot is memoryless — on resume it treats the saved LR as a fresh cosine peak over `total_steps - current_step` remaining. For a single SIGINT this loses the mid-tail LR-time; for two SIGINTs (g054) you get three concatenated shortened cosines, each with its own near-peak start + near-floor end. Composite spends more wall at extremes than a clean cosine.
