@@ -25,15 +25,15 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="061"
-RUN_TAG="xformer-8layer-cosine-20k"
-DESCRIPTION="CHAMPION ATTEMPT: X-former ⊗ [512,384,256,256,256,256,384,512] 8L 20k COSINE (WSD lost at 20k per g060, so back to cosine) + adopted precision wins (bf16-latents + fp16-scales). 41.7M params (-19pct vs flat 51.3M). Fork audit flagged X-former never tested with champion recipe — biggest single lever (params+wall). g042 6L X-former 5k tied flat at -24pct params. If per-wall wins compose: beats g048 (3.7272) at less wall = new champion. Widths pass head_dim=64 + scale_group=128 divisibility. ~8h ETA (reduced avg width)."
+RUN_N="062"
+RUN_TAG="8layer-cosine-30k-plateau-restart"
+DESCRIPTION="P5e CHAMPION ATTEMPT: 8L 30k cosine + plateau-restart (bf16-latents + fp16-scales). Compare vs g051 (30k plain cosine) 3.7030 and g048 (20k) 3.7272. P5e detects val plateaus, snapshots, rewarms LR (spice 2.5) to escape, rolls back if the rewarm doesn't beat the anchor. 30k is where plain cosine plateaus (g051 spent steps 5k-25k slowly), so P5e has real plateaus to escape. If the escapes extract more from the 30k budget → beats 3.7030 = new champion + validates the user's adaptive-schedule idea. Uses the now-fixed cheap fresh-resume + emergency-save preserve. ~15h ETA."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
 
 # Defaults: fast-A scale (38M ternary). Override per experiment as needed.
-TOTAL_STEPS="${TOTAL_STEPS:-20000}"
+TOTAL_STEPS="${TOTAL_STEPS:-30000}"
 BATCH_SIZE="${BATCH_SIZE:-4}"
 GRAD_ACCUM="${GRAD_ACCUM:-16}"
 HIDDEN_SIZE="${HIDDEN_SIZE:-512}"
@@ -48,7 +48,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --latent-dtype bfloat16 --scales-dtype float16 --layer-widths 512,384,256,256,256,256,384,512}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --latent-dtype bfloat16 --scales-dtype float16 --restart-on-plateau --restart-spice 2.5 --restart-observe-steps 1500 --restart-plateau-tol 0.008 --restart-plateau-window 4 --restart-max-attempts 3}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 
