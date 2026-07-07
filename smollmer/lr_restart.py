@@ -39,7 +39,9 @@ ROLLBACK = "rollback"    # rewarm failed; reload the anchor and resume annealing
 @dataclass
 class Action:
     kind: str
-    new_peak: float | None = None      # for REWARM: the spicier LR to re-anchor to
+    new_peak: float | None = None      # for REWARM: spicier LR (= spice×cur_lr)
+    spice: float | None = None         # for REWARM: the multiplier itself (apply
+                                       # to every optimizer's current LR)
     observe_until: int | None = None   # for REWARM: step at which to judge
     reason: str = ""
 
@@ -87,7 +89,7 @@ class RestartController:
                 self.best_observed = None
                 self.state = "OBSERVING"
                 self.attempts_used += 1
-                return Action(REWARM, new_peak=new_peak,
+                return Action(REWARM, new_peak=new_peak, spice=self.cur_spice,
                               observe_until=self.observe_until,
                               reason=f"plateau@{step} anchor={self.anchor_val:.4f} "
                                      f"spice={self.cur_spice:.2f}→lr={new_peak:.3e}")

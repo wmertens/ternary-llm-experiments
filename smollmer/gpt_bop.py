@@ -553,6 +553,26 @@ def build_argparser() -> argparse.ArgumentParser:
                          "SF's outer averaging. Lion's LR schedule "
                          "(cosine/WSD) is IGNORED when this flag is on; "
                          "CMuon keeps its own schedule.")
+    ap.add_argument("--restart-on-plateau", action="store_true", default=False,
+                    help="P5e: detect a val plateau, snapshot, rewarm the LR "
+                         "to escape it, and roll back (exact model+opt state) "
+                         "if the rewarm doesn't beat the snapshot. Overlays "
+                         "the base --schedule; only active during OBSERVING "
+                         "windows. See smollmer/lr_restart.py.")
+    ap.add_argument("--restart-spice", type=float, default=2.5,
+                    help="Rewarm LR = spice × current LR (first attempt; "
+                         "cooled after a rejected attempt).")
+    ap.add_argument("--restart-observe-steps", type=int, default=1500,
+                    help="Steps to judge a rewarm before accept/reject.")
+    ap.add_argument("--restart-plateau-tol", type=float, default=0.005,
+                    help="Min val improvement over the window to NOT be a "
+                         "plateau (nats).")
+    ap.add_argument("--restart-plateau-window", type=int, default=4,
+                    help="Number of recent vals inspected for the plateau.")
+    ap.add_argument("--restart-accept-margin", type=float, default=0.01,
+                    help="Rewarm must beat the anchor val by this to be kept.")
+    ap.add_argument("--restart-max-attempts", type=int, default=3,
+                    help="Total rewarm attempts across the run.")
     ap.add_argument("--schedule", default="cosine",
                     choices=["cosine", "wsd"],
                     help="LR schedule shape. 'cosine' (default): warmup + "
@@ -1121,6 +1141,26 @@ def main() -> None:
                      if interrupted_state else None)
     interrupted_state = None
 
+    # ---- P5e plateau-restart controller ----
+    restart_ctrl = None
+    restart_override = None   # dict during OBSERVING: rewarm cosine params
+    restart_anchor_path = args.out / "restart_anchor.pt"
+    if args.restart_on_plateau:
+        from .lr_restart import (RestartController, RestartConfig,
+                                 REWARM, ACCEPT, ROLLBACK)
+        restart_ctrl = RestartController(RestartConfig(
+            plateau_tol=args.restart_plateau_tol,
+            plateau_window=args.restart_plateau_window,
+            spice=args.restart_spice,
+            observe_steps=args.restart_observe_steps,
+            accept_margin=args.restart_accept_margin,
+            max_attempts=args.restart_max_attempts))
+        print(f"[restart] plateau-restart ON: spice={args.restart_spice} "
+              f"observe={args.restart_observe_steps} "
+              f"tol={args.restart_plateau_tol} "
+              f"window={args.restart_plateau_window} "
+              f"max_attempts={args.restart_max_attempts}", flush=True)
+
     # ---- Train ----
     model.train()
     running_loss = 0.0
@@ -1202,6 +1242,21 @@ def main() -> None:
                     g["lr"] = cur_muon_lr
             else:
                 cur_muon_lr = args.muon_lr
+
+            # --- P5e rewarm override (only during an OBSERVING window) ---
+            if restart_override is not None:
+                ov = restart_override
+                s = global_step - ov["start"]
+                cur_lr = lr_at(s, ov["total"], ov["lion_base"], 0,
+                               floor=lion_lr_floor)
+                cur_muon_lr = lr_at(s, ov["total"], ov["muon_base"], 0,
+                                    floor=muon_lr_floor)
+                if opt_lion is not None:
+                    for g in opt_lion.param_groups:
+                        g["lr"] = cur_lr
+                if opt_cmuon is not None:
+                    for g in opt_cmuon.param_groups:
+                        g["lr"] = cur_muon_lr
 
             # --- FP grad clip (skip trits) ---
             fp_gnorm = None
@@ -1378,6 +1433,37 @@ def main() -> None:
                 writer.add_scalar("val/loss", val_loss, global_step)
                 tqdm.write(f"[val] step {global_step} loss={val_loss:.4f}")
 
+                # --- P5e plateau-restart control ---
+                if restart_ctrl is not None:
+                    act = restart_ctrl.observe(global_step, val_loss, cur_lr)
+                    if act.kind == REWARM:
+                        # Snapshot the escape anchor (exact model+opt state)
+                        # so a failed rewarm can be rolled back.
+                        _save_resume(restart_anchor_path, model, opt_bop,
+                                     opt_cmuon, opt_lion_trits, opt_lion,
+                                     global_step, best_snapshot, ctrl,
+                                     run_name, samples_at_save := global_step
+                                     * args.grad_accum * args.batch_size,
+                                     lr_snapshot={"lion_lr": cur_lr,
+                                                  "muon_lr": cur_muon_lr},
+                                     schedule_original=schedule_original_this_run)
+                        restart_override = {
+                            "start": global_step,
+                            "total": args.restart_observe_steps,
+                            "lion_base": cur_lr * act.spice,
+                            "muon_base": cur_muon_lr * act.spice}
+                        writer.add_scalar("restart/rewarm_lr",
+                                          cur_lr * act.spice, global_step)
+                        tqdm.write(f"[restart] REWARM {act.reason}")
+                    elif act.kind == ACCEPT:
+                        restart_override = None
+                        tqdm.write(f"[restart] ACCEPT {act.reason}")
+                    elif act.kind == ROLLBACK:
+                        _load_anchor_into(restart_anchor_path, model, opt_bop,
+                                          opt_cmuon, opt_lion_trits, opt_lion)
+                        restart_override = None
+                        tqdm.write(f"[restart] ROLLBACK {act.reason}")
+
             # --- Checkpoint ---
             samples_at_save = global_step * args.grad_accum * args.batch_size
             if (args.checkpoint_every > 0
@@ -1494,6 +1580,24 @@ def _save_resume(path: Path, model, opt_bop, opt_cmuon, opt_lion_trits,
     tmp = path.with_suffix(path.suffix + ".tmp")
     torch.save(payload, str(tmp))
     tmp.replace(path)
+
+
+def _load_anchor_into(path: Path, model, opt_bop, opt_cmuon,
+                      opt_lion_trits, opt_lion) -> None:
+    """Mid-run rollback: reload model + optimizer state from a restart
+    anchor written by _save_resume. Mirrors the startup-resume load path so
+    P5e's rewarm-reject reverts to EXACTLY the pre-rewarm state."""
+    st = torch.load(str(path), map_location="cpu", weights_only=False)
+    model.load_state_dict(st["model"], strict=False)
+    invalidate_all_q_caches(model)
+    if opt_bop is not None and st.get("opt_bop") is not None:
+        opt_bop.load_state_dict(st["opt_bop"])
+    if opt_cmuon is not None and st.get("opt_cmuon") is not None:
+        opt_cmuon.load_state_dict(st["opt_cmuon"])
+    if opt_lion_trits is not None and st.get("opt_lion_trits") is not None:
+        opt_lion_trits.load_state_dict(st["opt_lion_trits"])
+    if opt_lion is not None and st.get("opt_lion") is not None:
+        opt_lion.load_state_dict(st["opt_lion"])
 
 
 if __name__ == "__main__":
