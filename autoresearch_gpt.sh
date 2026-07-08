@@ -25,15 +25,15 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="062"
-RUN_TAG="8layer-cosine-30k-plateau-restart"
-DESCRIPTION="P5e CHAMPION ATTEMPT: 8L 30k cosine + plateau-restart (bf16-latents + fp16-scales). Compare vs g051 (30k plain cosine) 3.7030 and g048 (20k) 3.7272. P5e detects val plateaus, snapshots, rewarms LR (spice 2.5) to escape, rolls back if the rewarm doesn't beat the anchor. 30k is where plain cosine plateaus (g051 spent steps 5k-25k slowly), so P5e has real plateaus to escape. If the escapes extract more from the 30k budget → beats 3.7030 = new champion + validates the user's adaptive-schedule idea. Uses the now-fixed cheap fresh-resume + emergency-save preserve. ~15h ETA."
+RUN_N="063"
+RUN_TAG="8layer-wsd-p5e-20k"
+DESCRIPTION="P5e MECHANISM TEST: 8L 20k WSD + plateau-restart (spice 1.5), bf16-latents + fp16-scales. g062 proved cosine descends too smoothly to ever trigger P5e (0 rewarms in 24k steps). WSD's stable phase GUARANTEES a plateau (g060 sat at ~4.16 for 6000 steps) — the exact case P5e should escape, and the failure that motivated it. spice 1.5 (gentle: stable phase is already at peak LR, so 'slightly spicier' = 1.5x peak, not 2.5x). Compare vs g060 (WSD plain) 3.8063: if rewarms ACCEPT (escape the plateau) → beats 3.8063, validates the idea; if they ROLLBACK → finding is peak-LR plateaus need annealing not rewarming (→ pivot to plateau-triggered-anneal). Either way P5e fires and we learn. ~9h ETA."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
 
 # Defaults: fast-A scale (38M ternary). Override per experiment as needed.
-TOTAL_STEPS="${TOTAL_STEPS:-30000}"
+TOTAL_STEPS="${TOTAL_STEPS:-20000}"
 BATCH_SIZE="${BATCH_SIZE:-4}"
 GRAD_ACCUM="${GRAD_ACCUM:-16}"
 HIDDEN_SIZE="${HIDDEN_SIZE:-512}"
@@ -48,7 +48,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --latent-dtype bfloat16 --scales-dtype float16 --restart-on-plateau --restart-spice 2.5 --restart-observe-steps 1500 --restart-plateau-tol 0.008 --restart-plateau-window 4 --restart-max-attempts 3}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --latent-dtype bfloat16 --scales-dtype float16 --schedule wsd --wsd-anneal-frac 0.15 --restart-on-plateau --restart-spice 1.5 --restart-observe-steps 1500 --restart-plateau-tol 0.008 --restart-plateau-window 4 --restart-max-attempts 3}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 
