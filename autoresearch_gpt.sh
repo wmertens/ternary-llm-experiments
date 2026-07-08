@@ -25,9 +25,9 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="063"
-RUN_TAG="seed24k-bump-mult2"
-DESCRIPTION="P5e SEED-BRANCH PROBE (user steer 2026-07-08): does an LR BUMP from a mid-descent cosine state beat the predicted plain trajectory? Resume the g062 step-24000 seed (val 3.8297, cosine LR ~9e-5) with re-anchor + resume-lr-mult 2.0 → LR bumped to 2x current, fresh cosine over the remaining 6000 steps to step 30000. Predicted plain baseline = g051 trajectory (24k~3.83 → 30k 3.7030). If bumped final < 3.7030 → the warm-restart escaped to a better basin (validates the adaptive-LR idea → build the full B-averaged trajectory-prediction controller). If ≥ 3.7030 → bump doesn't help from a well-behaved cosine state. Cheap ~1h (6000 steps from seed). No WSD, no P5e-auto — manual bump to isolate the effect."
+RUN_N="064"
+RUN_TAG="seed24k-restart-mult1"
+DESCRIPTION="P5e SEED-BRANCH CONTROL (user steer 2026-07-08): restart the cosine from the CURRENT LR value (re-anchor mult 1.0, NO bump). Resume the g062 step-24000 seed (val 3.8297, cosine LR ~9e-5) with re-anchor + resume-lr-mult 1.0 → fresh cosine peaked at the current LR, re-spread over the remaining 6000 steps to step 30000. Isolates whether simply RE-SPREADING the cosine (more moderate-LR time, no magnitude change) helps vs plain continuation (g051 3.7030) — distinct from g063's 2x bump (lost +0.075). If g064 < 3.7030 → re-spreading alone helps; if ≈ or > → the original cosine tail was already optimal. Cheap ~1h from seed."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
@@ -48,7 +48,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --latent-dtype bfloat16 --scales-dtype float16 --resume-schedule re-anchor --resume-lr-mult 2.0}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --latent-dtype bfloat16 --scales-dtype float16 --resume-schedule re-anchor --resume-lr-mult 1.0}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 
