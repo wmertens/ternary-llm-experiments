@@ -585,6 +585,13 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--wsd-anneal-frac", type=float, default=0.15,
                     help="Fraction of total steps spent in WSD anneal tail. "
                          "MiniCPM/DeepSeek report 10-20%%; default 0.15.")
+    ap.add_argument("--resume-lr-mult", type=float, default=1.0,
+                    help="On a re-anchor resume, multiply the re-anchored LR "
+                         "peak by this. >1 = an LR BUMP (warm restart from the "
+                         "seed's LR × mult, decaying over remaining steps); "
+                         "<1 = a DROP. Used for seed-branched LR-adjust probes "
+                         "(P5e mechanism study). Only applies in re-anchor "
+                         "mode; ignored in preserve mode.")
     ap.add_argument("--resume-schedule", default="preserve",
                     choices=["preserve", "re-anchor"],
                     help="How LR schedule is reconstructed on resume. "
@@ -1032,7 +1039,7 @@ def main() -> None:
         # so we shift `step` and `total` by global_step to make the
         # remaining steps the full cosine domain.
         if (sv := resumed_lr_snapshot.get("lion_lr")) is not None:
-            lion_lr_base = float(sv)
+            lion_lr_base = float(sv) * args.resume_lr_mult
             lion_lr_total = max(1, args.total_steps - global_step)
             lion_lr_warmup = 0
             # Floor stays as args.lr_floor — but applied relative to the
@@ -1043,7 +1050,7 @@ def main() -> None:
                   f"× cosine over {lion_lr_total} remaining steps to "
                   f"floor={lion_lr_floor}", flush=True)
         if (sv := resumed_lr_snapshot.get("muon_lr")) is not None:
-            muon_lr_base = float(sv)
+            muon_lr_base = float(sv) * args.resume_lr_mult
             muon_lr_total = max(1, args.total_steps - global_step)
             muon_lr_warmup = 0
             print(f"[resume-lr] CMuon re-anchored: base={muon_lr_base:.3e} "
