@@ -235,6 +235,12 @@ Original gap descriptions:
 
 **Queue priority**: HIGHEST schedule experiment — supersedes the two deferred WSD fixes above. Run after g061 (X-former champion) resolves. First test: 8L 20k with restart-on-plateau, compare vs g048 cosine 3.7272 — the plateau that killed g060 is the exact case this should convert into a win. Note: this composes with cosine base schedule (not WSD); the base is cosine, the restarts are the adaptation layer.
 
+**REFINEMENT 2026-07-08 (user): rewarm-UP vs drop depends on WHERE the plateau sits in LR-space.**
+- Cosine-tail plateau = stuck at LOW LR (decayed too far) → escape by REWARMING up (P5e as built, spice>1). Correct pairing.
+- WSD stable-phase plateau (g060: ~4.16 for 6000 steps) = stuck at HIGH/peak LR (never dropped) → escape by DROPPING LR early (anneal), NOT rewarming. That's plateau-triggered-anneal, a different action from P5e-rewarm. So do NOT pair P5e-rewarm with WSD; pair it with cosine.
+
+**g062 status + snapshot-seeded sweep plan (user 2026-07-08)**: g062 (8L 30k cosine + P5e, tol=0.008) fired ZERO rewarms through step 24000 — cosine descends too smoothly (~0.01/500) to ever hit the 0.008/2000-window trigger; dead-even with g051 plain (step 20000: 3.9291 vs 3.9294), heading to ~3.70. Plan: let g062 RUN TO COMPLETION (confirm clean bf16-latents 30k stats + get the end-of-run interrupted.pt). Then g062b/c/… = RESUME from that snapshot (model sits at floor LR = a genuine low-LR plateau, the ideal rewarm seed) with adjusted P5e params (looser tol so it fires immediately, sweep spice/observe), running only a few k extra steps each. Cheap iteration — tests whether a rewarm from the converged floor escapes below 3.70, without a fresh 30k per config. Resume is cheap now (fresh-stream fix). Requires bumping --total-steps past 30000 on resume (re-anchor path handles the schedule; P5e override drives the rewarm LR).
+
 ## PRE-CHAMPION-RUN BLOCKER — fix lr_snapshot to preserve original cosine
 
 **Cause of g054's null result**: lr_snapshot is memoryless. On resume it treats snapshot LR as a new "peak" and re-cosines from there over remaining steps to floor. Multiple SIGINTs concatenate multiple shorter cosines with lower-and-lower peaks; composite schedule spends less wall at productive mid-tail LR, more at near-floor. Correct only for "extend past original schedule end" mode; wrong for "clean mid-run continuation" mode. g054 got hit twice, plateaued at 3.77 instead of the projected 3.69.
