@@ -21,6 +21,7 @@ PATTERN="smollmer.gpt_bop.*${RUN}"
 idle=0
 last_val=""
 seen_done=0
+last_step=""
 
 emit() { printf '%s\n' "$*"; }
 
@@ -47,14 +48,20 @@ while true; do
     alive=0
   fi
 
-  # --- GPU idle detection (only meaningful while training) ---
+  # --- Stall detection: low GPU util is NOT enough (a dataloader that's
+  # slow under RAM-thrash starves the GPU while still making progress). Only
+  # count as idle if util<5% AND the training step has NOT advanced since the
+  # last poll — that's a real stall, not thrash-slow data loading. ---
   util=$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | head -1)
   util=${util:-0}
-  if [ "$seen_done" = 0 ] && [ "$util" -lt 5 ] 2>/dev/null; then
+  cur_step=$(tr '\r' '\n' < "$LOG" 2>/dev/null | grep -oE 'step=[0-9]+' | tail -1)
+  if [ "$seen_done" = 0 ] && [ "$util" -lt 5 ] 2>/dev/null \
+       && [ -n "$cur_step" ] && [ "$cur_step" = "$last_step" ]; then
     idle=$((idle+1))
   else
     idle=0
   fi
+  last_step="$cur_step"
 
   # --- exit conditions ---
   if [ "$seen_done" = 1 ]; then
