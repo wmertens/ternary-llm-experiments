@@ -25,9 +25,9 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="065"
-RUN_TAG="seed24k-preserve-plain"
-DESCRIPTION="P5e SEED-BRANCH DEFINITIVE CONTROL: PRESERVE continuation from 24k seed = original cosine tail (decay-to-floor by 30000), SAME fresh-stream data (seed=24079) as g063/g064. This closes the data confound: g063 (2x bump) 3.7779 and g064 (mult1 restart) 3.7758 both used fresh-stream data ≠ g051's. If g065 ≈ 3.70 → re-anchor-into-fresh-cosine HURTS by ~0.07 (holds too much tail-LR, disrupts optimal anneal) — the plain schedule is already optimal, adaptive-LR has no room on well-tuned cosine. If g065 ≈ 3.775 → the fresh-stream data (not the LR) explains the gap, and g063/g064 are actually fine. Definitive interpretation of the whole seed-branch study. ~1h from seed (preserve mode, no re-anchor)."
+RUN_N="066"
+RUN_TAG="8layer-bf16-cont-30k"
+DESCRIPTION="DISENTANGLER: fresh CONTINUOUS bf16-latents 8L 30k cosine (no resume, no fresh-stream). Tests whether the seed-branch ~3.777 cap (g063/g064/g065, all resumed-into-anneal) is bf16-anneal-degradation or a fresh-stream-resume artifact. Compare final vs g051 (fp16 continuous 30k = 3.7030): if g066 ~3.70 -> bf16 fine, the RESUME/fresh-stream capped the branches (resume-into-anneal methodology penalty); if g066 ~3.777 -> bf16 latents genuinely converge ~0.074 worse in the deep low-LR anneal than fp16 (revise bf16-latents adoption; retro-explains g054 3.774 vs g048 3.727). Champion still g048 fp16 3.7272. ~15h."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
