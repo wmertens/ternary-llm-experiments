@@ -314,3 +314,11 @@ Both queued for after current Phase 5d/compute-dial sweep closes.
 - Does per-tensor BitNet scale tie/beat per-(row, group) frozen on a non-recurrent model?
 - Do optimizer-state precision savings hold up on fast-A scale GPT (HRM screening showed +0.011 nats for fp16-m at tiny scale)?
 - Where does INT8-act sit on the wall/quality tradeoff for the actual fast-A GPT baseline?
+
+## P6c — State-Prediction Separation (SPS) dual-stream (arxiv 2607.01218, user steer 2026-07-13)
+
+**Paper**: "The State-Prediction Separation Hypothesis" — Monea, Godey, Brantley, Artzi (Cornell/lil-lab). Code: github.com/lil-lab/sps. Standard Transformers conflate two roles in one forward pass — maintaining state for FUTURE predictions vs predicting the NEXT token. SPS splits them into a dual-stream decoder. Claims: consistent data+compute-efficiency gains across scales, +2-3pp downstream, better val loss.
+
+**Why promising for us**: architectural (orthogonal to quantization) → composes with the ternary QLinear/STE/CMuon stack, same as X-former. "Compute efficiency across scales" fits the fastest-wall-clock + scale-up goal. User flagged very promising 2026-07-13.
+
+**TODO before implementing** (ml-research dispatched): concrete dual-stream mechanism (how the two streams share/split attention+MLP+residual), param/FLOP overhead (param-matched or added?), exact model sizes + loss numbers vs baseline, whether the streams can both be ternary. Queue as a Phase-6 architectural experiment after the current bf16-vs-fp16-latents precision question closes (g066).
