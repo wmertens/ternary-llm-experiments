@@ -25,15 +25,15 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="066"
-RUN_TAG="8layer-bf16-cont-30k"
-DESCRIPTION="DISENTANGLER: fresh CONTINUOUS bf16-latents 8L 30k cosine (no resume, no fresh-stream). Tests whether the seed-branch ~3.777 cap (g063/g064/g065, all resumed-into-anneal) is bf16-anneal-degradation or a fresh-stream-resume artifact. Compare final vs g051 (fp16 continuous 30k = 3.7030): if g066 ~3.70 -> bf16 fine, the RESUME/fresh-stream capped the branches (resume-into-anneal methodology penalty); if g066 ~3.777 -> bf16 latents genuinely converge ~0.074 worse in the deep low-LR anneal than fp16 (revise bf16-latents adoption; retro-explains g054 3.774 vs g048 3.727). Champion still g048 fp16 3.7272. ~15h."
+RUN_N="067"
+RUN_TAG="xformer-gentle384-fp16-20k"
+DESCRIPTION="REOPENED X-former (gentle) + CORRECTED fp16 latents. g061 aggressive ⊗[...256...] lost +0.176 (over-narrowed, 4 layers at half-width); user steer: less narrow at small scale. This = ⊗[512,384,384,384,384,384,384,512] min-width 384 (3/4 full, all mult of 128), ~46M params (-10pct vs flat 51.3M). ALSO uses fp16 latents (g066 proved bf16 costs +0.073 in deep anneal). 8L 20k cosine. Bar vs g048 fp16 flat champion 3.7272: if X-former within +0.05 at less wall → viable per-wall; if it converges close → the gentle taper preserves capacity. Runs while SPS (P6c) is built."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
 
 # Defaults: fast-A scale (38M ternary). Override per experiment as needed.
-TOTAL_STEPS="${TOTAL_STEPS:-30000}"
+TOTAL_STEPS="${TOTAL_STEPS:-20000}"
 BATCH_SIZE="${BATCH_SIZE:-4}"
 GRAD_ACCUM="${GRAD_ACCUM:-16}"
 HIDDEN_SIZE="${HIDDEN_SIZE:-512}"
@@ -48,7 +48,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --latent-dtype bfloat16 --scales-dtype float16}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --latent-dtype float16 --scales-dtype float16 --layer-widths 512,384,384,384,384,384,384,512}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 
