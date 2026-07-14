@@ -140,7 +140,8 @@ class HrmAttention(nn.Module):
                               bias=False, levels=3, group_size=gs)
 
     def forward(self, x: torch.Tensor, cos: torch.Tensor,
-                sin: torch.Tensor) -> torch.Tensor:
+                sin: torch.Tensor,
+                attn_mask: torch.Tensor | None = None) -> torch.Tensor:
         B, S, _ = x.shape
         q = self.q_proj(x).view(B, S, self.num_heads, self.head_dim).transpose(1, 2)
         kv_or_k = self.k_proj(x).view(B, S, self.num_kv, self.head_dim).transpose(1, 2)
@@ -154,8 +155,13 @@ class HrmAttention(nn.Module):
         if self.kv_groups > 1:
             k = k.repeat_interleave(self.kv_groups, dim=1)
             v = v.repeat_interleave(self.kv_groups, dim=1)
-        y = F.scaled_dot_product_attention(q, k, v, is_causal=True,
-                                           scale=self.scale)
+        # attn_mask (bool [S,S], True=attend) overrides is_causal — used by SPS.
+        if attn_mask is not None:
+            y = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask,
+                                               scale=self.scale)
+        else:
+            y = F.scaled_dot_product_attention(q, k, v, is_causal=True,
+                                               scale=self.scale)
         y = y.transpose(1, 2).contiguous().view(B, S, -1)
         return self.o_proj(y)
 
@@ -206,8 +212,9 @@ class HrmDecoderLayer(nn.Module):
             self.mlp_out_norm = None
 
     def forward(self, x: torch.Tensor, cos: torch.Tensor,
-                sin: torch.Tensor) -> torch.Tensor:
-        attn_out = self.self_attn(self.input_norm(x), cos, sin)
+                sin: torch.Tensor,
+                attn_mask: torch.Tensor | None = None) -> torch.Tensor:
+        attn_out = self.self_attn(self.input_norm(x), cos, sin, attn_mask)
         if self.attn_out_norm is not None:
             attn_out = self.attn_out_norm(attn_out)
         x = x + attn_out

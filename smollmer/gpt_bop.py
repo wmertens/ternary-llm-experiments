@@ -553,6 +553,14 @@ def build_argparser() -> argparse.ArgumentParser:
                          "SF's outer averaging. Lion's LR schedule "
                          "(cosine/WSD) is IGNORED when this flag is on; "
                          "CMuon keeps its own schedule.")
+    ap.add_argument("--sps", action="store_true", default=False,
+                    help="State-Prediction Separation (arxiv 2607.01218): "
+                         "interleave a learned <predict> token after each "
+                         "input (T→2T), read next-token loss from the predict "
+                         "slots. ~2x train FLOPs/activation memory (halve bs "
+                         "or seq on 6GB). Composes with ternary QLinear.")
+    ap.add_argument("--sps-window", type=int, default=64,
+                    help="Sliding window (# predict slots visible) for SPS.")
     ap.add_argument("--restart-on-plateau", action="store_true", default=False,
                     help="P5e: detect a val plateau, snapshot, rewarm the LR "
                          "to escape it, and roll back (exact model+opt state) "
@@ -674,6 +682,8 @@ def main() -> None:
         sandwich_norm=args.sandwich_norm,
         layer_widths=([int(w) for w in args.layer_widths.split(",")]
                       if args.layer_widths else []),
+        sps=args.sps,
+        sps_window=args.sps_window,
     )
     print(f"[build] cfg={cfg}", flush=True)
     model = GptBopModel(cfg)

@@ -100,6 +100,11 @@ class GptBopModel(nn.Module):
                 group_size=cfg.scale_group_size, levels=3)
         else:
             self.embed_tokens = nn.Embedding(cfg.vocab_size, cfg.hidden_size)
+        if cfg.sps:
+            assert not cfg.layer_widths, "SPS + X-former not supported yet"
+            # Learned <predict> token embedding, interleaved after each input.
+            self.predict_embed = nn.Parameter(
+                torch.zeros(cfg.hidden_size).normal_(0.0, cfg.initializer_range))
         head_dim = cfg.head_dim
         if cfg.layer_widths:
             widths = list(cfg.layer_widths)
@@ -145,7 +150,40 @@ class GptBopModel(nn.Module):
         elif isinstance(module, RMSNorm):
             module.weight.data.fill_(1.0)
 
+    def _lm_head(self, x: torch.Tensor) -> torch.Tensor:
+        if self.lm_head is None:
+            if hasattr(self.embed_tokens, "quantized_scaled_weight"):
+                w = self.embed_tokens.quantized_scaled_weight()
+            else:
+                w = self.embed_tokens.weight
+            return F.linear(x, w)
+        return self.lm_head(x)
+
+    def _forward_sps(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """SPS (arxiv 2607.01218): interleave a learned <predict> token after
+        every input token (T→2T), shared RoPE id per pair, one shared-weight
+        stack under the SPS mask; read next-token logits from the predict
+        slots so the return is [B, T, vocab] — drop-in for the trainer's loss.
+        """
+        B, T = input_ids.shape
+        H = self.cfg.hidden_size
+        tok = self.embed_tokens(input_ids) * self.cfg.embedding_scale  # [B,T,H]
+        pred = self.predict_embed.to(tok.dtype).expand(B, T, H)         # [B,T,H]
+        # Interleave: x = [x0,p0,x1,p1,...] → [B, 2T, H]
+        x = torch.stack((tok, pred), dim=2).reshape(B, 2 * T, H)
+        # Doubled RoPE ids: position i shared by (xi, pi).
+        cos = self.rotary.cos_cached[:T].repeat_interleave(2, dim=0).to(x.dtype)
+        sin = self.rotary.sin_cached[:T].repeat_interleave(2, dim=0).to(x.dtype)
+        mask = build_sps_mask(T, self.cfg.sps_window, device=x.device)  # [2T,2T]
+        for layer in self.layers:
+            x = layer(x, cos, sin, mask)
+        x = self.final_norm(x)
+        x = x[:, 1::2, :]                    # predict slots → [B, T, H]
+        return self._lm_head(x)
+
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        if self.cfg.sps:
+            return self._forward_sps(input_ids)
         B, S = input_ids.shape
         x = self.embed_tokens(input_ids) * self.cfg.embedding_scale
         cos = self.rotary.cos_cached[:S].to(x.dtype)
