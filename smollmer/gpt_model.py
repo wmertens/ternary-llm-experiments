@@ -43,10 +43,47 @@ class GptBopConfig:
     # num_layers long. head_dim stays at 64 (cfg.hidden_size//cfg.num_attention_heads)
     # so each d_ℓ must be a multiple of 64 AND of scale_group_size.
     layer_widths: list[int] = field(default_factory=list)
+    # SPS — State-Prediction Separation (arxiv 2607.01218). Interleave a
+    # learned <predict> token after every input token (T→2T, shared RoPE id).
+    # Input-slot K/V are causal+persistent; predict-slot K/V are visible only
+    # within `sps_window` and then evicted. Next-token loss is read at the
+    # predict slots. Zero extra params; ~2x train FLOPs/activation memory.
+    sps: bool = False
+    sps_window: int = 64
 
     @property
     def head_dim(self) -> int:
         return self.hidden_size // self.num_attention_heads
+
+
+def build_sps_mask(T: int, window: int, device=None) -> "torch.Tensor":
+    """Boolean attention mask for SPS on the interleaved 2T sequence
+    (order x0,p0,x1,p1,...), True = attend. Even indices = input slots,
+    odd = predict slots. Rules (arxiv 2607.01218):
+      - input query xi (pos 2i): attends all input keys xk, k≤i (causal,
+        persistent) + predict keys pk within the window i-w ≤ k < i.
+      - predict query pi (pos 2i+1): attends all input keys xk, k≤i
+        (it predicts token i+1 from state up to i) + predict keys pk within
+        i-w ≤ k ≤ i.
+    Returns [2T, 2T] bool. Fed to SDPA as attn_mask (True=keep)."""
+    import torch
+    idx = torch.arange(2 * T, device=device)
+    qi = idx // 2                      # the token-index i of each query slot
+    ki = idx // 2                      # token-index of each key slot
+    q_is_pred = (idx % 2 == 1)         # query is a <predict> slot
+    k_is_pred = (idx % 2 == 1)         # key is a <predict> slot
+    Q = qi[:, None]
+    K = ki[None, :]
+    kp = k_is_pred[None, :]
+    qp = q_is_pred[:, None]
+    # Input keys (k_is_pred=False): causal & persistent — visible when K<=Q
+    # for predict queries, and K<=Q for input queries too (xi sees xk k≤i).
+    input_key = (~kp) & (K <= Q)
+    # Predict keys: windowed. For input query xi: i-w ≤ k < i  → K<Q and K>Q-w.
+    # For predict query pi: i-w ≤ k ≤ i → K<=Q and K>Q-w.
+    pred_key_input_q = kp & (~qp) & (K < Q) & (K >= Q - window)
+    pred_key_pred_q = kp & qp & (K <= Q) & (K >= Q - window)
+    return input_key | pred_key_input_q | pred_key_pred_q
 
 
 class GptBopModel(nn.Module):
