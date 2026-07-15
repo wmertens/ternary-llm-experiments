@@ -25,9 +25,9 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="068"
-RUN_TAG="sps-8layer-fp16-10k"
-DESCRIPTION="SPS (arxiv 2607.01218) A/B — first run. State-Prediction Separation: interleave learned <predict> token after each input (T->2T), input K/V causal+persistent, predict K/V windowed (w=64), loss at predict slots. 8L 512 fp16, bs=2 (SPS ~2x activation memory → bs 4→2 keeps seq=1024 on 6GB), 10k cosine. Paired baseline g069 = flat bs=2 10k (matched tokens/step) for a clean SPS-vs-flat A/B. Bar: SPS beats flat by the paper XS number (~-0.04 val NLL) at our exact 53M/8L arch. If SPS wins here → strong validation + scale-up candidate. NOTE: bs=2 = half the champion tokens/step, so absolute loss not directly vs g048 3.7272; the fair comparison is g068 vs g069."
+RUN_N="069"
+RUN_TAG="flat-bs2-fp16-10k"
+DESCRIPTION="SPS A/B BASELINE: flat 8L 512 fp16 bs=2 10k cosine — matched control for g068 (SPS bs=2 10k = 4.0902). Same tokens/step, same everything except NO --sps. Clean SPS-vs-flat at 53M/8L (paper XS). If g068 4.0902 < g069 by ~-0.04 → SPS validated on ternary; if g068 >= g069 → 2x compute not paying off at our token budget, revisit at scale per user belief."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
@@ -48,7 +48,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --latent-dtype float16 --scales-dtype float16 --sps --sps-window 64}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --latent-dtype float16 --scales-dtype float16}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 
