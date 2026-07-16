@@ -547,6 +547,15 @@ def build_argparser() -> argparse.ArgumentParser:
                     help="Activation checkpointing inside the 1-step grad "
                          "slice. Only ~8 layer-grads worth of activations; "
                          "typically not needed.")
+    ap.add_argument("--compile", action="store_true", default=False,
+                    help="Wrap the training forward in torch.compile "
+                         "(eager->graph). Pure wall-clock lever: same params, "
+                         "same math. Only the forward call in the train/eval "
+                         "loop is routed through the compiled module; `model` "
+                         "stays the eager original so optimizer, state_dict "
+                         "save/load and per-stack stats are untouched (no "
+                         "_orig_mod. key prefix). First step pays a one-time "
+                         "compile cost.")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--lion-schedule-free", action="store_true",
                     default=False,
@@ -1189,6 +1198,21 @@ def main() -> None:
 
     # ---- Train ----
     model.train()
+    # Optional torch.compile: route ONLY the forward through the compiled
+    # module. `model` stays the eager original for every other use (optimizer
+    # param refs, state_dict save/load, per-stack stats), so no _orig_mod. key
+    # prefix leaks into checkpoints. torch.compile(model) shares _orig_mod =
+    # model — same param tensors — so in-place optimizer/load_state_dict
+    # updates are seen by the compiled graph. Compilation is lazy (first
+    # forward pays the cost). Toggling model.eval()/train() in evaluate() also
+    # toggles the shared module's mode, so the compiled train-mode graph is
+    # re-selected by guard when training resumes.
+    if args.compile:
+        print("[build] torch.compile on training forward (lazy; first step "
+              "pays compile cost)", flush=True)
+        fwd_model = torch.compile(model)
+    else:
+        fwd_model = model
     running_loss = 0.0
     running_n = 0
     flips_window = 0
@@ -1232,7 +1256,7 @@ def main() -> None:
                        else torch.amp.autocast(args.device.split(":")[0],
                                                enabled=False))
                 with ctx:
-                    logits = model(ids)
+                    logits = fwd_model(ids)
                     loss = causal_lm_loss(logits, ids)
                 if not torch.isfinite(loss):
                     raise RuntimeError(
