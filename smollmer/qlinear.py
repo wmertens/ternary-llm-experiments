@@ -503,6 +503,28 @@ class QLinear(nn.Linear):
                 s = Qp / absmax
                 xq = (x * s).round().clamp_(-Qp, Qp) / s
             x = x + (xq - x).detach()
+        # Optional FP8 (E4M3) per-token activation quant — floating exponent
+        # keeps fine resolution near zero (unlike int8's uniform spacing) and
+        # tolerates outlier channels via the exponent. Per-token absmax scale
+        # maps into the E4M3 range, then round-trip through float8. STE.
+        elif getattr(self, "fp8_activations", False):
+            fp8_max = 448.0  # torch.finfo(float8_e4m3fn).max
+            with torch.no_grad():
+                absmax = x.abs().amax(dim=-1, keepdim=True).clamp_min(1e-5)
+                s = fp8_max / absmax
+                xq = (x * s).to(torch.float8_e4m3fn).to(x.dtype) / s
+            x = x + (xq - x).detach()
+        # Optional FP8 (E4M3) per-token activation quantization. E4M3's
+        # floating exponent keeps fine resolution near zero (unlike int8's
+        # uniform spacing) — better for the small activations that matter at
+        # low LR, and native on Ada+ tensor cores. Per-token absmax scales
+        # into E4M3's [-448, 448] range. STE, same as int8.
+        elif getattr(self, "fp8_activations", False):
+            with torch.no_grad():
+                absmax = x.abs().amax(dim=-1, keepdim=True).clamp_min(1e-5)
+                s = 448.0 / absmax
+                xq = (x * s).to(torch.float8_e4m3fn).to(x.dtype) / s
+            x = x + (xq - x).detach()
         # Five paths, picked by what's attached:
         #   mask_logits Parameter present               → GSQ PTQ
         #   codepoint_c is a Parameter + smooth_temp > 1e-4 → smooth QAT

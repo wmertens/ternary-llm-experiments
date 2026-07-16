@@ -491,6 +491,12 @@ def build_argparser() -> argparse.ArgumentParser:
                     help="BitNet-style per-token absmax int8 STE on the input "
                          "to every QLinear. Approximately halves activation "
                          "memory and adds quantization noise in the gradient.")
+    ap.add_argument("--fp8-activations", action="store_true", default=False,
+                    help="Per-token absmax FP8 (E4M3) STE on the input to every "
+                         "QLinear. Like --int8-activations but the floating "
+                         "exponent keeps fine resolution near zero, so small "
+                         "activations (low-LR anneal) survive better. Native on "
+                         "Ada+ FP8 tensor cores. Mutually exclusive with int8.")
     ap.add_argument("--fp-weights", action="store_true", default=False,
                     help="FP-weights control: QLinear forward uses the raw "
                          "weight (no quantize, no STE, no per-group scales); "
@@ -771,14 +777,17 @@ def main() -> None:
                   f"{args.init_zero_frac:.2f}); fan-in scales on {n_s}",
                   flush=True)
 
-    # Enable int8 activation quantization on every QLinear if requested.
-    if args.int8_activations:
+    # Enable int8/fp8 activation quantization on every QLinear if requested.
+    assert not (args.int8_activations and args.fp8_activations), (
+        "--int8-activations and --fp8-activations are mutually exclusive")
+    if args.int8_activations or args.fp8_activations:
+        attr = "int8_activations" if args.int8_activations else "fp8_activations"
         n = 0
         for m in model.modules():
             if isinstance(m, QLinear):
-                m.int8_activations = True
+                setattr(m, attr, True)
                 n += 1
-        print(f"[init] int8 activations enabled on {n} QLinears", flush=True)
+        print(f"[init] {attr} enabled on {n} QLinears", flush=True)
 
     # ---- BitNet-style computed scale (no learnable scale tensor) ----
     if args.computed_scale != "off":
