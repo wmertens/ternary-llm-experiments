@@ -25,9 +25,9 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="070"
-RUN_TAG="int8act-bs2-fp16-10k"
-DESCRIPTION="EFFICIENCY LEVER (user steer 2026-07-16): INT8 activations quality gate. Flat 8L 512 fp16 bs=2 10k + --int8-activations (BitNet per-token absmax int8 STE on every QLinear input, forward-quantized/backward-identity). This measures the QUALITY cost of int8 activations — the gate before building the real int8xternary matmul kernel that delivers the actual speed (int8 tensor cores) + memory (bigger batch) win. Matched control = g069 flat bs=2 10k = 4.0872 (identical recipe, no int8-act). Bar: within +0.02 of 4.0872 → int8 activations viable → green-light the fast kernel; >+0.05 → int8 acts hurt too much. ~7h."
+RUN_N="071"
+RUN_TAG="fp8act-bs2-fp16-10k"
+DESCRIPTION="EFFICIENCY LEVER (user steer 2026-07-16): FP8/E4M3 activations quality gate — the finer-grained counterpart to g070 int8-act (which PASSED: 4.0838 = -0.0034 vs flat, quality-free). Flat 8L 512 fp16 bs=2 10k + --fp8-activations (per-token absmax E4M3 fake-quant STE on every QLinear input). E4M3's floating exponent keeps constant RELATIVE resolution across magnitudes (vs int8's uniform grid) AND is native on Ada FP8 tensor cores → the more valuable format to validate even at parity. Matched control = g069 flat bs=2 10k = 4.0872; direct peer = g070 int8 4.0838. Bar: within +0.02 of 4.0872 → fp8 viable; if fp8 <= int8 it's the format to build the kernel for (real speedup path, no bespoke int8xternary kernel needed). Gives clean 3-way flat/int8/fp8 gate. ~8h."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
@@ -48,7 +48,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --latent-dtype float16 --scales-dtype float16 --int8-activations}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --latent-dtype float16 --scales-dtype float16 --fp8-activations}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 
