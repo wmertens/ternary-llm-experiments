@@ -337,3 +337,9 @@ Both queued for after current Phase 5d/compute-dial sweep closes.
 
 
 **SPS A/B RESULT 2026-07-16 (g068 vs g069)**: at 53M/8L/10k/bs=2, SPS 4.0902 vs matched flat 4.0872 = PARITY (+0.003 noise) at 1.9x wall. The paper's -0.04 val NLL advantage did NOT appear at our small scale + 10k (~0.3B tokens vs their 20B). SPS is SCALE-GATED (paper's own gap grows XS-0.042→XL-0.068 and needs long training). Implementation is validated + committed and ready. RETRY only at much larger model or token budget. Champion recipe stays flat.
+
+## INT8 activations — interpretive frame (fork 2026-07-16) + deep-anneal caveat
+
+Why int8 activations work at all (no learned "coupled dimensions" needed): each QLinear output sums ~d features; per-element int8 error (width Δ=absmax/127) is ~independent zero-mean, so it accumulates like Δ√d while signal accumulates √d → OUTPUT SNR >> any single input's. The reduction averages away int8 coarseness for free (this is why ternary-weight × int8-act BitNet works). Training adapts mostly MAGNITUDE conditioning (outlier suppression, à la SmoothQuant), not pairwise coupling.
+
+**CAVEAT for judging g070 (int8-act A/B):** int8 has FIXED spacing → much coarser than fp16 for SMALL values (fp16 has fine near-zero resolution). Predicted failure mode = a LATE-training/low-LR fine-convergence penalty, MIRRORING the bf16-latent deep-anneal gap (g066: fine to step 25k, then +0.073 in the deepest anneal). So a 10k int8-act A/B (g070) may look ~parity mid-run but UNDER-report the true cost — the penalty could surface only in a deep 30k anneal. If g070 tracks g069 to ~step 8500 then diverges in the 8500-10000 anneal tail, that's the fixed-spacing-hurts-small-values effect → run a 30k int8-act confirmation before adopting. If g070 is flat-parity throughout including the tail, int8-act is likely genuinely cheap.
