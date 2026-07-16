@@ -25,9 +25,9 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="069"
-RUN_TAG="flat-bs2-fp16-10k"
-DESCRIPTION="SPS A/B BASELINE: flat 8L 512 fp16 bs=2 10k cosine — matched control for g068 (SPS bs=2 10k = 4.0902). Same tokens/step, same everything except NO --sps. Clean SPS-vs-flat at 53M/8L (paper XS). If g068 4.0902 < g069 by ~-0.04 → SPS validated on ternary; if g068 >= g069 → 2x compute not paying off at our token budget, revisit at scale per user belief."
+RUN_N="070"
+RUN_TAG="int8act-bs2-fp16-10k"
+DESCRIPTION="EFFICIENCY LEVER (user steer 2026-07-16): INT8 activations quality gate. Flat 8L 512 fp16 bs=2 10k + --int8-activations (BitNet per-token absmax int8 STE on every QLinear input, forward-quantized/backward-identity). This measures the QUALITY cost of int8 activations — the gate before building the real int8xternary matmul kernel that delivers the actual speed (int8 tensor cores) + memory (bigger batch) win. Matched control = g069 flat bs=2 10k = 4.0872 (identical recipe, no int8-act). Bar: within +0.02 of 4.0872 → int8 activations viable → green-light the fast kernel; >+0.05 → int8 acts hurt too much. ~7h."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
@@ -48,7 +48,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --latent-dtype float16 --scales-dtype float16}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --latent-dtype float16 --scales-dtype float16 --int8-activations}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 
