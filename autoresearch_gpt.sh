@@ -132,6 +132,16 @@ def first(tag):
         return None
     seq = ea.Scalars(tag)
     return seq[0].value if seq else None
+def median_tail(tag, frac=0.7):
+    # Median over the last `frac` of the series — steady-state, ignores
+    # warmup/compile ramp and is robust to clock-throttle spikes.
+    if tag not in ea.Tags()['scalars']:
+        return None
+    vals = [s.value for s in ea.Scalars(tag)]
+    if not vals:
+        return None
+    tail = sorted(vals[int(len(vals)*(1-frac)):])
+    return tail[len(tail)//2] if tail else None
 flip_rate = last('bop/flip_rate')
 fz_first = first('trits/frac_zero')
 fz_last  = last('trits/frac_zero')
@@ -139,6 +149,17 @@ if flip_rate is not None and math.isfinite(flip_rate):
     print(f"METRIC flip_rate={flip_rate:.6e}")
 if fz_first is not None and fz_last is not None:
     print(f"METRIC frac_zero_delta={fz_last - fz_first:+.6f}")
+# Clock-normalized throughput: GPU clock swings ~1.1-1.8GHz with cooling, so
+# raw tok/s across runs is confounded. tok/s/GHz is the clock-invariant number.
+tps_ghz = median_tail('throughput/tokens_per_sec_per_ghz')
+clk     = median_tail('throughput/sm_clock_ghz')
+tps     = median_tail('throughput/tokens_per_sec')
+if tps is not None:
+    print(f"METRIC tok_per_s_median={tps:.0f}")
+if clk is not None:
+    print(f"METRIC sm_clock_ghz_median={clk:.3f}")
+if tps_ghz is not None:
+    print(f"METRIC tok_per_s_per_ghz_median={tps_ghz:.0f}")
 PYEOF
 
 echo "METRIC wall_seconds=${WALL}"

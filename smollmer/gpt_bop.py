@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -42,6 +43,29 @@ from .hrm_data import build_mix, make_train_loader, make_val_loader
 from .hrm_model import RMSNorm
 from .gpt_model import GptBopConfig, GptBopModel
 from .qlinear import QLinear, clamp_qlinear_weights, quantize_levels
+
+
+_SM_CLOCK_OK = True
+
+
+def _sm_clock_ghz():
+    """Current SM clock (GHz) via nvidia-smi, or None. Sampled only at log
+    cadence (subprocess ~40ms, negligible vs a ~2s step). This box's GPU clock
+    swings ~1.1-1.8GHz with cooling, so raw tok/s A/Bs across runs are
+    confounded; report tok/s per GHz for a clock-invariant throughput number.
+    Disables itself after the first failure so a missing nvidia-smi is free."""
+    global _SM_CLOCK_OK
+    if not _SM_CLOCK_OK:
+        return None
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=clocks.sm",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=2)
+        return int(out.stdout.split("\n")[0].strip()) / 1000.0
+    except Exception:
+        _SM_CLOCK_OK = False
+        return None
 
 
 # ---------------------------------------------------------------- init
@@ -1392,6 +1416,8 @@ def main() -> None:
             if global_step % args.log_every == 0:
                 t1 = time.time()
                 tps = tokens_window / max(1e-6, t1 - window_t0)
+                sm_ghz = _sm_clock_ghz()
+                tps_ghz = tps / sm_ghz if sm_ghz else None
                 # Flip rate semantics differ between Bop and STE+CMuon:
                 #   Bop: count flips the opt's own discrete flip rule did
                 #        in the window (flips_window / elems_window).
@@ -1412,6 +1438,9 @@ def main() -> None:
                     "flip%": f"{rate*100:.3f}",
                     "tok/s": f"{tps:.0f}",
                 }
+                if sm_ghz:
+                    postfix["MHz"] = f"{sm_ghz*1000:.0f}"
+                    postfix["tok/s/GHz"] = f"{tps_ghz:.0f}"
                 pbar.set_postfix(postfix)
                 pbar.update(args.log_every)
                 writer.add_scalar("loss/step", step_loss, global_step)
@@ -1463,6 +1492,11 @@ def main() -> None:
                 if fp_gnorm is not None:
                     writer.add_scalar("lion/grad_norm", fp_gnorm, global_step)
                 writer.add_scalar("throughput/tokens_per_sec", tps, global_step)
+                if sm_ghz:
+                    writer.add_scalar("throughput/sm_clock_ghz",
+                                      sm_ghz, global_step)
+                    writer.add_scalar("throughput/tokens_per_sec_per_ghz",
+                                      tps_ghz, global_step)
                 writer.add_scalar("throughput/steps_per_sec",
                                   args.log_every / max(1e-6, t1 - window_t0),
                                   global_step)
