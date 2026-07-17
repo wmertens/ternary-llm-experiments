@@ -19,6 +19,10 @@ cd "$(dirname "$0")"
 
 # ---- Cluster / sandbox setup -------------------------------------------------
 export LD_LIBRARY_PATH=/run/opengl-driver/lib
+# NixOS: triton's libcuda probe hardcodes /sbin/ldconfig (absent here). This env
+# var (triton knob) points it straight at the driver lib so torch.compile/inductor
+# skip the ldconfig call. libcuda.so.1 lives in /run/opengl-driver/lib.
+export TRITON_LIBCUDA_PATH=/run/opengl-driver/lib
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 # shellcheck disable=SC1091
 source .venv/bin/activate
