@@ -25,9 +25,13 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="071"
-RUN_TAG="fp8act-bs2-fp16-10k"
-DESCRIPTION="EFFICIENCY LEVER (user steer 2026-07-16): FP8/E4M3 activations quality gate — the finer-grained counterpart to g070 int8-act (which PASSED: 4.0838 = -0.0034 vs flat, quality-free). Flat 8L 512 fp16 bs=2 10k + --fp8-activations (per-token absmax E4M3 fake-quant STE on every QLinear input). E4M3's floating exponent keeps constant RELATIVE resolution across magnitudes (vs int8's uniform grid) AND is native on Ada FP8 tensor cores → the more valuable format to validate even at parity. Matched control = g069 flat bs=2 10k = 4.0872; direct peer = g070 int8 4.0838. Bar: within +0.02 of 4.0872 → fp8 viable; if fp8 <= int8 it's the format to build the kernel for (real speedup path, no bespoke int8xternary kernel needed). Gives clean 3-way flat/int8/fp8 gate. ~8h."
+RUN_N="072"
+RUN_TAG="compile-quick-flat"
+DESCRIPTION="EFFICIENCY LEVER: torch.compile tok/s A/B (SHORT, not a full run). Flat 8L 512 fp16 bs=2 + --compile, 600 steps. Measures steady-state tok/s vs the known flat-EAGER baseline g069 = 12827 tok/s (same recipe, no compile). Also verifies: loss descends normally (no NaN/graph-break divergence) + end interrupted.pt has NO _orig_mod. keys (resume-compat). Bar: >~1.15x tok/s (>~14.7k) with sane loss → adopt --compile as a permanent free speedup for all future runs. ~25min."
+# g072-quick overrides: short run for tok/s measurement
+TOTAL_STEPS=600
+VAL_EVERY=300
+CHECKPOINT_EVERY=300
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
@@ -48,7 +52,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --latent-dtype float16 --scales-dtype float16 --fp8-activations}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --latent-dtype float16 --scales-dtype float16 --compile}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 
