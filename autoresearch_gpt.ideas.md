@@ -392,3 +392,14 @@ Attempted the g072 tok/s A/B; inductor hit two NixOS walls. WALL 1 ldconfig: FIX
 ## Per-layer / mixed activation precision (analysis 2026-07-17, user Q) → g077
 
 Strong merit, standard LLM-quant practice. Sensitivity is non-uniform: first (embed-adjacent) + last (pre-logit) layers, and attn out_proj / MLP down_proj, are the most quant-sensitive; middle MLP tolerates the most aggressive quant. Activation outliers concentrate in specific channels/layers (SmoothQuant/AWQ). Mixed precision (body int4 + sensitive-few int8) usually captures ~all the memory/bandwidth win at ~no quality cost — better Pareto than uniform int4. CHEAP here: QLinear already carries per-module quant attrs (mulaw_bits set per module), so a per-layer bits schedule is ~10 LOC. **g077 = mixed-precision activations**: after uniform int4 (g075/g076) sets the target, protect layer0 + layer(N-1) + attn/down projections at int8, rest int4; measure val recovery. Or a one-shot sensitivity probe: quantize one layer at a time to int4, rank by val delta, protect the top-k.
+
+
+## ACTIVATION QUANT — FINAL VERDICT 2026-07-18 (g069/g070/g073/g074, all bs=2 10k)
+
+Ranking: plain int8 4.0838 (WINNER, = flat 4.0872 within noise) > mu-law int8 4.0932 > fp8 E4M3 4.1061 (worst).
+
+**int8 per-token absmax activations are quality-neutral and the format to build the real kernel for** (int8xternary GEMM on Ada int8 tensor cores, ~2x matmul — DEFERRED to scale-up per user). Both 'smarter' formats LOSE:
+- mu-law companding (+0.009): output-SNR averaging already handles small values, companding just distorts the bulk.
+- fp8 E4M3 (+0.022, worst; gap widens in anneal): per-token absmax already normalizes range → exponent bits wasted, coarse 3-bit mantissa hurts everywhere. FP8 only wins when you can't pre-normalize (per-tensor/outlier regimes).
+
+Key principle: **once you per-token-absmax-normalize, you want uniform levels (int8), not floating-point.** This likely holds at scale too, so int8 is the activation format to carry forward.
