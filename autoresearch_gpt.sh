@@ -29,9 +29,9 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="073"
-RUN_TAG="mulaw8-bs2-fp16-10k"
-DESCRIPTION="EFFICIENCY LEVER (user idea 2026-07-17): mu-law companded int8 activations — 256-level LUT with levels DENSER near zero (the 'gentle slope near 0'). Flat 8L 512 fp16 bs=2 10k + --mulaw-activations --mulaw-bits 8 --mulaw-mu 255. EAGER (no --compile: g072 showed compile diverges from eager by up to +0.25 train loss by step 600 — chaotic FP-reorder, quality-neutrality UNVERIFIED — so keep this A/B clean vs the eager g070/g069 controls). Direct A/B vs g070 int8-UNIFORM (4.0838) and flat g069 (4.0872): does non-uniform near-0 spacing beat uniform int8? EXPECTATION: int8 already saturated (g070 = quality-free), so likely ~parity — real leverage of non-uniform quant is at int4 (queued follow-up). Verified: mu-law gives ~10x finer near-0 resolution than uniform int8 under outliers. ~8h."
+RUN_N="074"
+RUN_TAG="fp8act-bs2-fp16-10k"
+DESCRIPTION="EFFICIENCY: FP8 (E4M3) activation quality gate (fork bet). Flat 8L 512 fp16 bs=2 10k + --fp8-activations (per-token absmax E4M3 STE). vs flat g069 4.0872, plain int8 g070 4.0838. Fork bet: E4M3 floating exponent keeps fine near-zero resolution + tolerates outlier channels, so it should track fp16 into the anneal tail better than int8 on heavy-tailed acts. Counter: on Gaussian bulk, E4M3 has 3x int8 error (uniform levels denser in bulk) — so this hinges on whether real acts are outlier-heavy enough. Bar: <= plain int8 4.0838 → fp8 preferred (native torch._scaled_mm kernel path = more tractable real speedup than int8 custom kernel). ~4h."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
@@ -52,7 +52,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --latent-dtype float16 --scales-dtype float16 --mulaw-activations --mulaw-bits 8 --mulaw-mu 255}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --latent-dtype float16 --scales-dtype float16 --fp8-activations}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 
