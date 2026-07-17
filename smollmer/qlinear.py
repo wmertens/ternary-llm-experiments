@@ -514,16 +514,23 @@ class QLinear(nn.Linear):
                 s = fp8_max / absmax
                 xq = (x * s).to(torch.float8_e4m3fn).to(x.dtype) / s
             x = x + (xq - x).detach()
-        # Optional FP8 (E4M3) per-token activation quantization. E4M3's
-        # floating exponent keeps fine resolution near zero (unlike int8's
-        # uniform spacing) — better for the small activations that matter at
-        # low LR, and native on Ada+ tensor cores. Per-token absmax scales
-        # into E4M3's [-448, 448] range. STE, same as int8.
-        elif getattr(self, "fp8_activations", False):
+        # Optional mu-law companded per-token activation quant (user idea
+        # 2026-07-17): a 2^bits-level LUT with levels placed DENSER near zero
+        # via mu-law companding — the "gentle slope near 0" that uniform int8
+        # lacks and fp8's 3-bit mantissa only half-delivers. Compress
+        # u=x/absmax in [-1,1] -> uniform-quantize -> expand. STE.
+        elif getattr(self, "mulaw_activations", False):
+            mu = float(getattr(self, "mulaw_mu", 255.0))
+            bits = int(getattr(self, "mulaw_bits", 8))
+            Qp = float(2 ** (bits - 1) - 1)
+            lnmu = math.log1p(mu)
             with torch.no_grad():
                 absmax = x.abs().amax(dim=-1, keepdim=True).clamp_min(1e-5)
-                s = 448.0 / absmax
-                xq = (x * s).to(torch.float8_e4m3fn).to(x.dtype) / s
+                u = (x / absmax).clamp_(-1.0, 1.0)
+                c = torch.sign(u) * torch.log1p(mu * u.abs()) / lnmu       # compress
+                cq = (c * Qp).round().clamp_(-Qp, Qp) / Qp                 # quantize
+                uq = torch.sign(cq) * torch.expm1(cq.abs() * lnmu) / mu    # expand
+                xq = uq * absmax
             x = x + (xq - x).detach()
         # Five paths, picked by what's attached:
         #   mask_logits Parameter present               → GSQ PTQ

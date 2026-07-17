@@ -497,6 +497,18 @@ def build_argparser() -> argparse.ArgumentParser:
                          "exponent keeps fine resolution near zero, so small "
                          "activations (low-LR anneal) survive better. Native on "
                          "Ada+ FP8 tensor cores. Mutually exclusive with int8.")
+    ap.add_argument("--mulaw-activations", action="store_true", default=False,
+                    help="Per-token mu-law companded activation STE: a 2^bits "
+                         "LUT with levels denser near zero (vs uniform int8). "
+                         "Tunable near-0 resolution; the non-uniform middle "
+                         "ground between uniform int8 and fp8. Excl. int8/fp8.")
+    ap.add_argument("--mulaw-bits", type=int, default=8,
+                    help="Bit-width for --mulaw-activations (8 → 256 levels, "
+                         "4 → 16 levels). Non-uniform spacing matters most at "
+                         "low bit-widths.")
+    ap.add_argument("--mulaw-mu", type=float, default=255.0,
+                    help="mu-law companding strength (higher = denser near 0). "
+                         "255 is the telecom 8-bit standard.")
     ap.add_argument("--fp-weights", action="store_true", default=False,
                     help="FP-weights control: QLinear forward uses the raw "
                          "weight (no quantize, no STE, no per-group scales); "
@@ -786,17 +798,31 @@ def main() -> None:
                   f"{args.init_zero_frac:.2f}); fan-in scales on {n_s}",
                   flush=True)
 
-    # Enable int8/fp8 activation quantization on every QLinear if requested.
-    assert not (args.int8_activations and args.fp8_activations), (
-        "--int8-activations and --fp8-activations are mutually exclusive")
-    if args.int8_activations or args.fp8_activations:
-        attr = "int8_activations" if args.int8_activations else "fp8_activations"
+    # Enable int8/fp8/mu-law activation quantization on every QLinear if
+    # requested. At most one activation-quant scheme may be active.
+    _act_schemes = sum([args.int8_activations, args.fp8_activations,
+                        args.mulaw_activations])
+    assert _act_schemes <= 1, (
+        "--int8-activations / --fp8-activations / --mulaw-activations are "
+        "mutually exclusive")
+    if _act_schemes:
+        if args.int8_activations:
+            attr = "int8_activations"
+        elif args.fp8_activations:
+            attr = "fp8_activations"
+        else:
+            attr = "mulaw_activations"
         n = 0
         for m in model.modules():
             if isinstance(m, QLinear):
                 setattr(m, attr, True)
+                if attr == "mulaw_activations":
+                    m.mulaw_bits = args.mulaw_bits
+                    m.mulaw_mu = args.mulaw_mu
                 n += 1
-        print(f"[init] {attr} enabled on {n} QLinears", flush=True)
+        extra = (f" (bits={args.mulaw_bits}, mu={args.mulaw_mu})"
+                 if attr == "mulaw_activations" else "")
+        print(f"[init] {attr} enabled on {n} QLinears{extra}", flush=True)
 
     # ---- BitNet-style computed scale (no learnable scale tensor) ----
     if args.computed_scale != "off":
