@@ -29,9 +29,9 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="074"
-RUN_TAG="fp8act-bs2-fp16-10k"
-DESCRIPTION="EFFICIENCY: FP8 (E4M3) activation quality gate (fork bet). Flat 8L 512 fp16 bs=2 10k + --fp8-activations (per-token absmax E4M3 STE). vs flat g069 4.0872, plain int8 g070 4.0838. Fork bet: E4M3 floating exponent keeps fine near-zero resolution + tolerates outlier channels, so it should track fp16 into the anneal tail better than int8 on heavy-tailed acts. Counter: on Gaussian bulk, E4M3 has 3x int8 error (uniform levels denser in bulk) — so this hinges on whether real acts are outlier-heavy enough. Bar: <= plain int8 4.0838 → fp8 preferred (native torch._scaled_mm kernel path = more tractable real speedup than int8 custom kernel). ~4h."
+RUN_N="075"
+RUN_TAG="compile-flat-bs2-10k"
+DESCRIPTION="EFFICIENCY: torch.compile FULL 10k quality+speed A/B (settles g072 cliffhanger). Flat 8L 512 fp16 bs=2 10k + --compile, matched to eager g069 4.0872. Q1 QUALITY: is final val neutral vs 4.0872? (g072 600-step probe showed erratic train-loss drift up to +0.25 — chaotic FP-reorder from inductor fusion, or a real regression?). Q2 SPEED: clock-normalized tok/s/GHz (g072 raw 1.23-1.5x was NOT clock-normalized; the 1.1-1.8GHz swing could be most of it). If val neutral AND tok/s/GHz clearly up → compile is a FREE ~1.3x wall-clock win, adopt for all runs. If val regresses → compile stays off for quality A/Bs. Launched inside nix shell nixpkgs#gcc (inductor C compiler)."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
@@ -52,7 +52,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --latent-dtype float16 --scales-dtype float16 --fp8-activations}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --latent-dtype float16 --scales-dtype float16 --compile}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 
