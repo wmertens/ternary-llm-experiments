@@ -29,13 +29,9 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="072"
-RUN_TAG="compile-quick-flat"
-DESCRIPTION="EFFICIENCY LEVER: torch.compile tok/s A/B (SHORT, not a full run). Flat 8L 512 fp16 bs=2 + --compile, 600 steps. Measures steady-state tok/s vs the known flat-EAGER baseline g069 = 12827 tok/s (same recipe, no compile). Also verifies: loss descends normally (no NaN/graph-break divergence) + end interrupted.pt has NO _orig_mod. keys (resume-compat). Bar: >~1.15x tok/s (>~14.7k) with sane loss → adopt --compile as a permanent free speedup for all future runs. ~25min."
-# g072-quick overrides: short run for tok/s measurement
-TOTAL_STEPS=600
-VAL_EVERY=300
-CHECKPOINT_EVERY=300
+RUN_N="073"
+RUN_TAG="mulaw8-bs2-fp16-10k"
+DESCRIPTION="EFFICIENCY LEVER (user idea 2026-07-17): mu-law companded int8 activations — 256-level LUT with levels DENSER near zero (the 'gentle slope near 0'). Flat 8L 512 fp16 bs=2 10k + --mulaw-activations --mulaw-bits 8 --mulaw-mu 255. EAGER (no --compile: g072 showed compile diverges from eager by up to +0.25 train loss by step 600 — chaotic FP-reorder, quality-neutrality UNVERIFIED — so keep this A/B clean vs the eager g070/g069 controls). Direct A/B vs g070 int8-UNIFORM (4.0838) and flat g069 (4.0872): does non-uniform near-0 spacing beat uniform int8? EXPECTATION: int8 already saturated (g070 = quality-free), so likely ~parity — real leverage of non-uniform quant is at int4 (queued follow-up). Verified: mu-law gives ~10x finer near-0 resolution than uniform int8 under outliers. ~8h."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
@@ -56,7 +52,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --latent-dtype float16 --scales-dtype float16 --compile}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --latent-dtype float16 --scales-dtype float16 --mulaw-activations --mulaw-bits 8 --mulaw-mu 255}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 
