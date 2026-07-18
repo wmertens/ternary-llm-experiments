@@ -29,9 +29,9 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="076"
-RUN_TAG="compile-champion-bs4-20k"
-DESCRIPTION="DEFINITIVE CHAMPION w/ all corrections + compile. Flat 8L 512 bs=4 20k, fp16 latents + fp16 SCALES (g048/g051 champions predate fp16-scales; this is the first full-corrected-recipe champion) + --compile (validated 1.28x free speedup, g075). Compare final val to g048 3.7272 (bs4 20k fp32-scales) and best g051 3.7030 (bs4 30k fp32-scales). Also validates compile at bs=4 (champion batch; g075 was bs=2). If OOM at bs4+compile on 6GB, fall back bs=2. Launched in nix shell nixpkgs#gcc."
+RUN_N="077"
+RUN_TAG="champion-fp32scales-compile-bs4-20k"
+DESCRIPTION="CORRECTED DEFINITIVE CHAMPION: bs4 20k, fp16-latents + fp32-SCALES (reverted after g076 showed fp16-scales costs +0.068 in deep anneal) + --compile (1.28x, neutral). Should recover g076s +0.068 and match g048 3.7272 at 1.28x speed — validating both the fp32-scales fix AND compile-neutral-at-bs4 through the full deep anneal. If it lands ~3.727 the final recommended recipe (fp32 scales + compile) is LOCKED. Champion refs: g048 3.7272 (20k), g051 3.7030 (30k best). nix shell nixpkgs#gcc."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
