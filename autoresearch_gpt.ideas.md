@@ -408,3 +408,8 @@ Key principle: **once you per-token-absmax-normalize, you want uniform levels (i
 ## torch.compile — WIN, ADOPTED 2026-07-18 (g075 vs g069)
 
 torch.compile full 10k: val 4.0814 vs eager 4.0872 = **quality-neutral** (tracked within +/-0.01 the whole run incl anneal tail; the g072 +0.25 TRAIN drift was data-order noise, not a val regression). Clock-normalized speed: 15052 tok/s/GHz (compile) vs 11765 (flat eager) = **1.28x free speedup**. ADOPT --compile for all long runs. Launch requirement: `nix shell nixpkgs#gcc` (inductor C compiler) + TRITON_LIBCUDA_PATH=/run/opengl-driver/lib (both wired). Cost: ~1-2min warmup, trivially amortized. This is the single best efficiency lever found — a real immediate 1.28x, vs int8 which needs a custom kernel to realize its win.
+
+
+## fp16-SCALES DEEP-ANNEAL PENALTY 2026-07-18 (g076 vs g048) — REVERT TO fp32 SCALES
+
+g076 (bs4 20k, fp16 scales + compile) = 3.7952 vs g048 (same, fp32 scales, eager) = 3.7272 = **+0.068**. The gap BALLOONED in the deepest anneal (+0.030@18k -> +0.068@20k) — fp16 scales limit fine convergence at the lowest LR, EXACTLY like the bf16-latent penalty. The g055 5k probe (+0.011) under-reported it ~6x. Scales are a NEGLIGIBLE param fraction (~2k scales vs 262k trits/matrix at gs=128), so fp16-scales saved ~no memory. **VERDICT: fp32 scales for all quality/long runs; fp16-scales only for <10k probes.** Reverted --scales-dtype to fp32 default in the harness. Parallels bf16-latents: any low-precision storage on a quantity that must converge finely in the deep anneal pays a compounding tail penalty.
