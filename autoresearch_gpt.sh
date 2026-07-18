@@ -30,15 +30,15 @@ source .venv/bin/activate
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
 RUN_N="076"
-RUN_TAG="eager-probe-bs2"
-DESCRIPTION="EFFICIENCY: torch.compile FULL 10k quality+speed A/B (settles g072 cliffhanger). Flat 8L 512 fp16 bs=2 10k + --compile, matched to eager g069 4.0872. Q1 QUALITY: is final val neutral vs 4.0872? (g072 600-step probe showed erratic train-loss drift up to +0.25 — chaotic FP-reorder from inductor fusion, or a real regression?). Q2 SPEED: clock-normalized tok/s/GHz (g072 raw 1.23-1.5x was NOT clock-normalized; the 1.1-1.8GHz swing could be most of it). If val neutral AND tok/s/GHz clearly up → compile is a FREE ~1.3x wall-clock win, adopt for all runs. If val regresses → compile stays off for quality A/Bs. Launched inside nix shell nixpkgs#gcc (inductor C compiler)."
+RUN_TAG="compile-champion-bs4-20k"
+DESCRIPTION="DEFINITIVE CHAMPION w/ all corrections + compile. Flat 8L 512 bs=4 20k, fp16 latents + fp16 SCALES (g048/g051 champions predate fp16-scales; this is the first full-corrected-recipe champion) + --compile (validated 1.28x free speedup, g075). Compare final val to g048 3.7272 (bs4 20k fp32-scales) and best g051 3.7030 (bs4 30k fp32-scales). Also validates compile at bs=4 (champion batch; g075 was bs=2). If OOM at bs4+compile on 6GB, fall back bs=2. Launched in nix shell nixpkgs#gcc."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
 
 # Defaults: fast-A scale (38M ternary). Override per experiment as needed.
-TOTAL_STEPS="${TOTAL_STEPS:-10000}"
-BATCH_SIZE="${BATCH_SIZE:-2}"
+TOTAL_STEPS="${TOTAL_STEPS:-20000}"
+BATCH_SIZE="${BATCH_SIZE:-4}"
 GRAD_ACCUM="${GRAD_ACCUM:-16}"
 HIDDEN_SIZE="${HIDDEN_SIZE:-512}"
 NUM_HEADS="${NUM_HEADS:-8}"
@@ -52,7 +52,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --latent-dtype float16 --scales-dtype float16}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --latent-dtype float16 --scales-dtype float16 --compile}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 
