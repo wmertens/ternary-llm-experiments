@@ -403,3 +403,8 @@ Ranking: plain int8 4.0838 (WINNER, = flat 4.0872 within noise) > mu-law int8 4.
 - fp8 E4M3 (+0.022, worst; gap widens in anneal): per-token absmax already normalizes range → exponent bits wasted, coarse 3-bit mantissa hurts everywhere. FP8 only wins when you can't pre-normalize (per-tensor/outlier regimes).
 
 Key principle: **once you per-token-absmax-normalize, you want uniform levels (int8), not floating-point.** This likely holds at scale too, so int8 is the activation format to carry forward.
+
+
+## torch.compile — WIN, ADOPTED 2026-07-18 (g075 vs g069)
+
+torch.compile full 10k: val 4.0814 vs eager 4.0872 = **quality-neutral** (tracked within +/-0.01 the whole run incl anneal tail; the g072 +0.25 TRAIN drift was data-order noise, not a val regression). Clock-normalized speed: 15052 tok/s/GHz (compile) vs 11765 (flat eager) = **1.28x free speedup**. ADOPT --compile for all long runs. Launch requirement: `nix shell nixpkgs#gcc` (inductor C compiler) + TRITON_LIBCUDA_PATH=/run/opengl-driver/lib (both wired). Cost: ~1-2min warmup, trivially amortized. This is the single best efficiency lever found — a real immediate 1.28x, vs int8 which needs a custom kernel to realize its win.
