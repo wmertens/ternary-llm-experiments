@@ -29,9 +29,9 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="077"
-RUN_TAG="champion-fp32scales-compile-bs4-20k"
-DESCRIPTION="CORRECTED DEFINITIVE CHAMPION: bs4 20k, fp16-latents + fp32-SCALES (reverted after g076 showed fp16-scales costs +0.068 in deep anneal) + --compile (1.28x, neutral). Should recover g076s +0.068 and match g048 3.7272 at 1.28x speed — validating both the fp32-scales fix AND compile-neutral-at-bs4 through the full deep anneal. If it lands ~3.727 the final recommended recipe (fp32 scales + compile) is LOCKED. Champion refs: g048 3.7272 (20k), g051 3.7030 (30k best). nix shell nixpkgs#gcc."
+RUN_N="078"
+RUN_TAG="eager-control-bs4-20k"
+DESCRIPTION="ISOLATION CONTROL: bs4 20k EAGER (no compile), fp32 scales, current pipeline. Linchpin separating the +0.06 deep-anneal balloon: g078 vs g077 (=+compile) isolates COMPILE; g078 vs g048 3.7272 (same config, older vintage) isolates DATA-PIPELINE-DRIFT (shuffle_buffer + resume changes I added since g048). Outcomes: g078~3.727 -> compile is the +0.06 deep-anneal cost (do NOT adopt compile for long/20k runs, only short probes); g078~3.79 -> data-drift, compile innocent. Either way resolves whether compile is a free 1.3x for CHAMPION runs."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
@@ -52,7 +52,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --latent-dtype float16 --compile}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --latent-dtype float16}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 

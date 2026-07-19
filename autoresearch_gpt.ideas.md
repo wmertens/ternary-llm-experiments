@@ -413,3 +413,10 @@ torch.compile full 10k: val 4.0814 vs eager 4.0872 = **quality-neutral** (tracke
 ## fp16-SCALES DEEP-ANNEAL PENALTY 2026-07-18 (g076 vs g048) — REVERT TO fp32 SCALES
 
 g076 (bs4 20k, fp16 scales + compile) = 3.7952 vs g048 (same, fp32 scales, eager) = 3.7272 = **+0.068**. The gap BALLOONED in the deepest anneal (+0.030@18k -> +0.068@20k) — fp16 scales limit fine convergence at the lowest LR, EXACTLY like the bf16-latent penalty. The g055 5k probe (+0.011) under-reported it ~6x. Scales are a NEGLIGIBLE param fraction (~2k scales vs 262k trits/matrix at gs=128), so fp16-scales saved ~no memory. **VERDICT: fp32 scales for all quality/long runs; fp16-scales only for <10k probes.** Reverted --scales-dtype to fp32 default in the harness. Parallels bf16-latents: any low-precision storage on a quantity that must converge finely in the deep anneal pays a compounding tail penalty.
+
+
+## CORRECTION 2026-07-19: fp16 SCALES ARE FINE — earlier fp16-scales finding RETRACTED
+
+g077 (fp32 scales + compile) = 3.7927 ≡ g076 (fp16 scales + compile) 3.7952. fp16 vs fp32 scales make NO quality difference (tracked within +/-0.005 the whole run, INCLUDING the deep-anneal balloon) AND no speed difference (median 17166 vs 17240 tok/s/GHz; the earlier '1.8x slower' was a single high-clock reading, not the median). RETRACT the g076 fp16-scales-deep-anneal-penalty claim — it was a misattribution. The sub-ulp fp16-scale-update analysis is real BUT harmless: frozen fp16 scales in the anneal land at the same loss as fp32 scales that keep updating, so the scales simply don't NEED fine updates in the deep anneal. User's LR-floor fix is therefore moot (correct reasoning, non-existent problem). fp16 scales remain the default.
+
+**REAL OPEN QUESTION:** both compile-bs4-20k runs (g076,g077) balloon +0.06 vs g048 3.7272 in the deep anneal (18k->20k), but g075 showed compile NEUTRAL at bs2/10k. Cause is COMPILE (deep-anneal FP-reorder cost that only shows at 20k depth) or DATA-DRIFT (shuffle_buffer+resume changes since g048). g078 = bs4 20k EAGER control isolates it. If compile: adopt only for short probes, NOT champion runs.
