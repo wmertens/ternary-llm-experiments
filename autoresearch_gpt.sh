@@ -29,9 +29,9 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="078"
-RUN_TAG="eager-control-bs4-20k"
-DESCRIPTION="ISOLATION CONTROL: bs4 20k EAGER (no compile), fp32 scales, current pipeline. Linchpin separating the +0.06 deep-anneal balloon: g078 vs g077 (=+compile) isolates COMPILE; g078 vs g048 3.7272 (same config, older vintage) isolates DATA-PIPELINE-DRIFT (shuffle_buffer + resume changes I added since g048). Outcomes: g078~3.727 -> compile is the +0.06 deep-anneal cost (do NOT adopt compile for long/20k runs, only short probes); g078~3.79 -> data-drift, compile innocent. Either way resolves whether compile is a free 1.3x for CHAMPION runs."
+RUN_N="079"
+RUN_TAG="shufbuf0-compile-bs4-20k"
+DESCRIPTION="RECOVER CHAMPION test: bs4 20k, --shuffle-buffer 0 (original stratified shard order, matches g048 pre-3b3bc5c) + --compile (neutral, faster) + fp32 scales. Tests the hypothesis that the shard-order shuffle (default 1000, added since g048) breaks teacher-cache stratification and costs +0.055 at deep anneal. vs g077/g078 (shuffle_buffer=1000) 3.79 and g048 (no shuffle) 3.7272. If g079~3.73 -> shuffle_buffer IS the regression (set 0 for champion runs; keep >0 only for resume-thrash cases); if ~3.79 -> not shuffle_buffer (deep-anneal variance or other drift). nix shell nixpkgs#gcc."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
@@ -52,7 +52,7 @@ VAL_EVERY="${VAL_EVERY:-500}"
 CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-500}"
 EMA_WARMUP="${EMA_WARMUP:-200}"
 # Extra flags as a single whitespace-separated string. Baseline recipe:
-EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --init-zero-frac 0.90 --latent-dtype float16}"
+EXTRA_FLAGS_STRING="${EXTRA_FLAGS_STRING:---ste-trits --c-muon --muon-lr 0.15 --muon-lr-floor 0.015 --muon-ns-steps 4 --cmuon-state-dtype bfloat16 --trit-embeddings --scale-group-size 128 --shuffle-buffer 0 --init-zero-frac 0.90 --latent-dtype float16 --compile}"
 
 mkdir -p "$OUT_DIR" tb_gpt experiments_gpt
 

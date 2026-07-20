@@ -561,6 +561,12 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--ema-warmup", type=int, default=500)
     ap.add_argument("--checkpoint-every", type=int, default=1000)
     ap.add_argument("--num-workers", type=int, default=1)
+    ap.add_argument("--shuffle-buffer", type=int, default=1000,
+                    help="Shard-order shuffle buffer for the train stream "
+                         "(hrm_data). 0 = original stratified shard order "
+                         "(matches pre-3b3bc5c / g048); >0 permutes shard "
+                         "order (added for fresh-stream resume). Suspected to "
+                         "break teacher-cache stratification at deep anneal.")
     ap.add_argument("--device",
                     default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--autocast-dtype", default="bfloat16",
@@ -1178,6 +1184,7 @@ def main() -> None:
         tok, seq_len=args.max_position_embeddings,
         batch_size=args.batch_size, seed=data_seed,
         num_workers=args.num_workers, start_skip=data_start_skip,
+        shuffle_buffer=args.shuffle_buffer,
         components=train_components)
     print(f"[data] train mix at seq={args.max_position_embeddings} "
           f"bs={args.batch_size} workers={args.num_workers}: {mix_desc}",
