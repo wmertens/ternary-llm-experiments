@@ -420,3 +420,22 @@ g076 (bs4 20k, fp16 scales + compile) = 3.7952 vs g048 (same, fp32 scales, eager
 g077 (fp32 scales + compile) = 3.7927 ≡ g076 (fp16 scales + compile) 3.7952. fp16 vs fp32 scales make NO quality difference (tracked within +/-0.005 the whole run, INCLUDING the deep-anneal balloon) AND no speed difference (median 17166 vs 17240 tok/s/GHz; the earlier '1.8x slower' was a single high-clock reading, not the median). RETRACT the g076 fp16-scales-deep-anneal-penalty claim — it was a misattribution. The sub-ulp fp16-scale-update analysis is real BUT harmless: frozen fp16 scales in the anneal land at the same loss as fp32 scales that keep updating, so the scales simply don't NEED fine updates in the deep anneal. User's LR-floor fix is therefore moot (correct reasoning, non-existent problem). fp16 scales remain the default.
 
 **REAL OPEN QUESTION:** both compile-bs4-20k runs (g076,g077) balloon +0.06 vs g048 3.7272 in the deep anneal (18k->20k), but g075 showed compile NEUTRAL at bs2/10k. Cause is COMPILE (deep-anneal FP-reorder cost that only shows at 20k depth) or DATA-DRIFT (shuffle_buffer+resume changes since g048). g078 = bs4 20k EAGER control isolates it. If compile: adopt only for short probes, NOT champion runs.
+
+
+## SESSION SUMMARY 2026-07-21 — efficiency sweep + champion-reproducibility investigation CLOSED
+
+### Efficiency wins (all validated, ADOPTED):
+- **torch.compile = free ~1.3x speedup** (17.2k vs 11.8k tok/s/GHz), quality-NEUTRAL even at bs4/20k (g078 eager 3.7826 ≈ g077 compile 3.7927). Launch needs `nix shell nixpkgs#gcc` + TRITON_LIBCUDA_PATH. ADOPT for long runs.
+- **int8 activations = quality-neutral** (g070 ≈ flat); real int8×ternary kernel deferred to scale-up.
+- **fp16 scales = free** (no quality OR speed diff vs fp32; g076≡g077). Keep fp16.
+- Clock-normalized throughput metric (tok/s/GHz) added — GPU clock swings 1.1-1.8GHz made raw tok/s meaningless.
+
+### Rejected:
+- fp8/E4M3 activations (worst, +0.022; per-token absmax makes exponent moot).
+- mu-law companded int8 (no gain over plain int8).
+- fp16-scales-penalty claim (RETRACTED — was a misattribution).
+
+### Champion-reproducibility puzzle — CLOSED as "not a code bug":
+4 current-pipeline bs4/20k runs (g076/g077/g078/g079) cluster 3.783-3.795; g048 (older) = 3.7272 = -0.055. Ruled OUT: compile, scales dtype, shuffle_buffer — all neutral; train mix identical; no data-mix code changes. Low variance among current runs → systematic, most likely DATA VINTAGE (g048's underlying HF dataset content no longer reproducible), not fixable via code. OPEN QUESTION FOR USER: is it worth chasing g048's 3.727 (would need the old data snapshot, if it exists), or accept ~3.79 as the current-data champion and move to scale-up? If the training dataset was re-versioned/corrupted since g048, restoring the old snapshot could recover +0.055.
+
+### Env note: overnight system rebuild GC'd uv + its python 3.12; restored via `nix shell nixpkgs#uv` -> uv python install 3.12 -> uv sync (torch 2.11.0+cu130, same version).
