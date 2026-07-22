@@ -29,15 +29,15 @@ source .venv/bin/activate
 
 # ---- Per-experiment config (EDITED BY HARNESS) -------------------------------
 # Always advance RUN_N + RUN_TAG for each new experiment.
-RUN_N="080"
-RUN_TAG="champion30k-fp16scales-compile-bs4"
-DESCRIPTION="CHAMPION with validated efficient recipe: bs4 30k, fp16 latents + fp16 scales + compile (all this-session wins: compile free 1.3x, fp16 scales free). Targets the best CURRENT-DATA champion (vs g051 old-data best 3.7030, g048 old-data 3.7272; current-data bs4/20k reproducibly ~3.79). Extra 10k steps via compile speed. If ~3.75 that is the current-data 30k champion. NOTE per investigation: g048/g051s better numbers are likely OLD DATA VINTAGE, not reproducible via code. nix shell nixpkgs#gcc."
+RUN_N="081"
+RUN_TAG="champion40k-fp16scales-compile-bs4"
+DESCRIPTION="COMPUTE-SCALING probe: bs4 40k, fp16 latents + fp16 scales + compile (same efficient recipe as g080). Q: does more compute keep improving the current-data champion? g080 (30k)=3.7468 beat 20k (~3.79) by -0.043; does 40k beat 30k or has it saturated? vs old-data g051 (30k) 3.7030. Fork-independent continuation of the champion thread. nix shell nixpkgs#gcc."
 
 RUN_NAME="g${RUN_N}-${RUN_TAG}"
 OUT_DIR="experiments_gpt/${RUN_NAME}"
 
 # Defaults: fast-A scale (38M ternary). Override per experiment as needed.
-TOTAL_STEPS="${TOTAL_STEPS:-30000}"
+TOTAL_STEPS="${TOTAL_STEPS:-40000}"
 BATCH_SIZE="${BATCH_SIZE:-4}"
 GRAD_ACCUM="${GRAD_ACCUM:-16}"
 HIDDEN_SIZE="${HIDDEN_SIZE:-512}"
